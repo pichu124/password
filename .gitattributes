@@ -1,0 +1,5 @@
+# Giữ LF trên mọi hệ điều hành (Windows checkout không được đổi sang CRLF):
+# file danh sách từ EFF được kiểm tra bằng SHA-256 nên phải giữ nguyên từng byte.
+* text=auto eol=lf
+*.txt text eol=lf
+*.pwv binary

@@ -15,7 +15,7 @@ pwv-generator = { path = "../generator" }
 pwv-vault-core = { path = "../vault-core" }
 clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
-arboard = "3"
+arboard = { version = "3", default-features = false }
 zeroize.workspace = true
 serde.workspace = true
 serde_json.workspace = true
