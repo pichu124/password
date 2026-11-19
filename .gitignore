@@ -2,3 +2,4 @@
 *.pwv
 *.pwv.backups/
 *.tmp
+__pycache__/
