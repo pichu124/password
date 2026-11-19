@@ -281,6 +281,28 @@ impl Vault {
         fsutil::conflict_copies(&self.path)
     }
 
+    /// Gộp mọi bản xung đột của Google Drive vào kho rồi chuyển chúng vào thư mục sao lưu.
+    /// Bản không mở được (kho khác, hỏng) được giữ nguyên và báo lỗi trong kết quả.
+    /// Gọi [`Vault::save`] sau đó nếu có gì được gộp.
+    pub fn merge_conflict_copies(&mut self) -> Vec<(PathBuf, Result<MergeStats>)> {
+        let mut out = Vec::new();
+        for c in self.conflict_copies() {
+            let r = self.merge_file(&c).and_then(|stats| {
+                let dir = fsutil::backup_dir(&self.path);
+                fs::create_dir_all(&dir)?;
+                let name = format!(
+                    "merged-{}-{}",
+                    now_ms(),
+                    c.file_name().unwrap_or_default().to_string_lossy()
+                );
+                fs::rename(&c, dir.join(name))?;
+                Ok(stats)
+            });
+            out.push((c, r));
+        }
+        out
+    }
+
     /// File trên đĩa có bị thay đổi (bởi máy khác) kể từ lần đọc/ghi gần nhất không?
     pub fn changed_on_disk(&self) -> Result<bool> {
         match fs::read(&self.path) {

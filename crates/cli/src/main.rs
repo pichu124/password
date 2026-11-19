@@ -9,10 +9,8 @@ use clap::{Args, Parser, Subcommand};
 use pwv_generator::{
     estimate_strength, generate_passphrase, generate_password, PassphraseOptions, PasswordOptions,
 };
-use pwv_vault_core::{Entry, KdfParams, SaveReport, Totp, Vault};
+use pwv_vault_core::{Config, Entry, KdfParams, SaveReport, Totp, Vault};
 use zeroize::Zeroizing;
-
-const CLIPBOARD_CLEAR_SECS: u64 = 20;
 
 #[derive(Parser)]
 #[command(
@@ -376,18 +374,15 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
                     s.added, s.updated, s.deleted
                 );
             }
-            for c in v.conflict_copies() {
-                match v.merge_file(&c) {
-                    Ok(s) => {
-                        println!(
-                            "Gộp bản xung đột {}: +{} mới, {} cập nhật, {} xoá.",
-                            c.display(),
-                            s.added,
-                            s.updated,
-                            s.deleted
-                        );
-                        archive_conflict(&c, v.path())?;
-                    }
+            for (c, r) in v.merge_conflict_copies() {
+                match r {
+                    Ok(s) => println!(
+                        "Gộp bản xung đột {}: +{} mới, {} cập nhật, {} xoá.",
+                        c.display(),
+                        s.added,
+                        s.updated,
+                        s.deleted
+                    ),
                     Err(e) => eprintln!("Bỏ qua {}: {e}", c.display()),
                 }
             }
@@ -520,41 +515,14 @@ fn init(path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Ưu tiên thư mục Google Drive for Desktop (bản tiếng Anh "My Drive" hoặc tiếng Việt "Drive của tôi").
 fn suggest_vault_location() -> PathBuf {
-    if cfg!(windows) {
-        for letter in b'D'..=b'Z' {
-            for name in ["My Drive", "Drive của tôi"] {
-                let dir = PathBuf::from(format!("{}:\\{name}", letter as char));
-                if dir.is_dir() {
-                    return dir.join("Passwords").join("vault.pwv");
-                }
-            }
-        }
-    }
-    dirs::document_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("vault.pwv")
-}
-
-fn config_file() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .ok_or_else(|| anyhow!("không tìm thấy thư mục cấu hình"))?
-        .join("pwv")
-        .join("config.json"))
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Config {
-    vault: PathBuf,
+    pwv_vault_core::config::suggest_vault_location()
 }
 
 fn write_config(vault: &Path) -> Result<()> {
-    let f = config_file()?;
-    std::fs::create_dir_all(f.parent().unwrap())?;
-    let abs = std::path::absolute(vault).unwrap_or_else(|_| vault.to_path_buf());
-    std::fs::write(&f, serde_json::to_vec_pretty(&Config { vault: abs })?)?;
-    Ok(())
+    Config::load()
+        .set_vault(vault)
+        .context("không ghi được file cấu hình")
 }
 
 fn config_cmd(path: Option<PathBuf>) -> Result<()> {
@@ -563,20 +531,23 @@ fn config_cmd(path: Option<PathBuf>) -> Result<()> {
             write_config(&p)?;
             println!("Kho mặc định: {}", p.display());
         }
-        None => match read_config() {
-            Some(c) => println!("Kho mặc định: {}", c.vault.display()),
-            None => println!("Chưa cấu hình. Chạy `pwv init` hoặc `pwv config <đường-dẫn>`."),
-        },
+        None => {
+            let c = Config::load();
+            match &c.vault {
+                Some(v) => println!("Kho mặc định: {}", v.display()),
+                None => println!("Chưa cấu hình. Chạy `pwv init` hoặc `pwv config <đường-dẫn>`."),
+            }
+            println!(
+                "Tự khoá (app): {} phút · Xoá clipboard: {} giây",
+                c.auto_lock_minutes, c.clipboard_clear_secs
+            );
+        }
     }
     Ok(())
 }
 
-fn read_config() -> Option<Config> {
-    serde_json::from_slice(&std::fs::read(config_file().ok()?).ok()?).ok()
-}
-
 fn vault_path(flag: Option<PathBuf>) -> Result<PathBuf> {
-    flag.or_else(|| read_config().map(|c| c.vault))
+    flag.or_else(|| Config::load().vault)
         .ok_or_else(|| anyhow!("chưa có kho. Chạy `pwv init` trước."))
 }
 
@@ -649,18 +620,6 @@ fn resolve<'a>(v: &'a Vault, target: &str) -> Result<&'a Entry> {
     }
 }
 
-fn archive_conflict(conflict: &Path, vault: &Path) -> Result<()> {
-    let dir = pwv_vault_core::fsutil::backup_dir(vault);
-    std::fs::create_dir_all(&dir)?;
-    let name = format!(
-        "merged-{}-{}",
-        pwv_vault_core::model::now_ms(),
-        conflict.file_name().unwrap().to_string_lossy()
-    );
-    std::fs::rename(conflict, dir.join(name))?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Nhập liệu
 
@@ -719,10 +678,9 @@ fn truncate(s: &str, n: usize) -> String {
 fn copy_to_clipboard(value: &str) -> Result<()> {
     let mut cb = arboard::Clipboard::new().context("không mở được clipboard")?;
     set_clipboard(&mut cb, value)?;
-    eprintln!(
-        "Đã sao chép. Clipboard sẽ tự xoá sau {CLIPBOARD_CLEAR_SECS} giây (Ctrl+C để xoá ngay)..."
-    );
-    for remaining in (1..=CLIPBOARD_CLEAR_SECS).rev() {
+    let secs = u64::from(Config::load().clipboard_clear_secs.clamp(5, 300));
+    eprintln!("Đã sao chép. Clipboard sẽ tự xoá sau {secs} giây (Ctrl+C để xoá ngay)...");
+    for remaining in (1..=secs).rev() {
         eprint!("\r  còn {remaining:>2}s ");
         io::stderr().flush().ok();
         std::thread::sleep(Duration::from_secs(1));

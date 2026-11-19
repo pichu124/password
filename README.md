@@ -19,14 +19,33 @@ Kế hoạch tổng thể: [PLAN.md](PLAN.md) · Đặc tả file: [docs/FORMAT.
 | 2. Lõi kho (mã hoá, đồng bộ, sao lưu) | ✅ |
 | 3. CLI `pwv.exe` | ✅ |
 | 3b. Mã 2FA (TOTP), kiểm tra sức khoẻ + HIBP, import CSV | ✅ |
-| 4. App giao diện Windows (Tauri) | ⏳ đang làm |
+| 4. App giao diện Windows (Tauri) — bộ cài `.exe` / `.msi` | ✅ |
+| 6. Gia cố: fuzz test, khoá RAM chứa khoá giải mã | ✅ |
 
 ## Cài đặt trên Windows
 
-**Cách 1 — tải bản build sẵn:** vào tab *Actions* của repo → lần chạy mới nhất →
+### App có giao diện (khuyên dùng)
+Vào tab *Actions* của repo → lần chạy mới nhất có dấu ✓ → tải artifact **`pwv-app-windows-installer`**
+→ giải nén → chạy `pwv_x.y.z_x64-setup.exe` (cài cho riêng tài khoản của bạn, không cần quyền admin).
+
+Windows có thể hiện cảnh báo SmartScreen vì bộ cài chưa được ký số: bấm **More info → Run anyway**.
+
+Tính năng của app:
+- Tạo kho mới (tự gợi ý thư mục Google Drive) hoặc mở kho có sẵn từ máy khác.
+- Danh sách + tìm kiếm (Ctrl+F), thêm (Ctrl+N), khoá (Ctrl+L), yêu thích, nhóm/tag.
+- Bộ tạo mật khẩu / cụm từ, thanh độ mạnh, lịch sử mật khẩu cũ.
+- Mã 2FA (TOTP) đếm ngược theo thời gian thực.
+- Kiểm tra sức khoẻ mật khẩu + rò rỉ (Have I Been Pwned), nhập CSV từ Chrome/Bitwarden/KeePass.
+- Tự khoá khi không dùng (mặc định 5 phút), tự xoá clipboard (20 giây), tự đồng bộ với Google Drive mỗi 20 giây.
+- Bảo mật: mật khẩu được sao chép trực tiếp từ Rust, không đi qua phần giao diện web; cửa sổ chặn chụp/chia sẻ
+  màn hình; chỉ cho chạy một cửa sổ app để tránh hai tiến trình cùng ghi file.
+
+### Công cụ dòng lệnh `pwv.exe`
+
+**Tải bản build sẵn:** vào tab *Actions* của repo → lần chạy mới nhất →
 tải artifact `pwv-windows` → giải nén `pwv.exe` vào một thư mục, ví dụ `C:\Tools\`.
 
-**Cách 2 — tự build:**
+**Tự build:**
 1. Cài Rust: <https://rustup.rs> (chọn mặc định, cần “Visual Studio C++ Build Tools”).
 2. Trong PowerShell:
    ```powershell
@@ -95,6 +114,21 @@ Các bản sao lưu tự động nằm trong `vault.pwv.backups\` (10 bản gầ
 ## Phát triển
 
 ```bash
-cargo test --workspace
+cargo test --workspace                          # lõi + CLI
 cargo clippy --workspace --all-targets -- -D warnings
+cd app && npm ci && npm run build               # giao diện
+cd src-tauri && cargo test                      # backend của app
+cd .. && npx tauri dev                          # chạy app ở chế độ phát triển
+npx vite --mode mock                            # xem giao diện trong trình duyệt với dữ liệu giả
+                                                # (mật khẩu demo: demo-demo-demo-demo)
+```
+
+Cấu trúc:
+```
+crates/generator   tạo mật khẩu, passphrase EFF, zxcvbn
+crates/vault-core  mật mã, định dạng file, đồng bộ, TOTP, import CSV, cấu hình
+crates/health      kiểm tra yếu/trùng/cũ + Have I Been Pwned
+crates/cli         pwv.exe
+app/               app Tauri 2 (src-tauri = Rust, src = React/TypeScript)
+tools/             công cụ cứu hộ Python độc lập
 ```

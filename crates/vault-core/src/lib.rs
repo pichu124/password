@@ -7,6 +7,7 @@
 //! vault_key ─XChaCha20-Poly1305─► toàn bộ dữ liệu kho (header làm AAD, đệm 4 KiB)
 //! ```
 
+pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod format;
@@ -17,6 +18,7 @@ pub mod model;
 pub mod totp;
 mod vault;
 
+pub use config::Config;
 pub use crypto::KdfParams;
 pub use error::{Error, Result};
 pub use model::{Entry, HistoryItem, MergeStats, VaultData};
