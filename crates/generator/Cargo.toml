@@ -1,0 +1,17 @@
+[package]
+name = "pwv-generator"
+description = "Bộ tạo mật khẩu và passphrase an toàn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rand.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+zxcvbn = "3"
+
+[dev-dependencies]
+sha2 = "0.10"

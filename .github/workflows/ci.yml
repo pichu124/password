@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Build release
+        run: cargo build --release -p pwv-cli
+
+      - name: Cross-check format with independent Python decryptor
+        shell: bash
+        run: |
+          pip install pynacl argon2-cffi
+          cargo run -q -p pwv-vault-core --example make_fixture -- fixture.pwv "pässwörd"
+          python -I -c "
+          import sys; sys.path.insert(0, 'tools')
+          from pwv_recover import decrypt_vault
+          d = decrypt_vault(open('fixture.pwv','rb').read(), 'pässwörd'.encode())
+          e = d['entries'][0]
+          assert e['title'] == 'Ngân hàng Việt', e
+          assert e['password'] == 'đổi lần 2', e
+          assert e['password_history'][0]['password'] == 'Mật-khẩu-có-dấu-🔐', e
+          print('cross-check OK')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pwv-windows
+          path: target/release/pwv.exe
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

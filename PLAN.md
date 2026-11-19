@@ -199,13 +199,17 @@ password/
 
 ---
 
-## 8. Việc cần quyết định trước khi bắt đầu
-1. **Nền tảng ưu tiên**: Windows? macOS? Điện thoại? (đề xuất: desktop trước).
-2. **Đồng bộ**: chỉ lưu cục bộ, đồng bộ qua thư mục cloud có sẵn, hay tự dựng server? (đề xuất: cục bộ → thư mục cloud).
-3. **Ngôn ngữ lập trình**: Rust + Tauri (đề xuất) hay Python (dễ học hơn)?
-4. **Dùng cho riêng bạn hay phát hành cho người khác?** Nếu phát hành, cần audit chuyên nghiệp và chọn giấy phép mã nguồn (ví dụ GPL-3.0 như KeePassXC).
+## 8. Quyết định đã chốt (19/11/2026)
+1. **Nền tảng**: Windows trước (Windows 10/11, 64-bit).
+2. **Đồng bộ**: qua **Google Drive for Desktop** — file kho nằm trong thư mục Drive (ví dụ `G:\My Drive\Passwords\vault.pwv`). Drive chỉ thấy dữ liệu đã mã hoá.
+   - Trước khi lưu, app kiểm tra file trên đĩa có bị máy khác thay đổi không (so SHA-256 lúc mở). Nếu có → tự **gộp (merge)** theo từng mục: bản nào `updated_at` mới hơn thì thắng, mục đã xoá được ghi “bia mộ” (tombstone) để không sống lại.
+   - Nếu Drive tạo bản xung đột (`vault (1).pwv`), lệnh `pwv merge` / nút trong app sẽ gộp vào kho chính.
+   - Ghi file nguyên tử + thử lại khi Drive/antivirus đang khoá file; giữ 10 bản sao lưu trong thư mục `vault.pwv.backups/`.
+3. **Công nghệ**: Rust + Tauri 2 + React/TypeScript (theo đề xuất).
+4. **Người dùng**: chỉ dùng cá nhân → không cần server, không cần chia sẻ, không phát hành công khai. Vẫn giữ checklist bảo mật ở mục 7.
 
----
+### Điều chỉnh thiết kế so với bản nháp
+- Toàn bộ phần thân kho (mọi mục) được mã hoá **một lần** bằng XChaCha20-Poly1305, có **đệm (padding) lên bội số 4 KiB** để không lộ số lượng mục qua kích thước file. Header là AAD. Chi tiết trong `docs/FORMAT.md`.
 
 ## Nguồn tham khảo
 - Bitwarden Security Whitepaper — https://bitwarden.com/help/bitwarden-security-white-paper/

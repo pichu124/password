@@ -1,0 +1,23 @@
+[package]
+name = "pwv-vault-core"
+description = "Lõi kho mật khẩu mã hoá: định dạng file, mật mã, đồng bộ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+argon2 = { version = "0.5", features = ["zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
