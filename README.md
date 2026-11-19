@@ -18,7 +18,8 @@ Kế hoạch tổng thể: [PLAN.md](PLAN.md) · Đặc tả file: [docs/FORMAT.
 | 1. Bộ tạo mật khẩu / passphrase | ✅ |
 | 2. Lõi kho (mã hoá, đồng bộ, sao lưu) | ✅ |
 | 3. CLI `pwv.exe` | ✅ |
-| 4. App giao diện Windows (Tauri) | ⏳ tiếp theo |
+| 3b. Mã 2FA (TOTP), kiểm tra sức khoẻ + HIBP, import CSV | ✅ |
+| 4. App giao diện Windows (Tauri) | ⏳ đang làm |
 
 ## Cài đặt trên Windows
 
@@ -50,7 +51,18 @@ pwv edit gmail -g              # đổi sang mật khẩu ngẫu nhiên mới (m
 pwv delete gmail
 pwv passwd                     # đổi master password
 pwv sync                       # nạp thay đổi từ máy khác + gộp bản xung đột của Drive
+pwv totp google -c             # mã 2FA 6 số (lưu secret bằng --totp khi add/edit)
+pwv health                     # mật khẩu yếu / dùng trùng / lâu chưa đổi / đã bị lộ (HIBP)
+pwv import chrome.csv --delete-csv   # nhập từ Chrome, Edge, Firefox, Bitwarden, KeePass...
 ```
+
+### Chuyển mật khẩu từ trình duyệt sang
+- **Chrome/Edge**: Cài đặt → Mật khẩu (Password Manager) → Xuất mật khẩu → lưu `.csv`.
+- **Bitwarden**: Tools → Export vault → định dạng `.csv`.
+- **KeePassXC**: Database → Export → CSV.
+
+Sau đó chạy `pwv import <file.csv> --delete-csv`, rồi **xoá mật khẩu trong trình duyệt** để không còn
+lưu ở hai nơi, và dọn Thùng rác.
 
 Trên Windows, mật khẩu khi copy sẽ **không** lưu vào lịch sử clipboard (Win+V) và không đồng bộ
 lên cloud clipboard.
