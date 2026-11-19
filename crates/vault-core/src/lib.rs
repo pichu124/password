@@ -12,6 +12,7 @@ pub mod error;
 pub mod format;
 pub mod fsutil;
 pub mod import;
+mod memlock;
 pub mod model;
 pub mod totp;
 mod vault;

@@ -48,7 +48,8 @@ impl Totp {
     /// Phân tích `otpauth://totp/Issuer:account?secret=...&issuer=...` hoặc secret base32.
     pub fn parse(input: &str) -> Result<Totp, TotpError> {
         let input = input.trim();
-        if input.len() >= 10 && input[..10].eq_ignore_ascii_case("otpauth://") {
+        // So sánh trên bytes: cắt chuỗi `&str` giữa ký tự UTF-8 nhiều byte sẽ panic.
+        if input.len() >= 10 && input.as_bytes()[..10].eq_ignore_ascii_case(b"otpauth://") {
             return Self::parse_uri(input);
         }
         Ok(Totp {
@@ -62,7 +63,7 @@ impl Totp {
     }
 
     fn parse_uri(uri: &str) -> Result<Totp, TotpError> {
-        let rest = &uri[10..];
+        let rest = &uri[10..]; // an toàn: 10 byte đầu là ASCII (đã kiểm tra ở trên)
         let (kind, rest) = rest.split_once('/').ok_or(TotpError::BadUri)?;
         if !kind.eq_ignore_ascii_case("totp") {
             return Err(TotpError::NotTotp);
@@ -296,6 +297,9 @@ mod tests {
         assert!(Totp::parse("otpauth://totp/a%2?secret=JBSWY3DPEHPK3PXP").is_ok());
         assert!(Totp::parse("otpauth://totp/a%?secret=JBSWY3DPEHPK3PXP").is_ok());
         assert!(Totp::parse("otpauth://totp/%Ãé?secret=JBSWY3DPEHPK3PXP").is_ok());
+        // Hồi quy (do fuzz tìm ra): ký tự nhiều byte nằm vắt qua byte thứ 10.
+        assert!(Totp::parse("otpauth:/\u{8b234}x").is_err());
+        assert!(Totp::parse("abcdefgh\u{8b234}").is_err());
     }
 
     #[test]

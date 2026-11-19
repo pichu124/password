@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::crypto::{self, KdfParams, Key};
+use crate::crypto::{self, KdfParams};
 use crate::error::{Error, Result};
 use crate::format::{self, Header};
 use crate::fsutil;
+use crate::memlock::LockedKey;
 use crate::model::{now_ms, Entry, HistoryItem, MergeStats, Tombstone, VaultData, MAX_HISTORY};
 
 #[derive(Debug, Clone, Copy)]
@@ -40,7 +41,8 @@ pub struct SaveReport {
 pub struct Vault {
     path: PathBuf,
     header: Header,
-    vault_key: Key,
+    /// Khoá giải mã, nằm trong vùng RAM được khoá (không bị ghi xuống pagefile).
+    vault_key: LockedKey,
     data: VaultData,
     /// SHA-256 của file trên đĩa ở lần đọc/ghi gần nhất — để phát hiện thay đổi từ máy khác.
     disk_fingerprint: Option<[u8; 32]>,
@@ -79,7 +81,7 @@ impl Vault {
         let mut v = Vault {
             path,
             header,
-            vault_key,
+            vault_key: LockedKey::new(vault_key),
             data: VaultData {
                 modified_at: now,
                 ..Default::default()
@@ -100,7 +102,7 @@ impl Vault {
         Ok(Vault {
             header: raw.header.clone(),
             path,
-            vault_key,
+            vault_key: LockedKey::new(vault_key),
             data,
             disk_fingerprint: Some(fingerprint(&bytes)),
         })
@@ -114,6 +116,11 @@ impl Vault {
         &self.header.vault_id
     }
 
+    /// Khoá giải mã có được khoá trong RAM (không bị ghi xuống pagefile) hay không.
+    pub fn memory_locked(&self) -> bool {
+        self.vault_key.is_locked()
+    }
+
     pub fn kdf_params(&self) -> KdfParams {
         self.header.kdf
     }
@@ -122,7 +129,7 @@ impl Vault {
     pub fn verify_password(&self, password: &[u8]) -> bool {
         self.header
             .unwrap_key(password)
-            .map(|k| *k == *self.vault_key)
+            .map(|k| *k == **self.vault_key)
             .unwrap_or(false)
     }
 
