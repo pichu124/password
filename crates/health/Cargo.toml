@@ -1,0 +1,15 @@
+[package]
+name = "pwv-health"
+description = "Kiểm tra sức khoẻ mật khẩu: yếu, trùng, cũ, bị lộ (Have I Been Pwned)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pwv-generator = { path = "../generator" }
+pwv-vault-core = { path = "../vault-core" }
+sha1 = "0.10"
+thiserror.workspace = true
+serde.workspace = true
+ureq = "3"

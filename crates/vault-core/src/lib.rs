@@ -11,10 +11,13 @@ pub mod crypto;
 pub mod error;
 pub mod format;
 pub mod fsutil;
+pub mod import;
 pub mod model;
+pub mod totp;
 mod vault;
 
 pub use crypto::KdfParams;
 pub use error::{Error, Result};
 pub use model::{Entry, HistoryItem, MergeStats, VaultData};
+pub use totp::{Totp, TotpError};
 pub use vault::{CreateOptions, SaveReport, Vault};

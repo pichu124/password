@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 pwv-generator = { path = "../generator" }
 pwv-vault-core = { path = "../vault-core" }
+pwv-health = { path = "../health" }
 clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
 arboard = { version = "3", default-features = false }

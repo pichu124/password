@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use pwv_generator::{
     estimate_strength, generate_passphrase, generate_password, PassphraseOptions, PasswordOptions,
 };
-use pwv_vault_core::{Entry, KdfParams, SaveReport, Vault};
+use pwv_vault_core::{Entry, KdfParams, SaveReport, Totp, Vault};
 use zeroize::Zeroizing;
 
 const CLIPBOARD_CLEAR_SECS: u64 = 20;
@@ -45,6 +45,9 @@ enum Cmd {
         tag: Vec<String>,
         #[arg(long, default_value = "")]
         notes: String,
+        /// Secret 2FA: URI `otpauth://...` hoặc chuỗi base32.
+        #[arg(long)]
+        totp: Option<String>,
         /// Tự tạo mật khẩu thay vì nhập.
         #[arg(short, long)]
         generate: bool,
@@ -80,6 +83,9 @@ enum Cmd {
         url: Vec<String>,
         #[arg(long)]
         notes: Option<String>,
+        /// Đặt secret 2FA (otpauth:// hoặc base32); chuỗi rỗng để xoá.
+        #[arg(long)]
+        totp: Option<String>,
         /// Nhập mật khẩu mới.
         #[arg(long)]
         password: bool,
@@ -98,6 +104,26 @@ enum Cmd {
     },
     /// Đổi master password.
     Passwd,
+    /// Hiện mã 2FA (TOTP) 6 số của một mục.
+    Totp {
+        target: String,
+        /// Sao chép mã vào clipboard.
+        #[arg(short, long)]
+        copy: bool,
+    },
+    /// Kiểm tra sức khoẻ mật khẩu: yếu, dùng trùng, lâu chưa đổi, đã bị lộ (Have I Been Pwned).
+    Health {
+        /// Không kiểm tra rò rỉ qua mạng.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Nhập mật khẩu từ file CSV (Chrome, Edge, Firefox, Bitwarden, KeePass, 1Password...).
+    Import {
+        file: PathBuf,
+        /// Xoá file CSV sau khi nhập thành công (khuyến nghị — file chứa mật khẩu dạng rõ).
+        #[arg(long)]
+        delete_csv: bool,
+    },
     /// Đồng bộ: nạp thay đổi từ máy khác và gộp các bản xung đột của Google Drive.
     Sync,
     /// Cấu hình đường dẫn kho mặc định.
@@ -220,6 +246,15 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             if !e.notes.is_empty() {
                 println!("Ghi chú:   {}", e.notes);
             }
+            if let Some(t) = e.totp.as_deref() {
+                match Totp::parse(t) {
+                    Ok(t) => {
+                        let (code, left) = t.now();
+                        println!("Mã 2FA:    {code}  (còn {left}s)");
+                    }
+                    Err(err) => println!("Mã 2FA:    lỗi — {err}"),
+                }
+            }
             let s = estimate_strength(&e.password, &[&e.username, &e.title]);
             println!("Độ mạnh:   {} ({}/4)", s.label, s.score);
             println!("Lịch sử:   {} mật khẩu cũ", e.password_history.len());
@@ -241,9 +276,11 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             url,
             tag,
             notes,
+            totp,
             generate,
             gen,
         } => {
+            let totp = totp.map(|t| validate_totp(&t)).transpose()?;
             let password = if generate {
                 let (pw, bits) = gen.generate()?;
                 eprintln!("Đã tạo mật khẩu ngẫu nhiên (≈ {bits:.0} bit).");
@@ -259,6 +296,7 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             e.urls = url;
             e.tags = tag;
             e.notes = notes;
+            e.totp = totp;
             let id = v.add(e);
             save(v)?;
             println!("Đã thêm {}", &id[..8]);
@@ -270,11 +308,17 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             username,
             url,
             notes,
+            totp,
             password,
             generate,
             gen,
         } => {
             let id = resolve(v, &target)?.id.clone();
+            let totp = match totp {
+                Some(t) if t.trim().is_empty() => Some(None),
+                Some(t) => Some(Some(validate_totp(&t)?)),
+                None => None,
+            };
             let new_pw = if generate {
                 Some(gen.generate()?.0)
             } else if password {
@@ -294,6 +338,9 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
                 }
                 if let Some(n) = notes {
                     e.notes = n;
+                }
+                if let Some(t) = totp {
+                    e.totp = t;
                 }
                 if let Some(p) = &new_pw {
                     e.password = p.to_string();
@@ -348,8 +395,96 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             println!("Đồng bộ xong — {} mục.", v.entries().len());
             Ok(())
         }
+        Cmd::Totp { target, copy } => {
+            let e = resolve(v, &target)?;
+            let t = Totp::parse(
+                e.totp
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("\"{}\" chưa có secret 2FA", e.title))?,
+            )?;
+            let (code, left) = t.now();
+            println!("{code}");
+            eprintln!("{} — còn hiệu lực {left} giây", e.title);
+            if copy {
+                copy_to_clipboard(&code)?;
+            }
+            Ok(())
+        }
+        Cmd::Health { offline } => health(v, offline),
+        Cmd::Import { file, delete_csv } => {
+            let f = std::fs::File::open(&file)
+                .with_context(|| format!("không mở được {}", file.display()))?;
+            let res = pwv_vault_core::import::import_csv(f, v.entries())?;
+            let n = res.entries.len();
+            for e in res.entries {
+                v.add(e);
+            }
+            save(v)?;
+            println!(
+                "Định dạng: {}. Đã nhập {n} mục, bỏ qua {} mục trùng, {} dòng trống.",
+                res.detected, res.duplicates, res.skipped
+            );
+            if delete_csv {
+                std::fs::remove_file(&file)?;
+                println!("Đã xoá {}.", file.display());
+            } else {
+                eprintln!("⚠  File CSV chứa mật khẩu dạng rõ — hãy xoá nó (và dọn Thùng rác).");
+            }
+            println!("Gợi ý: chạy `pwv health` để xem mật khẩu nào yếu, trùng hoặc đã bị lộ.");
+            Ok(())
+        }
         Cmd::Init { .. } | Cmd::Config { .. } | Cmd::Gen(_) => unreachable!(),
     }
+}
+
+fn validate_totp(t: &str) -> Result<String> {
+    Totp::parse(t)?;
+    Ok(t.trim().to_string())
+}
+
+fn health(v: &Vault, offline: bool) -> Result<()> {
+    use pwv_health::{check_breaches, hibp_fetch, offline_report, Issue};
+    let mut report = offline_report(v.entries());
+    if !offline {
+        eprintln!(
+            "Đang kiểm tra rò rỉ qua Have I Been Pwned (chỉ gửi 5 ký tự đầu của mã băm SHA-1)..."
+        );
+        if let Err(e) = check_breaches(v.entries(), &mut report, hibp_fetch) {
+            eprintln!("⚠  {e} — bỏ qua kiểm tra rò rỉ.");
+        }
+    }
+    let mut rows: Vec<(&Entry, &Vec<Issue>)> = report
+        .issues
+        .iter()
+        .filter_map(|(id, is)| v.get(id).map(|e| (e, is)))
+        .collect();
+    rows.sort_by_key(|(e, is)| (is[0].severity(), e.title.to_lowercase()));
+    for (e, issues) in &rows {
+        let icon = match issues[0].severity() {
+            0 => "🔴",
+            1 | 2 => "🟠",
+            _ => "🟡",
+        };
+        let text: Vec<String> = issues.iter().map(Issue::describe).collect();
+        println!("{icon} {:<28} {}", truncate(&e.title, 28), text.join("; "));
+    }
+    let breached = report.count(|i| matches!(i, Issue::Breached { .. }));
+    let reused = report.count(|i| matches!(i, Issue::Reused { .. }));
+    let weak = report.count(|i| matches!(i, Issue::Weak { .. }));
+    let old = report.count(|i| matches!(i, Issue::Old { .. }));
+    println!();
+    println!(
+        "Điểm an toàn: {}/100 — {} mục: {breached} bị lộ, {reused} dùng trùng, {weak} yếu, {old} lâu chưa đổi{}",
+        report.score(),
+        report.checked,
+        if report.breach_check_done { "" } else { " (chưa kiểm tra rò rỉ)" }
+    );
+    if rows.is_empty() {
+        println!("✅ Không phát hiện vấn đề nào.");
+    } else {
+        println!("Sửa nhanh: `pwv edit <tên> -g` để đổi sang mật khẩu ngẫu nhiên mạnh.");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
