@@ -489,7 +489,7 @@ impl Session {
             return false;
         }
         if self.last_activity.elapsed() >= Duration::from_secs(u64::from(mins) * 60) {
-            self.lock();
+            self.lock_because("Kho đã tự khoá do không sử dụng.");
             return true;
         }
         false
@@ -745,7 +745,12 @@ impl Session {
         Ok(self.vault()?.export_bytes()?)
     }
 
+    /// Khoá kho. Nếu kho vốn đã khoá thì giữ nguyên lý do khoá đang hiện (để một lệnh khoá thừa —
+    /// đóng cửa sổ, trang được nạp lại — không xoá mất lời nhắn "vì sao kho bị khoá").
     pub fn lock(&mut self) {
+        if self.vault.is_none() {
+            return;
+        }
         self.lock_with(None);
     }
 
@@ -842,6 +847,8 @@ impl Session {
 
     pub fn set_vault_path(&mut self, path: &Path) -> AppResult<()> {
         self.lock();
+        // Lời nhắn "vì sao kho bị khoá" là của kho cũ, không còn đúng với kho vừa chọn.
+        self.lock_note = None;
         self.config.set_vault_path(path);
         self.save_config()
     }
@@ -927,8 +934,8 @@ impl Session {
             .collect())
     }
 
-    /// Giá trị cần sao chép. `field`: "password" | "username" | "totp" | "url" | "notes" |
-    /// "history:<số thứ tự>" (mật khẩu cũ).
+    /// Giá trị cần sao chép. `field`: "password" | "username" | "totp" | "notes" | "url" (địa chỉ
+    /// đầu tiên) | "url:<số thứ tự>" | "history:<số thứ tự>" (mật khẩu cũ).
     pub fn field_value(&mut self, id: &str, field: &str) -> AppResult<Zeroizing<String>> {
         self.touch();
         let e = self.entry(id)?;
@@ -942,17 +949,23 @@ impl Session {
                     Totp::parse(e.totp.as_deref().ok_or("Mục này chưa có mã 2FA")?).map_err(err)?;
                 t.now().0
             }
-            other => match other
-                .strip_prefix("history:")
-                .and_then(|i| i.parse::<usize>().ok())
-            {
-                Some(i) => e
-                    .password_history
-                    .get(i)
-                    .map(|h| h.password.clone())
-                    .unwrap_or_default(),
-                None => return Err(err(format!("Trường không hợp lệ: {field}"))),
-            },
+            other => {
+                let index = |prefix: &str| {
+                    other
+                        .strip_prefix(prefix)
+                        .and_then(|i| i.parse::<usize>().ok())
+                };
+                if let Some(i) = index("history:") {
+                    e.password_history
+                        .get(i)
+                        .map(|h| h.password.clone())
+                        .unwrap_or_default()
+                } else if let Some(i) = index("url:") {
+                    e.urls.get(i).cloned().unwrap_or_default()
+                } else {
+                    return Err(err(format!("Trường không hợp lệ: {field}")));
+                }
+            }
         };
         if v.is_empty() {
             return Err("Trường này đang trống".into());
@@ -1559,6 +1572,16 @@ mod tests {
         assert!(s.field_value(&id, "history:7").is_err());
         assert!(s.field_value(&id, "khong-co").is_err());
 
+        // Mục có nhiều địa chỉ: sao chép được từng địa chỉ.
+        let mut upd = patch(&id);
+        upd.urls = Some(vec!["https://a.vn".into(), "https://b.vn/login".into()]);
+        s.save_entry(upd).unwrap();
+        assert_eq!(*s.field_value(&id, "url").unwrap(), "https://a.vn");
+        assert_eq!(*s.field_value(&id, "url:0").unwrap(), "https://a.vn");
+        assert_eq!(*s.field_value(&id, "url:1").unwrap(), "https://b.vn/login");
+        assert!(s.field_value(&id, "url:2").is_err());
+        assert!(s.field_value(&id, "url:x").is_err());
+
         // Tiêu đề rỗng bị từ chối, cả khi tạo lẫn khi sửa.
         let mut bad = patch(&id);
         bad.title = Some("  ".into());
@@ -1620,13 +1643,23 @@ mod tests {
     #[test]
     fn auto_lock() {
         let (mut s, d) = session();
-        open(&mut s, &d);
+        let p = open(&mut s, &d);
         s.config.auto_lock_minutes = 1;
         assert!(!s.auto_lock_if_idle());
         s.last_activity = Instant::now() - Duration::from_secs(61);
         assert!(s.auto_lock_if_idle());
         assert!(s.vault.is_none());
         assert_eq!(s.list("").unwrap_err().code, "locked");
+        // Màn hình mở khoá nói rõ vì sao kho bị khoá; một lệnh khoá thừa (đóng cửa sổ, trang được
+        // nạp lại) không xoá mất lời nhắn đó, còn mở khoá lại thì xoá.
+        assert!(s.status().lock_note.is_some());
+        s.lock();
+        assert!(s.status().lock_note.is_some());
+        s.unlock(&p, MP).unwrap();
+        assert!(s.status().lock_note.is_none());
+        // Người dùng tự khoá thì không cần lời nhắn.
+        s.lock();
+        assert!(s.vault.is_none() && s.status().lock_note.is_none());
     }
 
     /// Lỗi 0.1.2: máy B (chưa thấy thay đổi của máy A) chỉ cần bấm ★ hoặc lưu form là đè mất mật

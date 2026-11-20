@@ -290,8 +290,8 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       needUnlocked();
       const e = find(a.id);
       const f = String(a.field);
-      const v = f === "password" ? e.password : f === "username" ? e.username : f === "notes" ? e.notes : f === "url" ? e.urls[0] : f === "totp" ? e.totp : f.startsWith("history:") ? e.history[Number(f.slice(8))]?.password : undefined;
-      if (v === undefined && !["password", "username", "notes", "url", "totp"].includes(f) && !f.startsWith("history:")) throw err("error", `Trường không hợp lệ: ${f}`);
+      const v = f === "password" ? e.password : f === "username" ? e.username : f === "notes" ? e.notes : f === "url" ? e.urls[0] : f === "totp" ? e.totp : f.startsWith("history:") ? e.history[Number(f.slice(8))]?.password : f.startsWith("url:") ? e.urls[Number(f.slice(4))] : undefined;
+      if (v === undefined && !["password", "username", "notes", "url", "totp"].includes(f) && !f.startsWith("history:") && !f.startsWith("url:")) throw err("error", `Trường không hợp lệ: ${f}`);
       if (!v) throw err("error", "Trường này đang trống");
       return settings.clipboard_clear_secs;
     }

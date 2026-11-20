@@ -79,7 +79,9 @@ fn touch(state: State<AppState>) -> AppResult<()> {
 fn page_loaded(state: State<AppState>) -> AppResult<()> {
     if cfg!(mobile) {
         with(&state, |s| {
-            s.lock();
+            if s.vault.is_some() {
+                s.lock_because("Kho đã khoá lại vì màn hình app vừa được hệ điều hành nạp lại.");
+            }
             Ok(())
         })?;
     }

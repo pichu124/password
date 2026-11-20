@@ -200,11 +200,9 @@ export function EntryView({
             <label>Trang web</label>
             <div className="kv-value">
               <span className="selectable url">{u}</span>
-              {i === 0 && (
-                <button className="icon-btn" onClick={() => copy("url", "địa chỉ")} title="Sao chép" aria-label="Sao chép địa chỉ">
-                  <Icon name="copy" />
-                </button>
-              )}
+              <button className="icon-btn" onClick={() => copy(`url:${i}`, "địa chỉ")} title="Sao chép" aria-label="Sao chép địa chỉ">
+                <Icon name="copy" />
+              </button>
             </div>
           </div>
         ))}

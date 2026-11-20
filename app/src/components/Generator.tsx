@@ -32,7 +32,13 @@ function savePrefs(key: string, v: unknown) {
 /** Bộ tạo mật khẩu. Nếu có `onUse` thì hiện nút "Dùng mật khẩu này". */
 export function Generator({ onUse, compact }: { onUse?: (v: string) => void; compact?: boolean }) {
   const toast = useToast();
-  const [mode, setMode] = useState<"password" | "passphrase">(() => (localStorage.getItem("gen.mode") as "passphrase") || "password");
+  const [mode, setMode] = useState<"password" | "passphrase">(() => {
+    try {
+      return localStorage.getItem("gen.mode") === "passphrase" ? "passphrase" : "password";
+    } catch {
+      return "password";
+    }
+  });
   const [pw, setPw] = useState<PasswordOptions>(() => loadPrefs("gen.pw", DEFAULT_PW));
   const [pp, setPp] = useState<PassphraseOptions>(() => loadPrefs("gen.pp", DEFAULT_PP));
   const [out, setOut] = useState<Generated | null>(null);

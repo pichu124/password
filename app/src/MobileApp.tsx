@@ -11,7 +11,7 @@ const LOCK_WHEN_HIDDEN_MS = 60_000;
 
 type Screen = { kind: "list" } | { kind: "detail"; id: string } | { kind: "settings" } | { kind: "generator" };
 
-// Lý do khoá do trang trước để lại (trên điện thoại, page_loaded khoá lại và xoá lock_note của backend).
+// Lý do khoá do trang trước để lại (dùng khi backend không tự ghi lý do, ví dụ lỗi "kho đã bị khoá").
 const STASHED_NOTE = STASHED_LOCK_NOTE;
 
 let pageLoaded: Promise<void> | null = null;

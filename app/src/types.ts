@@ -98,7 +98,7 @@ export interface EntryInput {
   totp?: string | null;
 }
 
-export type CopyField = "password" | "username" | "totp" | "url" | "notes" | `history:${number}`;
+export type CopyField = "password" | "username" | "totp" | "url" | "notes" | `url:${number}` | `history:${number}`;
 
 export interface PasswordOptions {
   length: number;
