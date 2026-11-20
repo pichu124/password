@@ -531,7 +531,7 @@ impl VaultData {
         macro_rules! stamp {
             ($($f:ident),+) => {$(
                 if e.$f != before.$f {
-                    e.field_times.$f = now.max(before.field_times.$f + 1);
+                    e.field_times.$f = now.max(before.field_times.$f.saturating_add(1));
                     changed = true;
                 }
             )+};
@@ -562,7 +562,7 @@ impl VaultData {
             .position(|e| e.id == id)
             .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
         let mut e = self.entries.remove(idx);
-        e.field_times.deleted = now.max(e.field_times.deleted + 1);
+        e.field_times.deleted = now.max(e.field_times.deleted.saturating_add(1));
         let t = e.field_times.deleted;
         self.trash.push(e);
         sort_entries(&mut self.trash);
@@ -578,7 +578,7 @@ impl VaultData {
             .position(|e| e.id == id)
             .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
         let mut e = self.trash.remove(idx);
-        e.field_times.deleted = now.max(e.field_times.deleted + 1);
+        e.field_times.deleted = now.max(e.field_times.deleted.saturating_add(1));
         let t = e.field_times.deleted;
         self.entries.push(e);
         sort_entries(&mut self.entries);
@@ -856,6 +856,27 @@ mod tests {
             d.update_at("nope", 1, |_| {}),
             Err(Error::EntryNotFound(_))
         ));
+    }
+
+    /// Thời điểm cực lớn (đồng hồ hỏng, dữ liệu méo) không được làm tràn số ⇒ không panic.
+    #[test]
+    fn extreme_timestamps_do_not_overflow() {
+        let mut d = data(vec![entry("x", "p", i64::MAX)]);
+        assert!(d.update_at("x", 5, |e| e.password = "q".into()).unwrap());
+        assert_eq!(d.get("x").unwrap().field_times.password, i64::MAX);
+        d.trash_at("x", 5).unwrap();
+        d.restore_at("x", 5).unwrap();
+        let mut e = entry("y", "p", 1);
+        e.field_times.deleted = i64::MAX;
+        let mut d2 = data(vec![e]);
+        d2.trash_at("y", 5).unwrap();
+        d2.restore_at("y", 5).unwrap();
+        d2.merge_from(&d);
+        let mut neg = data(vec![entry("z", "p", i64::MIN)]);
+        neg.update_at("z", i64::MIN, |e| e.notes = "n".into())
+            .unwrap();
+        neg.merge_from(&d2);
+        assert_eq!(neg.entries.len(), 3);
     }
 
     #[test]

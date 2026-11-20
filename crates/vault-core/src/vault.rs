@@ -825,7 +825,7 @@ impl Vault {
         kdf.validate(self.allow_weak_kdf)?;
         let ((), save) = self.transact(|v| {
             let new_key = crypto::random_key();
-            let changed = now_ms().max(v.header.key_changed_at + 1);
+            let changed = now_ms().max(v.header.key_changed_at.saturating_add(1));
             let header = Header::new_wrapped(
                 v.header.vault_id.clone(),
                 new_password,
