@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { api, errorText } from "../api";
 import type { Strength } from "../types";
 
 // ------------------------------------------------------------------ Thông báo (toast)
@@ -73,6 +74,10 @@ const paths: Record<string, string> = {
   edit: "M4 17.2V20h2.8l8.3-8.3-2.8-2.8zM19.7 7a1 1 0 000-1.4l-1.3-1.3a1 1 0 00-1.4 0l-1.2 1.2 2.8 2.8z",
   link: "M10.6 13.4a1 1 0 001.4 1.4l4.9-4.9a3 3 0 00-4.2-4.2l-1.8 1.8 1.4 1.4 1.8-1.8a1 1 0 011.4 1.4zM13.4 10.6a1 1 0 00-1.4-1.4l-4.9 4.9a3 3 0 004.2 4.2l1.8-1.8-1.4-1.4-1.8 1.8a1 1 0 01-1.4-1.4z",
   back: "M15.4 6L9.4 12l6 6-1.4 1.4L6.6 12 14 4.6z",
+  close: "M6.4 5L12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z",
+  warn: "M12 2L1 21h22zm-1 7h2v6h-2zm0 8h2v2h-2z",
+  restore: "M13 3a9 9 0 00-9 9H1l4 4 4-4H6a7 7 0 112 4.9l-1.4 1.4A9 9 0 1013 3zm-1 5v5l4.3 2.5.7-1.2-3.5-2.1V8z",
+  folder: "M3 5h7l2 2h9v12H3z",
   key: "M7 14a3 3 0 110-6 3 3 0 010 6zm5.6-4A6 6 0 101 11a6 6 0 0011.6 1H15v2h2v-2h2v2h2v-4z",
 };
 
@@ -110,4 +115,96 @@ export function avatarHue(title: string): number {
   let h = 0;
   for (const c of title) h = (h * 31 + c.charCodeAt(0)) % 360;
   return h;
+}
+
+/** Ngày giờ theo giờ địa phương, có cả giây khi cần phân biệt các bản sao lưu gần nhau. */
+export function formatDateTime(ms: number): string {
+  if (!ms) return "—";
+  return new Date(ms).toLocaleString("vi-VN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Giá trị bí mật vừa hiện tự ẩn sau `ms` (mặc định 30 giây). */
+export const AUTO_HIDE_MS = 30_000;
+export function useAutoHide<T>(value: T | null, clear: () => void, ms = AUTO_HIDE_MS) {
+  useEffect(() => {
+    if (value === null) return;
+    const t = setTimeout(clear, ms);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, ms]);
+}
+
+// ------------------------------------------------------------------ Clipboard: bôi đen + Ctrl+C
+
+/**
+ * Mọi thao tác sao chép trong app (bôi đen rồi Ctrl+C, chuột phải → Copy) đi qua Rust: không vào
+ * lịch sử clipboard và tự xoá sau N giây. Ô mật khẩu (type=password) không cho sao chép; ô chứa bí
+ * mật (có thuộc tính data-secret) không cho cắt (Ctrl+X).
+ */
+export function useClipboardGuard() {
+  const toast = useToast();
+  useEffect(() => {
+    const onCopy = (e: ClipboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      let text = "";
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) {
+        e.preventDefault();
+        if (t instanceof HTMLInputElement && t.type === "password") return;
+        const start = t.selectionStart ?? 0;
+        const end = t.selectionEnd ?? 0;
+        text = t.value.substring(start, end);
+      } else {
+        text = window.getSelection()?.toString() ?? "";
+        e.preventDefault();
+      }
+      if (!text) return;
+      api
+        .copyText(text)
+        .then((secs) => toast(`Đã sao chép — tự xoá sau ${secs} giây`))
+        .catch((err) => toast(errorText(err), "error"));
+    };
+    const onCut = (e: ClipboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if ((t instanceof HTMLInputElement && t.type === "password") || t.closest("[data-secret]")) e.preventDefault();
+    };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCut);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCut);
+    };
+  }, [toast]);
+}
+
+// ------------------------------------------------------------------ Hộp xác nhận nội tuyến
+
+export function ConfirmBox({
+  text,
+  confirmLabel,
+  danger,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  text: ReactNode;
+  confirmLabel: string;
+  danger?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className={danger ? "confirm-box danger-box" : "confirm-box"} role="alertdialog">
+      <div className="small">{text}</div>
+      <div className="row gap confirm-actions">
+        <button className={danger ? "btn danger" : "btn primary"} disabled={busy} onClick={onConfirm}>
+          {busy ? "Đang làm…" : confirmLabel}
+        </button>
+        <button className="btn" disabled={busy} onClick={onCancel}>
+          Huỷ
+        </button>
+      </div>
+    </div>
+  );
 }

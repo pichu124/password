@@ -1,33 +1,41 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, errorText, pickFile } from "../api";
-import type { Settings, Status, Strength, UpdateInfo } from "../types";
-import { Icon, StrengthMeter, useDebounced, useToast } from "./ui";
+import type { BackupEntryView, BackupKind, BackupView, ImportView, MoveView, PasswordChangeView, Settings, Status, UpdateInfo } from "../types";
+import { MasterPasswordField, useMasterCheck } from "./MasterField";
+import { MoveVault, moveMessage } from "./MoveVault";
+import { formatDate, formatDateTime, Icon, useToast } from "./ui";
 
 export function SettingsView({
   status,
   onImported,
   onSwitchVault,
   onMoved,
+  onChanged,
 }: {
   status: Status;
+  /** Dữ liệu kho vừa thay đổi (nhập CSV, khôi phục từ bản sao lưu) ⇒ tải lại danh sách. */
   onImported: () => void;
   onSwitchVault: () => void;
-  onMoved: () => void;
+  onMoved: (r: MoveView) => void;
+  /** Cài đặt / trạng thái vừa đổi ⇒ đọc lại status. */
+  onChanged: () => void;
 }) {
   const toast = useToast();
   const [s, setS] = useState<Settings | null>(null);
   const [backups, setBackups] = useState<string | null>(null);
+  const [moved, setMoved] = useState<MoveView | null>(null);
 
   useEffect(() => {
-    api.getSettings().then(setS);
-    api.backupsDir().then(setBackups);
-  }, []);
+    api.getSettings().then(setS).catch((e) => toast(errorText(e), "error"));
+    api.backupsDir().then(setBackups).catch(() => {});
+  }, [toast]);
 
   async function update(next: Settings) {
     setS(next);
     try {
       await api.setSettings(next);
       toast("Đã lưu cài đặt");
+      onChanged();
     } catch (e) {
       toast(errorText(e), "error");
     }
@@ -66,10 +74,20 @@ export function SettingsView({
               </label>
             </>
           )}
-          <p className="muted small">
-            Khoá giải mã {status.memory_locked ? "đang được khoá trong RAM (không bị ghi xuống pagefile)" : "không khoá được trong RAM trên máy này"}.
-            Cửa sổ app được chặn chụp màn hình và chia sẻ màn hình. Mật khẩu sao chép không vào lịch sử clipboard (Win+V).
-          </p>
+          <ul className="small security-notes">
+            <li>
+              <strong>Bộ nhớ:</strong> chỉ <em>khoá giải mã</em> được giữ trong vùng RAM không bị ghi xuống đĩa
+              {status.memory_locked ? "" : " (máy này không cho phép khoá vùng RAM đó)"}. Mật khẩu bạn đang mở xem không được bảo vệ như vậy — hãy bật mã
+              hoá ổ đĩa (BitLocker) và khoá app (Ctrl+L) mỗi khi rời máy.
+            </li>
+            <li>
+              <strong>Chụp màn hình:</strong> cửa sổ app được loại khỏi ảnh chụp và quay màn hình trên Windows 10 bản 2004 trở lên.
+            </li>
+            <li>
+              <strong>Clipboard:</strong> thứ bạn sao chép từ app không vào lịch sử clipboard (Win+V) và được xoá sau {s?.clipboard_clear_secs ?? "N"} giây
+              — kể cả khi app đã khoá hoặc bạn đã đóng cửa sổ (app chờ xoá xong rồi mới thoát hẳn).
+            </li>
+          </ul>
         </section>
 
         {s && <AboutUpdates settings={s} onChange={update} />}
@@ -78,23 +96,27 @@ export function SettingsView({
 
         <ImportCsv onImported={onImported} />
 
+        <BackupsPanel onRestored={onImported} />
+
         <section className="card">
           <h3>File kho & đồng bộ</h3>
           <p className="small">
             <span className="muted">File kho:</span> <span className="path selectable">{status.vault_path}</span>
           </p>
           <p className="small">
-            <span className="muted">Sao lưu tự động (10 bản gần nhất):</span> <span className="path selectable">{backups}</span>
+            <span className="muted">Thư mục sao lưu tự động:</span> <span className="path selectable">{backups ?? "—"}</span>
           </p>
           <p className="muted small">
             Đồng bộ: đặt file kho trong thư mục Google Drive, Dropbox hoặc OneDrive trên mỗi máy. App tự kiểm tra thay đổi mỗi 20 giây và tự gộp
             khi hai máy cùng sửa.
           </p>
+          {moved && <div className={moved.rescued ? "note-box" : "ok-box"}>{moveMessage(moved)}</div>}
           <MoveVault
             status={status}
-            onMoved={() => {
-              api.backupsDir().then(setBackups);
-              onMoved();
+            onMoved={(r) => {
+              setMoved(r);
+              api.backupsDir().then(setBackups).catch(() => {});
+              onMoved(r);
             }}
           />
           <button className="btn subtle-link" onClick={onSwitchVault}>
@@ -113,7 +135,7 @@ function AboutUpdates({ settings, onChange }: { settings: Settings; onChange: (s
   const [found, setFound] = useState<UpdateInfo | null>(null);
 
   useEffect(() => {
-    api.appVersion().then(setVersion);
+    api.appVersion().then(setVersion).catch(() => {});
   }, []);
 
   async function checkNow() {
@@ -149,7 +171,7 @@ function AboutUpdates({ settings, onChange }: { settings: Settings; onChange: (s
             Có bản mới <strong>{found.latest}</strong>.
           </p>
           {found.notes && <pre className="notes small">{found.notes}</pre>}
-          <button className="btn primary" onClick={() => api.openReleasePage(found.page_url)}>
+          <button className="btn primary" onClick={() => api.openReleasePage(found.latest).catch((e) => toast(errorText(e), "error"))}>
             Mở trang tải
           </button>
         </div>
@@ -161,103 +183,29 @@ function AboutUpdates({ settings, onChange }: { settings: Settings; onChange: (s
   );
 }
 
-/** Chuyển kho sang thư mục khác (ví dụ từ Documents sang Dropbox), có bước xác nhận. */
-function MoveVault({ status, onMoved }: { status: Status; onMoved: () => void }) {
-  const toast = useToast();
-  const [target, setTarget] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function choose() {
-    setError(null);
-    const fileName = status.vault_path?.split(/[\\/]/).pop() ?? "vault.pwv";
-    const suggestedDir = status.suggested_path.replace(/[\\/][^\\/]*$/, "");
-    const p = await pickFile({
-      save: true,
-      title: "Chọn thư mục mới cho kho",
-      defaultPath: `${suggestedDir}${suggestedDir.includes("/") ? "/" : "\\"}${fileName}`,
-      filters: [{ name: "Kho pwv", extensions: ["pwv"] }],
-    });
-    if (p) setTarget(p);
-  }
-
-  async function move() {
-    if (!target) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await api.moveVault(target);
-      toast(r.old_removed ? "Đã chuyển kho sang vị trí mới" : "Đã chuyển kho. File ở vị trí cũ chưa xoá được — bạn có thể tự xoá.", r.old_removed ? "ok" : "info");
-      setTarget(null);
-      onMoved();
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!target) {
-    return (
-      <>
-        <button className="btn" onClick={choose}>
-          Chuyển kho sang thư mục khác…
-        </button>
-        {error && <p className="error">{error}</p>}
-      </>
-    );
-  }
-  return (
-    <div className="confirm-box">
-      <p className="small">
-        <strong>Chuyển kho</strong>
-        <br />
-        <span className="muted">Từ:</span> <span className="path">{status.vault_path}</span>
-        <br />
-        <span className="muted">Sang:</span> <span className="path">{target}</span>
-      </p>
-      <ul className="small muted">
-        <li>App ghi kho sang chỗ mới, đọc lại để kiểm tra, rồi mới xoá file ở chỗ cũ. Thư mục sao lưu được chuyển theo.</li>
-        <li>Trên máy khác, mở app và chọn “Mở kho có sẵn” ở vị trí mới.</li>
-      </ul>
-      {error && <p className="error">{error}</p>}
-      <div className="row gap">
-        <button className="btn primary" disabled={busy} onClick={move}>
-          {busy ? "Đang chuyển…" : "Chuyển"}
-        </button>
-        <button className="btn" disabled={busy} onClick={() => setTarget(null)}>
-          Huỷ
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function ChangeMaster() {
-  const toast = useToast();
   const [cur, setCur] = useState("");
   const [next, setNext] = useState("");
   const [next2, setNext2] = useState("");
-  const [strength, setStrength] = useState<Strength | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dn = useDebounced(next, 200);
-
-  useEffect(() => {
-    if (!dn) return setStrength(null);
-    api.strength(dn).then(setStrength);
-  }, [dn]);
+  const [result, setResult] = useState<PasswordChangeView | null>(null);
+  const mc = useMasterCheck();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      await api.changeMaster(cur, next);
-      toast("Đã đổi master password. Lần sau hãy dùng mật khẩu mới trên mọi máy.");
+      const c = await mc.run(next);
+      if (!c?.ok) return;
+      const r = await api.changeMaster(cur, next);
+      setResult(r);
       setCur("");
       setNext("");
       setNext2("");
+      mc.reset();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -265,26 +213,52 @@ function ChangeMaster() {
     }
   }
 
+  if (result) {
+    return (
+      <section className="card">
+        <h3>Đã đổi mật khẩu chính</h3>
+        <p className="small">
+          Kho trên máy này đã dùng mật khẩu mới. Đã mã hoá lại <strong>{result.backups_reencrypted}</strong> bản sao lưu
+          {result.backups_skipped > 0 && (
+            <>
+              ; <strong>{result.backups_skipped}</strong> bản không mã hoá lại được (vẫn dùng mật khẩu cũ)
+            </>
+          )}
+          .
+        </p>
+        <div className="warning small">
+          <p>
+            <strong>Những bản sao đã rời khỏi máy này vẫn mở được bằng mật khẩu CŨ</strong> và chứa dữ liệu tại thời điểm đó: lịch sử phiên bản
+            và thùng rác của Google Drive / Dropbox / OneDrive, bản lưu ngoại tuyến trên điện thoại, các máy tính khác chưa đồng bộ.
+          </p>
+          <p>
+            Nếu mật khẩu cũ có thể đã bị lộ, hãy đổi mật khẩu của các tài khoản quan trọng (ngân hàng, email). Các thiết bị khác sẽ hỏi mật khẩu
+            mới ở lần mở tới.
+          </p>
+        </div>
+        <button className="btn" onClick={() => setResult(null)}>
+          Đã hiểu
+        </button>
+      </section>
+    );
+  }
+
   return (
     <form className="card" onSubmit={submit}>
-      <h3>Đổi master password</h3>
+      <h3>Đổi mật khẩu chính</h3>
       <label className="field">
-        <span>Master password hiện tại</span>
-        <input type="password" value={cur} onChange={(e) => setCur(e.target.value)} autoComplete="current-password" />
+        <span>Mật khẩu chính hiện tại</span>
+        <input type="password" value={cur} onChange={(e) => setCur(e.target.value)} autoComplete="off" spellCheck={false} data-secret />
       </label>
+      <MasterPasswordField label="Mật khẩu chính mới" value={next} onChange={setNext} mc={mc} />
       <label className="field">
-        <span>Master password mới</span>
-        <input type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
-        {next && <StrengthMeter strength={strength} />}
-      </label>
-      <label className="field">
-        <span>Nhập lại</span>
-        <input type="password" value={next2} onChange={(e) => setNext2(e.target.value)} autoComplete="new-password" />
+        <span>Nhập lại mật khẩu chính mới</span>
+        <input type="password" value={next2} onChange={(e) => setNext2(e.target.value)} autoComplete="off" spellCheck={false} data-secret />
         {next2 && next !== next2 && <small className="error">Chưa khớp.</small>}
       </label>
       {error && <p className="error">{error}</p>}
       <button className="btn primary" disabled={busy || !cur || !next || next !== next2}>
-        <Icon name="key" /> {busy ? "Đang đổi…" : "Đổi master password"}
+        <Icon name="key" /> {busy ? "Đang đổi…" : "Đổi mật khẩu chính"}
       </button>
     </form>
   );
@@ -292,17 +266,34 @@ function ChangeMaster() {
 
 function ImportCsv({ onImported }: { onImported: () => void }) {
   const toast = useToast();
-  const [deleteAfter, setDeleteAfter] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<ImportView | null>(null);
+  const [deleted, setDeleted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function run() {
+    setError(null);
     const p = await pickFile({ title: "Chọn file CSV mật khẩu", filters: [{ name: "CSV", extensions: ["csv"] }] });
     if (!p) return;
     setBusy(true);
     try {
-      const r = await api.importCsv(p, deleteAfter);
-      toast(`${r.detected}: đã nhập ${r.imported} mục, bỏ qua ${r.duplicates} mục trùng${r.csv_deleted ? ", đã xoá file CSV" : ""}`);
+      const r = await api.importCsv(p);
+      setResult(r);
+      setDeleted(false);
       onImported();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteCsv() {
+    setBusy(true);
+    try {
+      await api.deleteImportedCsv();
+      setDeleted(true);
+      toast("Đã xoá file CSV");
     } catch (e) {
       toast(errorText(e), "error");
     } finally {
@@ -317,13 +308,209 @@ function ImportCsv({ onImported }: { onImported: () => void }) {
         Chrome / Edge: Cài đặt → Mật khẩu → Xuất mật khẩu. Bitwarden: Tools → Export vault (.csv). KeePassXC: Database → Export → CSV.
         Firefox, 1Password, Proton Pass cũng được hỗ trợ.
       </p>
-      <label className="check">
-        <input type="checkbox" checked={deleteAfter} onChange={(e) => setDeleteAfter(e.target.checked)} />
-        Xoá file CSV sau khi nhập (khuyến nghị — file chứa mật khẩu dạng rõ)
-      </label>
+      {result && (
+        <div className="confirm-box">
+          <p className="small">
+            <strong>{result.detected}:</strong> đã nhập <strong>{result.imported}</strong> mục · bỏ qua {result.duplicates} mục trùng hệt mục đã có ·{" "}
+            {result.skipped} dòng trống / không dùng được.
+          </p>
+          {result.similar.length > 0 && (
+            <div className="small">
+              <p>Đã nhập, nhưng có vẻ trùng với mục khác — hãy rà lại:</p>
+              <ul className="name-list">
+                {result.similar.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {result.bad_totp.length > 0 && (
+            <div className="small">
+              <p>Mã 2FA không đọc được (giá trị gốc nằm trong ghi chú của mục):</p>
+              <ul className="name-list">
+                {result.bad_totp.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="warning small">
+            File CSV chứa toàn bộ mật khẩu ở dạng chữ thường, ai mở cũng đọc được. Hãy xoá nó ngay sau khi kiểm tra.
+            <br />
+            Nếu file nằm trong thư mục đồng bộ (OneDrive / Google Drive / Dropbox), hãy dọn cả <strong>thùng rác trên cloud</strong> sau khi xoá.
+          </div>
+          <div className="row gap confirm-actions">
+            {deleted ? (
+              <span className="check-ok small">✓ Đã xoá file CSV trên máy này.</span>
+            ) : (
+              <button className="btn danger" disabled={busy} onClick={deleteCsv}>
+                <Icon name="trash" /> Xoá file CSV ngay
+              </button>
+            )}
+            <button className="btn" onClick={() => setResult(null)}>
+              Đóng
+            </button>
+          </div>
+        </div>
+      )}
+      {error && <p className="error">{error}</p>}
       <button className="btn" disabled={busy} onClick={run}>
-        {busy ? "Đang nhập…" : "Chọn file CSV…"}
+        {busy && !result ? "Đang nhập…" : "Chọn file CSV…"}
       </button>
+    </section>
+  );
+}
+
+const KIND_LABEL: Record<BackupKind, string> = {
+  auto: "Tự động",
+  merged: "Bản xung đột đã gộp",
+  damaged: "File hỏng đã cất",
+};
+
+function statusText(e: BackupEntryView): string {
+  if (e.status === "changed") return `Khác hiện tại: ${e.changed_fields.join(", ")}`;
+  if (e.status === "in_trash") return "Đang trong thùng rác";
+  return "Hiện không còn";
+}
+
+/** Danh sách bản sao lưu, xem khác biệt và khôi phục từng mục. */
+function BackupsPanel({ onRestored }: { onRestored: () => void }) {
+  const toast = useToast();
+  const [list, setList] = useState<BackupView[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<BackupView | null>(null);
+  const [diff, setDiff] = useState<BackupEntryView[] | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const l = await api.listBackups();
+      setList([...l].sort((a, b) => b.timestamp - a.timestamp));
+      setListError(null);
+    } catch (e) {
+      setListError(errorText(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function choose(b: BackupView) {
+    setChosen(b);
+    setDiff(null);
+    setDiffError(null);
+    setPicked(new Set());
+    try {
+      setDiff(await api.backupDiff(b.name));
+    } catch (e) {
+      setDiffError(errorText(e));
+    }
+  }
+
+  async function restore() {
+    if (!chosen || picked.size === 0) return;
+    setBusy(true);
+    try {
+      const n = await api.restoreFromBackup(chosen.name, [...picked]);
+      toast(`Đã khôi phục ${n} mục từ bản sao lưu`);
+      onRestored();
+      await choose(chosen);
+      load();
+    } catch (e) {
+      toast(errorText(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const toggle = (id: string) =>
+    setPicked((cur) => {
+      const n = new Set(cur);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  return (
+    <section className="card">
+      <h3>Sao lưu & khôi phục</h3>
+      <p className="small muted">
+        App tự giữ các bản sao lưu của kho. Chọn một bản để xem những mục khác với hiện tại, rồi khôi phục từng mục. Khôi phục là một lần sửa mới:
+        mật khẩu hiện tại của mục được giữ trong lịch sử của nó, và thay đổi được đồng bộ tới mọi thiết bị.
+      </p>
+      {listError && <p className="error">{listError}</p>}
+      {list && list.length === 0 && <p className="muted small">Chưa có bản sao lưu nào.</p>}
+      {list && list.length > 0 && (
+        <table className="backup-table">
+          <thead>
+            <tr>
+              <th>Thời điểm</th>
+              <th>Loại</th>
+              <th>Số mục</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((b) => (
+              <tr key={b.name} className={chosen?.name === b.name ? "selected" : undefined}>
+                <td>{formatDateTime(b.timestamp)}</td>
+                <td>{KIND_LABEL[b.kind] ?? b.kind}</td>
+                <td>{b.entries ?? <span className="muted">không đọc được</span>}</td>
+                <td className="right">
+                  <button className="btn link" onClick={() => choose(b)}>
+                    Xem khác biệt
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {chosen && (
+        <div className="confirm-box">
+          <p className="small">
+            <strong>Bản sao lưu lúc {formatDateTime(chosen.timestamp)}</strong> ({KIND_LABEL[chosen.kind] ?? chosen.kind})
+          </p>
+          {diffError && <p className="error">{diffError}</p>}
+          {diff === null && !diffError && <p className="muted small">Đang so sánh…</p>}
+          {diff && diff.length === 0 && <p className="small">Mọi mục trong bản này đều giống hiện tại — không có gì để khôi phục.</p>}
+          {diff && diff.length > 0 && (
+            <>
+              <ul className="diff-list">
+                {diff.map((d) => (
+                  <li key={d.id}>
+                    <label className="check">
+                      <input type="checkbox" checked={picked.has(d.id)} onChange={() => toggle(d.id)} />
+                      <span className="grow">
+                        <strong>{d.title}</strong> <span className="muted small">{d.username}</span>
+                        <br />
+                        <span className={d.status === "changed" ? "small" : "small warn-text"}>{statusText(d)}</span>
+                        <span className="muted small"> · sửa lúc {formatDate(d.updated_at)}</span>
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+              <div className="row gap confirm-actions">
+                <button className="btn primary" disabled={busy || picked.size === 0} onClick={restore}>
+                  <Icon name="restore" /> {busy ? "Đang khôi phục…" : `Khôi phục mục đã chọn (${picked.size})`}
+                </button>
+                <button className="btn" onClick={() => setChosen(null)}>
+                  Đóng
+                </button>
+              </div>
+            </>
+          )}
+          {(diffError || (diff && diff.length === 0)) && (
+            <button className="btn" onClick={() => setChosen(null)}>
+              Đóng
+            </button>
+          )}
+        </div>
+      )}
     </section>
   );
 }

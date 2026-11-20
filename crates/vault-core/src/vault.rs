@@ -366,13 +366,14 @@ impl Vault {
         let Some((mut v, newest)) = found else {
             return Err(last_err);
         };
-        let mut used = 1;
-        for b in candidates.iter().take(MAX_FILES_MERGED) {
-            if v.merge_file(&b.path).is_ok() {
-                used += 1;
-            }
-        }
-        Ok((v, used.min(candidates.len()), newest))
+        // (Bản vừa mở cũng nằm trong danh sách và được tính ở đây.)
+        let used = candidates
+            .iter()
+            .take(MAX_FILES_MERGED)
+            .filter(|b| v.merge_file(&b.path).is_ok())
+            .count()
+            .max(1);
+        Ok((v, used, newest))
     }
 
     /// Mở kho **chỉ đọc** từ dữ liệu thô (ví dụ file đọc qua Drive/Dropbox trên Android).

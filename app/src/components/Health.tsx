@@ -13,7 +13,6 @@ export function Health({ onOpen }: { onOpen: (id: string) => void }) {
     try {
       const r = await api.health(online);
       setH(r);
-      if (r.breach_error) toast(r.breach_error, "error");
     } catch (e) {
       toast(errorText(e), "error");
     } finally {
@@ -27,7 +26,8 @@ export function Health({ onOpen }: { onOpen: (id: string) => void }) {
   }, []);
 
   if (!h) return <div className="detail empty" />;
-  const tone = h.score >= 80 ? "good" : h.score >= 50 ? "warn" : "bad";
+  // Chưa kiểm tra rò rỉ được thì điểm không thể coi là "tốt".
+  const tone = h.score >= 80 && h.breach_check_done ? "good" : h.score >= 50 ? "warn" : "bad";
 
   return (
     <div className="detail">
@@ -36,15 +36,24 @@ export function Health({ onOpen }: { onOpen: (id: string) => void }) {
         <div className="grow">
           <h2>Sức khoẻ mật khẩu</h2>
           <p className="muted small">
-            {h.checked} mục · {h.breached} đã bị lộ · {h.reused} dùng trùng · {h.weak} yếu · {h.old} lâu chưa đổi
+            {h.checked} mục · {h.breach_check_done ? `${h.breached} đã bị lộ` : "chưa kiểm tra rò rỉ"} · {h.reused} dùng trùng · {h.weak} yếu · {h.old} lâu chưa đổi
           </p>
         </div>
       </header>
 
       <div className="fields">
+        {h.breach_error && (
+          <div className="problem-box">
+            <strong>Không kiểm tra được rò rỉ dữ liệu.</strong> {h.breach_error}
+            <br />
+            <span className="small">Kết quả bên dưới CHƯA gồm phần kiểm tra rò rỉ — đừng coi là an toàn. Hãy kiểm tra lại khi có mạng.</span>
+          </div>
+        )}
         <div className="info-box">
           {h.breach_check_done ? (
             <span>✓ Đã kiểm tra rò rỉ với Have I Been Pwned.</span>
+          ) : h.breach_error ? (
+            <span>Kiểm tra rò rỉ chưa thành công.</span>
           ) : (
             <span>Chưa kiểm tra rò rỉ dữ liệu.</span>
           )}{" "}
@@ -53,13 +62,20 @@ export function Health({ onOpen }: { onOpen: (id: string) => void }) {
           </span>
           <div>
             <button className="btn primary" disabled={busy} onClick={() => run(true)}>
-              <Icon name="shield" /> {busy ? "Đang kiểm tra…" : "Kiểm tra rò rỉ qua mạng"}
+              <Icon name="shield" /> {busy ? "Đang kiểm tra…" : h.breach_error ? "Thử kiểm tra lại" : "Kiểm tra rò rỉ qua mạng"}
             </button>
           </div>
         </div>
 
         {h.items.length === 0 ? (
-          <p className="ok-big">✅ Không phát hiện vấn đề nào.</p>
+          h.breach_check_done ? (
+            <p className="ok-big">✅ Không phát hiện vấn đề nào.</p>
+          ) : (
+            <p className="muted">
+              Không thấy mật khẩu yếu, dùng trùng hay quá cũ. <strong>Chưa biết</strong> mật khẩu nào đã bị lộ hay chưa — hãy bấm “Kiểm tra rò rỉ qua
+              mạng”.
+            </p>
+          )
         ) : (
           <ul className="health-list">
             {h.items.map((it) => (

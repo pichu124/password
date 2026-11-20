@@ -625,6 +625,59 @@ fn conflict_copy_stays_in_place_until_the_vault_is_saved() {
     assert_eq!(titles(&open(&p, PW).unwrap()), ["Base", "NewBankPw"]);
 }
 
+/// Lỗi 0.1.2: nhập cùng một file CSV trên hai máy trước khi chúng kịp đồng bộ ⇒ mọi mục bị nhân đôi.
+#[test]
+fn importing_the_same_csv_on_two_devices_does_not_duplicate_entries() {
+    use pwv_vault_core::import::import_csv;
+    let csv = "name,url,username,password,note\n\
+               VCB,https://vcb.com.vn,nguyenvana,pw-vcb,\n\
+               Gmail,https://mail.google.com,toi@gmail.com,pw-gmail,ghi chú\n\
+               ,,,,mã khôi phục 1111\n";
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut pc) = new_vault(&d);
+    pc.save().unwrap();
+    let laptop_file = d.path().join("laptop").join("vault.pwv");
+    fs::create_dir_all(laptop_file.parent().unwrap()).unwrap();
+    fs::copy(&p, &laptop_file).unwrap();
+    let mut laptop = open(&laptop_file, PW).unwrap();
+
+    for v in [&mut pc, &mut laptop] {
+        v.transact(|v| {
+            let res = import_csv(csv.as_bytes(), v.entries()).unwrap();
+            assert_eq!(res.entries.len(), 3);
+            for e in res.entries {
+                v.add(e);
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    // Dịch vụ đồng bộ mang file của laptop về làm bản xung đột trên PC.
+    fs::copy(&laptop_file, d.path().join("vault (1).pwv")).unwrap();
+    pc.sync().unwrap();
+    assert_eq!(pc.entries().len(), 3, "{:?}", titles(&pc));
+    // Nhập lại lần nữa trên chính máy đó: toàn bộ là trùng.
+    let again = import_csv(csv.as_bytes(), pc.entries()).unwrap();
+    assert_eq!((again.entries.len(), again.duplicates), (0, 3));
+    // Mục đã bị xoá vĩnh viễn mà nhập lại thì thành mục mới (id cũ không bao giờ được dùng lại).
+    let gmail = pc
+        .entries()
+        .iter()
+        .find(|e| e.title == "Gmail")
+        .unwrap()
+        .id
+        .clone();
+    pc.transact(|v| v.purge(&gmail)).unwrap();
+    let res = import_csv(csv.as_bytes(), pc.entries()).unwrap();
+    assert_eq!(res.entries.len(), 1);
+    assert_eq!(res.entries[0].id, gmail, "id suy ra từ nội dung");
+    let (new_id, _) = pc
+        .transact(|v| Ok(v.add(res.entries.into_iter().next().unwrap())))
+        .unwrap();
+    assert_ne!(new_id, gmail);
+    assert_eq!(pc.entries().len(), 3);
+}
+
 // ----------------------------------------------------------------------------- file trên đĩa có vấn đề
 
 /// Lỗi 0.1.2: file trên đĩa hỏng ⇒ mọi lần lưu đều lỗi với thông báo "sai mật khẩu", thay đổi chỉ

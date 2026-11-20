@@ -327,6 +327,34 @@ textarea {
   border-bottom: 1px solid var(--border);
   padding: 6px 14px;
   font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.banner-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.banner.danger {
+  background: color-mix(in srgb, var(--bad) 12%, var(--panel));
+  border-bottom-color: color-mix(in srgb, var(--bad) 35%, var(--border));
+}
+.problem-banner {
+  align-items: flex-start;
+  padding: 10px 14px;
+}
+.banner-actions {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.banner .confirm-box {
+  margin-top: 8px;
+  background: var(--panel);
+}
+.icon-btn.small-btn {
+  width: 28px;
+  height: 28px;
 }
 .main {
   flex: 1;
@@ -551,8 +579,12 @@ textarea {
 }
 .history li {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+.history li .mono {
+  overflow-wrap: anywhere;
 }
 
 /* độ mạnh */
@@ -941,4 +973,263 @@ textarea {
 }
 .big-star {
   font-size: 20px;
+}
+
+/* ---------------------------------------------------------------- cảnh báo & kết quả */
+.problem-box {
+  background: color-mix(in srgb, var(--bad) 9%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.problem-box p {
+  margin: 0;
+}
+.note-box {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 13px;
+}
+.ok-box {
+  background: color-mix(in srgb, var(--good) 10%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--good) 35%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  width: 100%;
+}
+.check-ok {
+  color: var(--good);
+  font-weight: 600;
+}
+.hint-ok {
+  color: var(--accent);
+}
+.warn-text {
+  color: var(--warn);
+}
+.warning p {
+  margin: 0 0 6px;
+}
+.warning p:last-child {
+  margin: 0;
+}
+.danger-box {
+  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 7%, var(--panel));
+}
+.confirm-actions {
+  margin-top: 8px;
+}
+.center {
+  text-align: center;
+}
+.result-list {
+  margin: 0;
+  padding-left: 20px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.name-list {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+}
+.security-notes {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lock-card h1 svg {
+  vertical-align: -3px;
+  color: var(--warn);
+}
+
+/* lần đầu sử dụng: hai lựa chọn ngang nhau */
+.choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 6px;
+}
+.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 18px 14px;
+  font: inherit;
+  color: inherit;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+}
+.choice:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.choice svg {
+  color: var(--accent);
+}
+.choice strong {
+  font-size: 15px;
+}
+.choice-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+.choice-col .btn.subtle-link {
+  align-self: center;
+}
+@media (max-width: 520px) {
+  .choices {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* thanh trên cùng */
+.pill {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.pill.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+}
+.icon-btn.with-count {
+  position: relative;
+}
+.icon-btn .count {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--panel);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+.list-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.list-foot .btn.link {
+  font-size: 12px;
+}
+
+/* form */
+fieldset.fields.plain {
+  border: none;
+  margin: 0;
+  min-width: 0;
+  min-inline-size: 0;
+}
+.fields-error {
+  padding: 0 22px 8px;
+}
+.fields-error .error {
+  margin: 0;
+}
+
+/* thùng rác, sao lưu */
+.trash-list,
+.diff-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.trash-list > li {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.diff-list .check {
+  align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.diff-list .check input {
+  margin-top: 3px;
+}
+.backup-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.backup-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+}
+.backup-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+}
+.backup-table tr.selected td {
+  background: var(--accent-soft);
+}
+.backup-table .right {
+  text-align: right;
+}
+
+/* điện thoại */
+.m-updated {
+  margin-top: 6px;
+}
+.m-banner {
+  padding: 10px 12px;
+}
+
+/* Không bao giờ in ra giấy / PDF (Ctrl+P đã bị chặn, đây là lớp chặn thứ hai). */
+@media print {
+  body {
+    display: none !important;
+  }
 }

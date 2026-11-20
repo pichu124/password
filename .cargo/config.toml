@@ -1,0 +1,5 @@
+# Liên kết tĩnh thư viện C runtime của MSVC: pwv.exe / pwv-cli.exe chạy được trên máy Windows
+# chưa cài "Visual C++ Redistributable", và không nạp VCRUNTIME140.dll từ thư mục chứa file .exe
+# (tránh bị cài cắm DLL khi chạy từ thư mục Downloads).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

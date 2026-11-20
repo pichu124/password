@@ -8,10 +8,11 @@ mod session;
 mod update;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
+use pwv_vault_core::config::CLIPBOARD_CLEAR_SECS_MAX;
 use session::*;
 use tauri::{Emitter, Manager, State};
 use zeroize::Zeroizing;
@@ -132,13 +133,13 @@ fn accept_rollback(state: State<AppState>) -> AppResult<()> {
 }
 
 #[tauri::command(async)]
-fn lock(app: tauri::AppHandle, state: State<AppState>) -> AppResult<()> {
+fn lock(state: State<AppState>) -> AppResult<()> {
+    // Không xoá clipboard ở đây: "chép mật khẩu → khoá app → dán" là thao tác bình thường; bộ hẹn
+    // giờ vẫn xoá sau N giây vì tiến trình còn chạy.
     with(&state, |s| {
         s.lock();
         Ok(())
-    })?;
-    clear_clipboard_if_ours(&app, None);
-    Ok(())
+    })
 }
 
 #[tauri::command(async)]
@@ -589,9 +590,18 @@ async fn repick_readonly(app: tauri::AppHandle, location: String) -> AppResult<b
 struct ClipboardGuard {
     pending: Mutex<Option<(u64, Zeroizing<String>)>>,
     next_id: AtomicU64,
+    /// Cửa sổ đã đóng và app đang ẩn chờ xoá clipboard rồi mới thoát.
+    exit_when_cleared: AtomicBool,
 }
 
 impl ClipboardGuard {
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
     fn remember(&self, value: Zeroizing<String>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = Some((id, value));
@@ -734,7 +744,12 @@ pub fn run() {
     // Chỉ cho chạy 1 cửa sổ app: tránh 2 tiến trình cùng ghi một file kho.
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // Mở lại app trong lúc nó đang ẩn chờ xoá clipboard: hiện lại cửa sổ và huỷ việc tự thoát.
+        app.state::<ClipboardGuard>()
+            .exit_when_cleared
+            .store(false, Ordering::SeqCst);
         if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
         }
@@ -779,7 +794,6 @@ pub fn run() {
                     let state = handle.state::<AppState>();
                     let locked = lock_state(&state).auto_lock_if_idle();
                     if locked {
-                        clear_clipboard_if_ours(&handle, None);
                         let _ = handle.emit("vault-locked", "idle");
                     }
                 }
@@ -787,11 +801,32 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Đóng cửa sổ ⇒ xoá khoá khỏi RAM và xoá mật khẩu vừa chép khỏi clipboard NGAY
-            // (tiến trình sắp thoát, bộ hẹn giờ xoá clipboard sẽ không kịp chạy).
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Đóng cửa sổ ⇒ xoá khoá khỏi RAM ngay.
                 lock_state(&window.state::<AppState>()).lock();
-                clear_clipboard_if_ours(window.app_handle(), None);
+                let app = window.app_handle().clone();
+                let guard = app.state::<ClipboardGuard>();
+                if cfg!(desktop) && guard.has_pending() {
+                    // Vừa chép một mật khẩu: nếu thoát ngay thì bộ hẹn giờ xoá clipboard chết theo
+                    // tiến trình và mật khẩu nằm lại vô thời hạn (lỗi của bản 0.1.2). Vì vậy chỉ ẨN
+                    // cửa sổ — người dùng vẫn kịp dán — rồi thoát hẳn ngay khi clipboard đã được xoá.
+                    api.prevent_close();
+                    let _ = window.hide();
+                    guard.exit_when_cleared.store(true, Ordering::SeqCst);
+                    std::thread::spawn(move || {
+                        let guard = app.state::<ClipboardGuard>();
+                        let deadline = Instant::now()
+                            + Duration::from_secs(u64::from(CLIPBOARD_CLEAR_SECS_MAX) + 5);
+                        while guard.has_pending() && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        // Người dùng đã mở lại app trong lúc chờ ⇒ không thoát nữa.
+                        if guard.exit_when_cleared.swap(false, Ordering::SeqCst) {
+                            clear_clipboard_if_ours(&app, None);
+                            app.exit(0);
+                        }
+                    });
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![

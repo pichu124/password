@@ -1,6 +1,10 @@
 // Cầu nối tới backend Rust. Chế độ `vite --mode mock` dùng dữ liệu giả để xem giao diện
 // trong trình duyệt; bản build thật không chứa phần mock.
 import type {
+  AppError,
+  BackupEntryView,
+  BackupView,
+  CopyField,
   EntryDetail,
   EntryInput,
   EntrySummary,
@@ -9,18 +13,24 @@ import type {
   HealthView,
   HistoryView,
   ImportView,
+  MasterCheck,
   MoveView,
+  PasswordChangeView,
+  ReadOnlyOpen,
+  RecoverInfo,
   Settings,
   Status,
   Strength,
   SyncResult,
   TotpCode,
+  TrashItem,
+  UnlockInfo,
   UpdateInfo,
 } from "./types";
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
-const IS_MOCK = import.meta.env.MODE === "mock";
+export const IS_MOCK = import.meta.env.MODE === "mock";
 
 let invokePromise: Promise<Invoke> | null = null;
 function getInvoke(): Promise<Invoke> {
@@ -32,55 +42,107 @@ function getInvoke(): Promise<Invoke> {
   return invokePromise;
 }
 
+// ------------------------------------------------------------------ xử lý lỗi chung
+
+/** Mã lỗi nghĩa là phiên đã mất (kho đã bị khoá ở backend). */
+const SESSION_LOST = new Set(["locked", "password_changed"]);
+/** Mã lỗi nghĩa là file kho trên đĩa đang có vấn đề (backend ghi nhận vào `disk_problem`). */
+const DISK_PROBLEM = new Set(["file_damaged", "file_missing", "different_vault", "unsupported_version"]);
+/** Các lệnh tự xử lý lỗi của mình (màn hình khoá / mở khoá) — không kích hoạt xử lý chung. */
+const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path"]);
+
+let sessionLostHandler: ((e: AppError) => void) | null = null;
+let diskProblemHandler: ((e: AppError) => void) | null = null;
+
+/** Đăng ký việc cần làm khi BẤT KỲ lệnh nào báo kho đã khoá / mật khẩu đã đổi ở máy khác. */
+export function onSessionLost(h: ((e: AppError) => void) | null) {
+  sessionLostHandler = h;
+}
+/** Đăng ký việc cần làm khi một lệnh báo file kho trên đĩa có vấn đề. */
+export function onDiskProblem(h: ((e: AppError) => void) | null) {
+  diskProblemHandler = h;
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const invoke = await getInvoke();
-  return invoke<T>(cmd, args);
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    const code = errorCode(e);
+    if (!OWN_HANDLING.has(cmd)) {
+      if (SESSION_LOST.has(code)) sessionLostHandler?.(asAppError(e));
+      else if (DISK_PROBLEM.has(code)) diskProblemHandler?.(asAppError(e));
+    }
+    throw e;
+  }
 }
 
 export const api = {
   status: () => call<Status>("status"),
+  suggestPath: () => call<string>("suggest_path"),
+  vaultTraces: (path: string) => call<string[]>("vault_traces", { path }),
   touch: () => call<void>("touch"),
+  pageLoaded: () => call<void>("page_loaded"),
   createVault: (path: string, password: string) => call<void>("create_vault", { path, password }),
-  unlock: (path: string, password: string) => call<void>("unlock", { path, password }),
+  unlock: (path: string, password: string) => call<UnlockInfo>("unlock", { path, password }),
+  recoverVault: (path: string, password: string) => call<RecoverInfo>("recover_vault", { path, password }),
+  acceptRollback: () => call<void>("accept_rollback"),
   lock: () => call<void>("lock"),
   setVaultPath: (path: string) => call<void>("set_vault_path", { path }),
   list: (query: string) => call<EntrySummary[]>("list_entries", { query }),
   get: (id: string) => call<EntryDetail>("get_entry", { id }),
   reveal: (id: string) => call<string>("reveal_password", { id }),
+  revealNotes: (id: string) => call<string>("reveal_notes", { id }),
+  revealTotpSecret: (id: string) => call<string>("reveal_totp_secret", { id }),
   history: (id: string) => call<HistoryView[]>("password_history", { id }),
   totp: (id: string) => call<TotpCode>("totp_code", { id }),
-  copyField: (id: string, field: "password" | "username" | "totp" | "url") =>
-    call<number>("copy_field", { id, field }),
+  copyField: (id: string, field: CopyField) => call<number>("copy_field", { id, field }),
   copyText: (text: string) => call<number>("copy_text", { text }),
   save: (entry: EntryInput) => call<[string, SyncResult]>("save_entry", { entry }),
+  /** Chuyển vào thùng rác. */
   remove: (id: string) => call<SyncResult>("delete_entry", { id }),
-  toggleFavorite: (id: string) => call<void>("toggle_favorite", { id }),
+  toggleFavorite: (id: string) => call<boolean>("toggle_favorite", { id }),
+  listTrash: () => call<TrashItem[]>("list_trash"),
+  restoreEntry: (id: string) => call<void>("restore_entry", { id }),
+  purgeEntry: (id: string) => call<void>("purge_entry", { id }),
+  emptyTrash: () => call<number>("empty_trash"),
   sync: () => call<SyncResult>("sync_now"),
+  forceWrite: () => call<string | null>("force_write"),
   generate: (request: GenRequest) => call<Generated>("generate", { request }),
+  /** Độ mạnh mật khẩu của MỘT TÀI KHOẢN (không dùng cho master password). */
   strength: (password: string) => call<Strength>("strength", { password }),
+  /** Chấm master password — chỉ gọi khi rời ô nhập hoặc bấm nút, không gọi theo từng phím. */
+  masterCheck: (password: string) => call<MasterCheck>("master_check", { password }),
   changeMaster: (current: string, next: string) =>
-    call<void>("change_master_password", { current, new: next }),
+    call<PasswordChangeView>("change_master_password", { current, new: next }),
   health: (online: boolean) => call<HealthView>("health_report", { online }),
-  importCsv: (path: string, deleteAfter: boolean) =>
-    call<ImportView>("import_csv", { path, deleteAfter }),
+  importCsv: (path: string) => call<ImportView>("import_csv", { path }),
+  deleteImportedCsv: () => call<void>("delete_imported_csv"),
   moveVault: (path: string) => call<MoveView>("move_vault", { path }),
+  listBackups: () => call<BackupView[]>("list_backups"),
+  backupDiff: (name: string) => call<BackupEntryView[]>("backup_diff", { name }),
+  restoreFromBackup: (name: string, ids: string[]) => call<number>("restore_from_backup", { name, ids }),
   getSettings: () => call<Settings>("get_settings"),
   setSettings: (settings: Settings) => call<void>("set_settings", { settings }),
   backupsDir: () => call<string | null>("backups_dir"),
   appVersion: () => call<string>("app_version"),
   // Điện thoại (chỉ đọc)
-  openReadonly: (password: string) => call<{ from_cache: boolean; note: string | null }>("open_readonly", { password }),
+  openReadonly: (password: string) => call<ReadOnlyOpen>("open_readonly", { password }),
   reloadReadonly: () => call<boolean>("reload_readonly"),
   repickReadonly: (location: string) => call<boolean>("repick_readonly", { location }),
   checkUpdate: () => call<UpdateInfo | null>("check_update"),
-  openReleasePage: (url: string) => call<void>("open_release_page", { url }),
+  /** Mở trang tải của một phiên bản (truyền số phiên bản, ví dụ `update.latest`, không phải địa chỉ). */
+  openReleasePage: (version: string) => call<void>("open_release_page", { version }),
 };
 
-/** Lắng nghe sự kiện từ backend (ví dụ "vault-locked"). */
-export async function onEvent(name: string, cb: () => void): Promise<() => void> {
-  if (IS_MOCK) return () => {};
+/** Lắng nghe sự kiện từ backend (ví dụ "vault-locked" với payload "idle" | "suspend"). */
+export async function onEvent(name: string, cb: (payload: unknown) => void): Promise<() => void> {
+  if (IS_MOCK) {
+    const { mockListen } = await import("./mock");
+    return mockListen(name, cb);
+  }
   const { listen } = await import("@tauri-apps/api/event");
-  return listen(name, cb);
+  return listen(name, (e) => cb(e.payload));
 }
 
 /** Hộp thoại chọn file. */
@@ -90,7 +152,10 @@ export async function pickFile(opts: {
   defaultPath?: string;
   filters: { name: string; extensions: string[] }[];
 }): Promise<string | null> {
-  if (IS_MOCK) return opts.save ? opts.defaultPath ?? "C:\\vault.pwv" : "C:\\Users\\toi\\Downloads\\chrome.csv";
+  if (IS_MOCK) {
+    const { mockPickFile } = await import("./mock");
+    return mockPickFile(opts);
+  }
   const dialog = await import("@tauri-apps/plugin-dialog");
   const r = opts.save
     ? await dialog.save({ title: opts.title, defaultPath: opts.defaultPath, filters: opts.filters })
@@ -98,6 +163,82 @@ export async function pickFile(opts: {
   return typeof r === "string" ? r : null;
 }
 
+// ------------------------------------------------------------------ lỗi
+
+function isAppError(e: unknown): e is AppError {
+  return typeof e === "object" && e !== null && typeof (e as AppError).message === "string" && typeof (e as AppError).code === "string";
+}
+
+function asAppError(e: unknown): AppError {
+  return isAppError(e) ? e : { code: "error", message: errorText(e) };
+}
+
+/** Lời nhắn hiển thị được cho người dùng, dù lỗi là chuỗi (backend cũ) hay `{ code, message }`. */
 export function errorText(e: unknown): string {
-  return typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e);
+  if (typeof e === "string") return e;
+  if (isAppError(e)) return e.message;
+  if (e instanceof Error) return e.message;
+  if (typeof e === "object" && e !== null && typeof (e as { message?: unknown }).message === "string") return (e as { message: string }).message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+/** Mã lỗi (`"error"` nếu lỗi không mang mã). */
+export function errorCode(e: unknown): string {
+  return isAppError(e) ? e.code : "error";
+}
+
+// ------------------------------------------------------------------ nạp lại trang
+
+// Sau khi khoá, app nạp lại trang để WebView vứt bỏ toàn bộ bộ nhớ JavaScript (master password vừa
+// gõ, mật khẩu vừa hiện…). Những thông tin KHÔNG bí mật cần hiện sau khi nạp lại (lý do khoá, cảnh
+// báo sau khi mở khoá) được gửi qua sessionStorage của tab này rồi xoá ngay khi đọc.
+
+const STASH_PREFIX = "pwv.after-reload.";
+
+/** Ghi tạm một giá trị KHÔNG bí mật để đọc lại sau khi nạp lại trang. Trả về false nếu không ghi được. */
+export function stashForReload(key: string, value: unknown): boolean {
+  try {
+    sessionStorage.setItem(STASH_PREFIX + key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Đọc (và xoá) giá trị đã ghi tạm trước khi nạp lại trang. */
+export function takeStashed<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(STASH_PREFIX + key);
+    sessionStorage.removeItem(STASH_PREFIX + key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+let reloading = false;
+/** Đang nạp lại trang (để các thông báo lỗi không chen vào lúc đó). */
+export const isReloading = () => reloading;
+
+/** Nạp lại trang ngay (sau khi kho đã khoá). `note`: lý do hiện ở màn hình mở khoá. */
+export function reloadPage(note?: string) {
+  if (reloading) return;
+  reloading = true;
+  if (note) stashForReload("lock-note", note);
+  window.location.reload();
+}
+
+/** Khoá kho rồi nạp lại trang. */
+export async function lockAndReload(note?: string) {
+  if (reloading) return;
+  try {
+    await api.lock();
+  } catch {
+    /* kho có thể đã khoá sẵn — vẫn nạp lại */
+  }
+  reloadPage(note);
 }
