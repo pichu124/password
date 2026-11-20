@@ -68,6 +68,10 @@ export const api = {
   setSettings: (settings: Settings) => call<void>("set_settings", { settings }),
   backupsDir: () => call<string | null>("backups_dir"),
   appVersion: () => call<string>("app_version"),
+  // Điện thoại (chỉ đọc)
+  openReadonly: (password: string) => call<{ from_cache: boolean; note: string | null }>("open_readonly", { password }),
+  reloadReadonly: () => call<boolean>("reload_readonly"),
+  repickReadonly: (location: string) => call<boolean>("repick_readonly", { location }),
   checkUpdate: () => call<UpdateInfo | null>("check_update"),
   openReleasePage: (url: string) => call<void>("open_release_page", { url }),
 };

@@ -86,6 +86,22 @@ lưu ở hai nơi, và dọn Thùng rác.
 Trên Windows, mật khẩu khi copy sẽ **không** lưu vào lịch sử clipboard (Win+V) và không đồng bộ
 lên cloud clipboard.
 
+## App Android (chỉ xem + sao chép)
+
+1. Tab **Actions → Android** → lần chạy mới nhất có dấu ✓ → tải artifact `pwv-android-apk`, giải nén lấy
+   `pwv-android-arm64.apk` và chép sang điện thoại (hoặc tải thẳng trên điện thoại).
+2. Mở file APK để cài. Android sẽ hỏi cho phép cài app từ nguồn này → cho phép.
+3. Mở pwv → **Chọn file kho** → chọn Google Drive / Dropbox / OneDrive ở danh sách bên trái → chọn `vault.pwv`.
+4. Nhập master password.
+
+- Điện thoại **không bao giờ ghi** vào file kho; thêm/sửa làm trên máy tính.
+- App giữ một bản sao (vẫn đã mã hoá) trong bộ nhớ riêng để mở được khi mất mạng. Bấm ⟳ để tải bản mới.
+  Nếu Android báo hết quyền đọc file, bấm **Chọn lại file** (không cần nhập lại master password).
+- Tự khoá sau vài phút không dùng và khi app nằm nền quá 1 phút.
+- Hiện APK được ký bằng khoá tạm cho mỗi lần build, nên muốn cài bản mới phải **gỡ bản cũ trước**
+  (kho trên Drive/Dropbox không bị ảnh hưởng). Muốn cập nhật đè được: tạo keystore (alias `pwv`) và lưu
+  vào Secrets của repo với tên `ANDROID_KEYSTORE_BASE64` và `ANDROID_KEYSTORE_PASSWORD`.
+
 ## Đồng bộ qua Google Drive / Dropbox / OneDrive
 
 1. Cài **Google Drive for Desktop** trên mỗi máy.

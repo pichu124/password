@@ -338,3 +338,45 @@ fn move_refuses_existing_target_and_same_path() {
     assert!(p.exists(), "kho cũ phải còn nguyên");
     assert_eq!(fs::read(&other).unwrap(), b"x", "không ghi đè file có sẵn");
 }
+
+/// Chế độ chỉ đọc (điện thoại): mở từ bytes, tải lại bản mới không cần mật khẩu, không ghi đĩa.
+#[test]
+fn read_only_open_and_replace() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    let mut pc = Vault::create(&p, PW, opts()).unwrap();
+    pc.add(login("A", "a", "a"));
+    pc.save().unwrap();
+
+    let mut phone =
+        Vault::open_bytes("content://dropbox/vault.pwv", &fs::read(&p).unwrap(), PW).unwrap();
+    assert!(phone.is_read_only());
+    assert_eq!(phone.entries().len(), 1);
+    assert!(matches!(phone.save(), Err(Error::ReadOnly)));
+    assert!(matches!(
+        phone.move_to(d.path().join("x.pwv")),
+        Err(Error::ReadOnly)
+    ));
+    assert!(phone.merge_conflict_copies().is_empty());
+    assert!(Vault::open_bytes("x", &fs::read(&p).unwrap(), b"sai").is_err());
+
+    // Máy tính thêm mục và đổi master password; điện thoại tải lại được mà không cần mật khẩu mới.
+    pc.add(login("B", "b", "b"));
+    pc.change_password_insecure_for_tests(b"mat khau moi", KdfParams::INSECURE_TEST)
+        .unwrap();
+    pc.save().unwrap();
+    assert!(phone.replace_from_bytes(&fs::read(&p).unwrap()).unwrap());
+    assert_eq!(phone.entries().len(), 2);
+    assert!(
+        !phone.replace_from_bytes(&fs::read(&p).unwrap()).unwrap(),
+        "không đổi ⇒ false"
+    );
+
+    // Không nhận file của kho khác.
+    let other = d.path().join("other.pwv");
+    Vault::create(&other, PW, opts()).unwrap();
+    assert!(matches!(
+        phone.replace_from_bytes(&fs::read(&other).unwrap()),
+        Err(Error::DifferentVault)
+    ));
+}

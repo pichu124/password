@@ -820,3 +820,125 @@ textarea {
 .btn.link.muted-link {
   color: var(--muted);
 }
+
+/* ---------------------------------------------------------------- điện thoại */
+.m-app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.m-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  min-height: 52px;
+}
+.m-bar .icon-btn {
+  width: 42px;
+  height: 42px;
+}
+.m-search {
+  padding: 10px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.m-search input {
+  font-size: 16px; /* tránh trình duyệt tự phóng to khi gõ */
+  padding: 10px 12px;
+}
+.m-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  flex: 1;
+}
+.m-list .list-item {
+  padding: 12px 10px;
+}
+.m-list .avatar {
+  width: 40px;
+  height: 40px;
+}
+.m-foot {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  text-align: center;
+}
+.m-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.m-detail .detail-head {
+  padding: 14px 16px 12px;
+}
+.m-detail .fields {
+  padding: 12px 14px 24px;
+}
+.m-detail .kv-value .icon-btn {
+  width: 44px;
+  height: 44px;
+}
+.m-detail .detail-foot {
+  padding: 10px 16px;
+}
+.m-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+.m-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.m-settings select {
+  width: 100%;
+}
+.m-center {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: max(16px, env(safe-area-inset-top, 0px)) 16px max(16px, env(safe-area-inset-bottom, 0px));
+  background: radial-gradient(900px 500px at 50% -10%, var(--accent-soft), transparent), var(--bg);
+}
+.m-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 26px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: center;
+}
+.m-card input {
+  font-size: 16px;
+  padding: 12px;
+}
+.m-steps {
+  text-align: left;
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+.m-path {
+  word-break: break-all;
+}
+.big-star {
+  font-size: 20px;
+}

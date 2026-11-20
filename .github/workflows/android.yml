@@ -1,0 +1,89 @@
+# Build app Android (APK, chỉ xem + sao chép) và tải lên dưới dạng artifact.
+name: Android
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "crates/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+          key: android
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: app
+        run: npm ci
+
+      - name: Generate Android project
+        working-directory: app
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npx tauri android init --ci
+          npx tauri icon assets/icon.png
+
+      - name: Build APK (arm64)
+        working-directory: app
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npx tauri android build --apk --target aarch64
+
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          APK=$(find app/src-tauri/gen/android -name "*-unsigned.apk" | head -1)
+          echo "APK chưa ký: $APK"
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+            PASS="$KEYSTORE_PASSWORD"
+          else
+            # Chưa có khoá ký cố định trong Secrets ⇒ tạo khoá tạm cho lần build này.
+            # Hệ quả: muốn cài bản mới phải gỡ bản cũ trước (kho trên Drive/Dropbox không bị ảnh hưởng).
+            PASS="pwv-temp-$(openssl rand -hex 12)"
+            keytool -genkeypair -keystore release.jks -storepass "$PASS" -keypass "$PASS" \
+              -alias pwv -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=pwv"
+            echo "::warning::Đang ký APK bằng khoá tạm. Thêm secret ANDROID_KEYSTORE_BASE64 để cập nhật được mà không cần gỡ app."
+          fi
+          "$BT/zipalign" -f -p 4 "$APK" pwv-aligned.apk
+          "$BT/apksigner" sign --ks release.jks --ks-pass "pass:$PASS" --ks-key-alias pwv \
+            --out pwv-android-arm64.apk pwv-aligned.apk
+          "$BT/apksigner" verify --print-certs pwv-android-arm64.apk
+          rm -f release.jks
+          ls -la pwv-android-arm64.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pwv-android-apk
+          path: pwv-android-arm64.apk

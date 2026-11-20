@@ -98,19 +98,24 @@ fn totp_code(state: State<AppState>, id: String) -> AppResult<TotpCode> {
 
 /// Sao chép trực tiếp từ Rust vào clipboard: mật khẩu không đi qua JavaScript.
 #[tauri::command]
-fn copy_field(state: State<AppState>, id: String, field: String) -> AppResult<u32> {
+fn copy_field(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    id: String,
+    field: String,
+) -> AppResult<u32> {
     let (value, secs) = with(&state, |s| {
         Ok((s.field_value(&id, &field)?, s.config.clipboard_clear_secs))
     })?;
-    copy_with_auto_clear(value, secs)?;
+    copy_with_auto_clear(&app, value, secs)?;
     Ok(secs)
 }
 
 /// Sao chép một giá trị vừa tạo (bộ tạo mật khẩu).
 #[tauri::command]
-fn copy_text(state: State<AppState>, text: String) -> AppResult<u32> {
+fn copy_text(app: tauri::AppHandle, state: State<AppState>, text: String) -> AppResult<u32> {
     let secs = with(&state, |s| Ok(s.config.clipboard_clear_secs))?;
-    copy_with_auto_clear(Zeroizing::new(text), secs)?;
+    copy_with_auto_clear(&app, Zeroizing::new(text), secs)?;
     Ok(secs)
 }
 
@@ -225,9 +230,150 @@ fn backups_dir(state: State<AppState>) -> AppResult<Option<String>> {
     })
 }
 
+// ----------------------------------------------------------------------------- chế độ chỉ đọc (điện thoại)
+
+#[derive(serde::Serialize)]
+struct ReadOnlyOpen {
+    /// Không đọc được file mới (quyền truy cập đã hết hạn hoặc mất mạng) ⇒ đang dùng bản lưu trên máy.
+    from_cache: bool,
+    note: Option<String>,
+}
+
+/// Đọc file kho: đường dẫn thường hoặc URI `content://` (Drive/Dropbox/OneDrive trên Android).
+fn read_location(app: &tauri::AppHandle, location: &str) -> Result<Vec<u8>, String> {
+    use tauri_plugin_fs::FsExt;
+    let fp: tauri_plugin_fs::FilePath = location
+        .parse()
+        .map_err(|_| "Đường dẫn kho không hợp lệ".to_string())?;
+    app.fs()
+        .read(fp)
+        .map_err(|e| format!("Không đọc được file kho: {e}"))
+}
+
+/// Bản sao file kho (vẫn đã mã hoá) trong bộ nhớ riêng của app — để mở được khi offline
+/// hoặc khi Android thu hồi quyền đọc file sau khi tắt app.
+fn cache_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join("vault-cache.pwv"))
+}
+
+fn write_cache(app: &tauri::AppHandle, bytes: &[u8]) {
+    if let Some(p) = cache_path(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, bytes);
+    }
+}
+
+fn vault_location(app: &tauri::AppHandle) -> AppResult<String> {
+    let state = app.state::<AppState>();
+    let s = state.lock().map_err(|_| "mutex".to_string())?;
+    Ok(s.config
+        .vault
+        .clone()
+        .ok_or("Chưa chọn file kho")?
+        .to_string_lossy()
+        .to_string())
+}
+
+#[tauri::command]
+async fn open_readonly(app: tauri::AppHandle, password: String) -> AppResult<ReadOnlyOpen> {
+    let password = Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || {
+        let location = vault_location(&app)?;
+        let (bytes, from_cache, note) = match read_location(&app, &location) {
+            Ok(b) => (b, false, None),
+            Err(e) => match cache_path(&app).and_then(|p| std::fs::read(p).ok()) {
+                Some(b) => (b, true, Some(e)),
+                None => return Err(format!("{e}. Hãy chọn lại file kho.")),
+            },
+        };
+        let state = app.state::<AppState>();
+        let mut s = state.lock().map_err(|_| "mutex".to_string())?;
+        s.unlock_bytes(&location, &bytes, &password)?;
+        drop(s);
+        if !from_cache {
+            write_cache(&app, &bytes);
+        }
+        Ok(ReadOnlyOpen { from_cache, note })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Đọc lại file kho từ Drive/Dropbox/OneDrive. Trả về true nếu có dữ liệu mới.
+#[tauri::command]
+async fn reload_readonly(app: tauri::AppHandle) -> AppResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let location = vault_location(&app)?;
+        let bytes = read_location(&app, &location)
+            .map_err(|e| format!("{e}. Hãy bấm “Chọn lại file” để cấp quyền đọc lần nữa."))?;
+        let state = app.state::<AppState>();
+        let changed = state
+            .lock()
+            .map_err(|_| "mutex".to_string())?
+            .reload_bytes(&bytes)?;
+        write_cache(&app, &bytes);
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Chọn lại file (cấp lại quyền đọc trên Android) rồi tải bản mới — không cần nhập lại mật khẩu
+/// nếu vẫn là cùng một kho.
+#[tauri::command]
+async fn repick_readonly(app: tauri::AppHandle, location: String) -> AppResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = read_location(&app, &location)?;
+        let state = app.state::<AppState>();
+        let mut s = state.lock().map_err(|_| "mutex".to_string())?;
+        let changed = s.reload_bytes(&bytes)?;
+        s.set_vault_location_keep_open(&location)?;
+        drop(s);
+        write_cache(&app, &bytes);
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ----------------------------------------------------------------------------- clipboard
 
-fn copy_with_auto_clear(value: Zeroizing<String>, secs: u32) -> AppResult<()> {
+#[cfg(mobile)]
+fn copy_with_auto_clear(
+    app: &tauri::AppHandle,
+    value: Zeroizing<String>,
+    secs: u32,
+) -> AppResult<()> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .write_text(value.to_string())
+        .map_err(|e| format!("Không chép được vào clipboard: {e}"))?;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(u64::from(secs)));
+        let still_ours = app
+            .clipboard()
+            .read_text()
+            .map(|t| *t == **value)
+            .unwrap_or(true);
+        if still_ours {
+            let _ = app.clipboard().write_text(String::new());
+        }
+    });
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn copy_with_auto_clear(
+    _app: &tauri::AppHandle,
+    value: Zeroizing<String>,
+    secs: u32,
+) -> AppResult<()> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("Không mở được clipboard: {e}"))?;
     set_clipboard(&mut cb, &value)?;
     std::thread::spawn(move || {
@@ -240,7 +386,7 @@ fn copy_with_auto_clear(value: Zeroizing<String>, secs: u32) -> AppResult<()> {
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(all(desktop, windows))]
 fn set_clipboard(cb: &mut arboard::Clipboard, value: &str) -> AppResult<()> {
     use arboard::SetExtWindows;
     // Không vào lịch sử clipboard (Win+V), không đồng bộ lên cloud clipboard.
@@ -251,7 +397,7 @@ fn set_clipboard(cb: &mut arboard::Clipboard, value: &str) -> AppResult<()> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(all(desktop, not(windows)))]
 fn set_clipboard(cb: &mut arboard::Clipboard, value: &str) -> AppResult<()> {
     cb.set_text(value).map_err(|e| e.to_string())
 }
@@ -260,18 +406,32 @@ fn set_clipboard(cb: &mut arboard::Clipboard, value: &str) -> AppResult<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // Chỉ cho chạy 1 cửa sổ app: tránh 2 tiến trình cùng ghi một file kho.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
-        }))
+    let builder = tauri::Builder::default();
+    // Chỉ cho chạy 1 cửa sổ app: tránh 2 tiến trình cùng ghi một file kho.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .manage::<AppState>(Mutex::new(Session::default()))
         .setup(|app| {
+            // Điện thoại không có %APPDATA%: lưu cấu hình trong thư mục riêng của app.
+            #[cfg(mobile)]
+            {
+                if let Ok(dir) = app.path().app_config_dir() {
+                    pwv_vault_core::Config::set_dir(dir);
+                    if let Ok(mut s) = app.state::<AppState>().lock() {
+                        s.config = pwv_vault_core::Config::load();
+                    }
+                }
+            }
             // Luồng tự khoá: chạy độc lập với giao diện, nên vẫn khoá kể cả khi JS bị treo.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -320,6 +480,9 @@ pub fn run() {
             import_csv,
             move_vault,
             app_version,
+            open_readonly,
+            reload_readonly,
+            repick_readonly,
             check_update,
             open_release_page,
             get_settings,

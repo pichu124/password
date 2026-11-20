@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import MobileApp from "./MobileApp";
 import { ToastProvider } from "./components/ui";
 import "./styles.css";
 
@@ -12,10 +13,13 @@ if (import.meta.env.PROD) {
   });
 }
 
+// Điện thoại (Android) dùng giao diện chỉ-xem riêng. `?mobile` để xem thử trong trình duyệt.
+const IS_PHONE = /Android|iPhone|iPad/i.test(navigator.userAgent) || new URLSearchParams(location.search).has("mobile");
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ToastProvider>
-      <App />
+      {IS_PHONE ? <MobileApp /> : <App />}
     </ToastProvider>
   </StrictMode>,
 );

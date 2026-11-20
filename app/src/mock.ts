@@ -130,7 +130,13 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
     }
     case "import_csv": return { imported: 12, duplicates: 3, skipped: 1, detected: "Chrome / Edge", csv_deleted: a.deleteAfter };
     case "move_vault": await sleep(400); return { new_path: a.path, backups_moved: true, old_removed: true, conflicts_merged: 0 };
-    case "app_version": return "0.1.1";
+    case "app_version": return "0.1.2";
+    case "open_readonly":
+      await sleep(600);
+      if (a.password !== "demo-demo-demo-demo") throw "sai mật khẩu chính hoặc file kho đã bị sửa đổi";
+      unlocked = true; return { from_cache: false, note: null };
+    case "reload_readonly": await sleep(400); return false;
+    case "repick_readonly": await sleep(400); return true;
     case "check_update": await sleep(300); return { current: "0.1.1", latest: "0.2.0", available: true, page_url: "https://github.com/pichu124/password/releases/tag/v0.2.0", notes: "- Nút chuyển kho sang thư mục khác\n- Tự kiểm tra bản mới", published_at: "2026-11-21T10:00:00Z" };
     case "open_release_page": return null;
     case "get_settings": return settings;

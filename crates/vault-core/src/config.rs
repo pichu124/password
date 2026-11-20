@@ -29,8 +29,24 @@ impl Default for Config {
     }
 }
 
+static CONFIG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Đường dẫn kho dạng URI (ví dụ `content://…` trên Android) — không phải đường dẫn file thường.
+pub fn is_uri(p: &Path) -> bool {
+    p.to_string_lossy().contains("://")
+}
+
 impl Config {
+    /// Đặt thư mục chứa config.json (dùng trên điện thoại, nơi không có %APPDATA%).
+    /// Chỉ có tác dụng ở lần gọi đầu tiên.
+    pub fn set_dir(dir: PathBuf) {
+        let _ = CONFIG_DIR.set(dir);
+    }
+
     pub fn file() -> Option<PathBuf> {
+        if let Some(d) = CONFIG_DIR.get() {
+            return Some(d.join("config.json"));
+        }
         dirs::config_dir().map(|d| d.join("pwv").join("config.json"))
     }
 
@@ -51,7 +67,11 @@ impl Config {
 
     /// Đặt đường dẫn kho (chuyển sang đường dẫn tuyệt đối) và lưu.
     pub fn set_vault(&mut self, vault: &Path) -> std::io::Result<()> {
-        self.vault = Some(std::path::absolute(vault).unwrap_or_else(|_| vault.to_path_buf()));
+        self.vault = Some(if is_uri(vault) {
+            vault.to_path_buf()
+        } else {
+            std::path::absolute(vault).unwrap_or_else(|_| vault.to_path_buf())
+        });
         self.save()
     }
 }

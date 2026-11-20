@@ -16,16 +16,21 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-clipboard-manager = "2"
 ureq = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = "1"
-arboard = { version = "3", default-features = false }
 pwv-generator = { path = "../../crates/generator" }
 pwv-vault-core = { path = "../../crates/vault-core" }
 pwv-health = { path = "../../crates/health" }
+
+# Chỉ máy tính: một cửa sổ app duy nhất, clipboard qua arboard (loại khỏi lịch sử Win+V).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

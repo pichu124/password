@@ -10,7 +10,7 @@ use pwv_generator::{
     estimate_strength, generate_passphrase, generate_password, PassphraseOptions, PasswordOptions,
     Strength,
 };
-use pwv_vault_core::config::{suggest_vault_location, Config};
+use pwv_vault_core::config::{is_uri, suggest_vault_location, Config};
 use pwv_vault_core::{CreateOptions, Entry, KdfParams, MergeStats, SaveReport, Totp, Vault};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -276,7 +276,8 @@ impl Session {
             .or_else(|| self.config.vault.clone());
         Status {
             unlocked: self.vault.is_some(),
-            vault_exists: path.as_ref().is_some_and(|p| p.is_file()),
+            // Đường dẫn dạng URI (Android) không kiểm tra được bằng is_file ⇒ coi như có.
+            vault_exists: path.as_ref().is_some_and(|p| is_uri(p) || p.is_file()),
             vault_path: path.map(|p| p.display().to_string()),
             suggested_path: suggest_vault_location().display().to_string(),
             conflict_copies: self.vault.as_ref().map_or(0, |v| v.conflict_copies().len()),
@@ -307,8 +308,27 @@ impl Session {
         Ok(())
     }
 
+    /// Mở kho chỉ đọc từ dữ liệu thô (điện thoại).
+    pub fn unlock_bytes(&mut self, label: &str, bytes: &[u8], password: &str) -> AppResult<()> {
+        let v = Vault::open_bytes(label, bytes, password.as_bytes()).map_err(err)?;
+        self.vault = Some(v);
+        self.touch();
+        Ok(())
+    }
+
+    /// Thay nội dung kho chỉ đọc bằng bản mới vừa đọc được. Trả về true nếu có thay đổi.
+    pub fn reload_bytes(&mut self, bytes: &[u8]) -> AppResult<bool> {
+        self.touch();
+        self.vault_mut()?.replace_from_bytes(bytes).map_err(err)
+    }
+
     pub fn lock(&mut self) {
         self.vault = None;
+    }
+
+    /// Ghi nhớ vị trí kho mới mà không khoá kho đang mở (chọn lại file trên điện thoại).
+    pub fn set_vault_location_keep_open(&mut self, location: &str) -> AppResult<()> {
+        self.config.set_vault(Path::new(location)).map_err(err)
     }
 
     pub fn set_vault_path(&mut self, path: &Path) -> AppResult<()> {
@@ -823,6 +843,26 @@ mod tests {
         assert!(r.old_removed);
         assert_eq!(s.list("").unwrap().len(), 1);
         assert!(Vault::open(&target, MP.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn read_only_session_from_bytes() {
+        let (mut s, d) = session();
+        let p = d.path().join("v.pwv");
+        let mut pc = Vault::create(&p, MP.as_bytes(), s.create_opts).unwrap();
+        pc.add(Entry::new("A"));
+        pc.save().unwrap();
+        s.unlock_bytes("content://x/v.pwv", &std::fs::read(&p).unwrap(), MP)
+            .unwrap();
+        assert_eq!(s.list("").unwrap().len(), 1);
+        // Ghi bị chặn ở chế độ chỉ đọc.
+        assert!(s.save_entry(input("B", Some("b"))).is_err());
+        pc.add(Entry::new("C"));
+        pc.save().unwrap();
+        assert!(s.reload_bytes(&std::fs::read(&p).unwrap()).unwrap());
+        let titles: Vec<String> = s.list("").unwrap().into_iter().map(|e| e.title).collect();
+        assert!(titles.contains(&"C".to_string()));
+        assert!(!titles.contains(&"B".to_string()));
     }
 
     #[test]

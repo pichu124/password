@@ -3,7 +3,20 @@ import { api, errorText } from "../api";
 import type { EntryDetail, HistoryView, TotpCode } from "../types";
 import { avatarHue, formatDate, Icon, initials, StrengthMeter, useToast } from "./ui";
 
-export function EntryView({ id, onEdit, onDeleted, onChanged }: { id: string; onEdit: () => void; onDeleted: () => void; onChanged: () => void }) {
+/** Chi tiết một mục. `readOnly` (điện thoại): ẩn Sửa / Xoá / Yêu thích. */
+export function EntryView({
+  id,
+  onEdit,
+  onDeleted,
+  onChanged,
+  readOnly = false,
+}: {
+  id: string;
+  onEdit?: () => void;
+  onDeleted?: () => void;
+  onChanged?: () => void;
+  readOnly?: boolean;
+}) {
   const toast = useToast();
   const [e, setE] = useState<EntryDetail | null>(null);
   const [revealed, setRevealed] = useState<string | null>(null);
@@ -58,7 +71,7 @@ export function EntryView({ id, onEdit, onDeleted, onChanged }: { id: string; on
     try {
       await api.remove(id);
       toast(`Đã xoá “${e!.title}”`);
-      onDeleted();
+      onDeleted?.();
     } catch (err) {
       toast(errorText(err), "error");
     }
@@ -67,7 +80,7 @@ export function EntryView({ id, onEdit, onDeleted, onChanged }: { id: string; on
   async function fav() {
     await api.toggleFavorite(id);
     setE({ ...e!, favorite: !e!.favorite });
-    onChanged();
+    onChanged?.();
   }
 
   return (
@@ -88,12 +101,18 @@ export function EntryView({ id, onEdit, onDeleted, onChanged }: { id: string; on
             </div>
           )}
         </div>
-        <button className={e.favorite ? "icon-btn fav on" : "icon-btn fav"} onClick={fav} title={e.favorite ? "Bỏ yêu thích" : "Yêu thích"}>
-          <Icon name="star" />
-        </button>
-        <button className="btn" onClick={onEdit}>
-          <Icon name="edit" /> Sửa
-        </button>
+        {readOnly ? (
+          e.favorite && <span className="star big-star">★</span>
+        ) : (
+          <>
+            <button className={e.favorite ? "icon-btn fav on" : "icon-btn fav"} onClick={fav} title={e.favorite ? "Bỏ yêu thích" : "Yêu thích"}>
+              <Icon name="star" />
+            </button>
+            <button className="btn" onClick={onEdit}>
+              <Icon name="edit" /> Sửa
+            </button>
+          </>
+        )}
       </header>
 
       <div className="fields">
@@ -186,7 +205,7 @@ export function EntryView({ id, onEdit, onDeleted, onChanged }: { id: string; on
         <span className="muted small">
           Tạo {formatDate(e.created_at)} · Sửa {formatDate(e.updated_at)}
         </span>
-        {confirmDelete ? (
+        {readOnly ? null : confirmDelete ? (
           <span className="row gap">
             <span>Xoá mục này?</span>
             <button className="btn danger" onClick={del}>

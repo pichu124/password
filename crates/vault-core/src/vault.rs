@@ -57,6 +57,8 @@ pub struct Vault {
     data: VaultData,
     /// SHA-256 của file trên đĩa ở lần đọc/ghi gần nhất — để phát hiện thay đổi từ máy khác.
     disk_fingerprint: Option<[u8; 32]>,
+    /// Mở từ dữ liệu thô (ví dụ trên điện thoại): không bao giờ ghi ra đĩa.
+    read_only: bool,
 }
 
 impl std::fmt::Debug for Vault {
@@ -98,12 +100,52 @@ impl Vault {
                 ..Default::default()
             },
             disk_fingerprint: None,
+            read_only: false,
         };
         v.write_to_disk(false)?;
         Ok(v)
     }
 
     /// Mở kho bằng master password.
+    /// Mở kho **chỉ đọc** từ dữ liệu thô (ví dụ file đọc qua Drive/Dropbox trên Android).
+    /// `label` chỉ để hiển thị. Các thao tác ghi ra đĩa sẽ trả về `Error::ReadOnly`.
+    pub fn open_bytes(label: impl Into<PathBuf>, bytes: &[u8], password: &[u8]) -> Result<Vault> {
+        let raw = format::parse(bytes)?;
+        let vault_key = raw.header.unwrap_key(password)?;
+        let data = raw.decrypt_body(&vault_key)?;
+        Ok(Vault {
+            header: raw.header.clone(),
+            path: label.into(),
+            vault_key: LockedKey::new(vault_key),
+            data,
+            disk_fingerprint: Some(fingerprint(bytes)),
+            read_only: true,
+        })
+    }
+
+    /// Thay nội dung bằng phiên bản mới hơn của **cùng kho** (không cần nhập lại mật khẩu,
+    /// kể cả khi máy khác đã đổi master password). Trả về true nếu nội dung thay đổi.
+    pub fn replace_from_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+        let fp = fingerprint(bytes);
+        if Some(fp) == self.disk_fingerprint {
+            return Ok(false);
+        }
+        let raw = format::parse(bytes)?;
+        if raw.header.vault_id != self.header.vault_id {
+            return Err(Error::DifferentVault);
+        }
+        let data = raw.decrypt_body(&self.vault_key)?;
+        let changed = data != self.data;
+        self.data = data;
+        self.header = raw.header.clone();
+        self.disk_fingerprint = Some(fp);
+        Ok(changed)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     pub fn open(path: impl AsRef<Path>, password: &[u8]) -> Result<Vault> {
         let path = path.as_ref().to_path_buf();
         let bytes = fs::read(&path)?;
@@ -116,6 +158,7 @@ impl Vault {
             vault_key: LockedKey::new(vault_key),
             data,
             disk_fingerprint: Some(fingerprint(&bytes)),
+            read_only: false,
         })
     }
 
@@ -296,6 +339,9 @@ impl Vault {
     /// Bản không mở được (kho khác, hỏng) được giữ nguyên và báo lỗi trong kết quả.
     /// Gọi [`Vault::save`] sau đó nếu có gì được gộp.
     pub fn merge_conflict_copies(&mut self) -> Vec<(PathBuf, Result<MergeStats>)> {
+        if self.read_only {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for c in self.conflict_copies() {
             let r = self.merge_file(&c).and_then(|stats| {
@@ -316,6 +362,9 @@ impl Vault {
 
     /// File trên đĩa có bị thay đổi (bởi máy khác) kể từ lần đọc/ghi gần nhất không?
     pub fn changed_on_disk(&self) -> Result<bool> {
+        if self.read_only {
+            return Ok(false);
+        }
         match fs::read(&self.path) {
             Ok(b) => Ok(Some(fingerprint(&b)) != self.disk_fingerprint),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -325,6 +374,9 @@ impl Vault {
 
     /// Nạp lại thay đổi từ đĩa (nếu có) mà không ghi gì.
     pub fn reload(&mut self) -> Result<Option<MergeStats>> {
+        if self.read_only {
+            return Ok(None);
+        }
         let bytes = match fs::read(&self.path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -342,6 +394,9 @@ impl Vault {
     /// Lưu ra đĩa. Nếu file đã bị máy khác sửa (qua Google Drive), tự gộp trước rồi mới ghi,
     /// nên không bao giờ ghi đè mất dữ liệu của máy kia.
     pub fn save(&mut self) -> Result<SaveReport> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         let mut report = SaveReport::default();
         match fs::read(&self.path) {
             Ok(bytes) => {
@@ -364,6 +419,9 @@ impl Vault {
     /// **đọc lại và giải mã thử** bản mới → chỉ khi đúng mới chuyển thư mục sao lưu và xoá file cũ.
     /// Lỗi ở bất kỳ bước nào trước khi xác minh xong thì kho cũ giữ nguyên.
     pub fn move_to(&mut self, new_path: impl AsRef<Path>) -> Result<MoveReport> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
         let new_path = std::path::absolute(new_path.as_ref())?;
         let old_path = std::path::absolute(&self.path)?;
         if new_path == old_path {
