@@ -114,8 +114,29 @@ fn is_transient(e: &std::io::Error) -> bool {
         || matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33))
 }
 
-/// Tìm các bản xung đột mà Google Drive tạo ra cạnh file kho,
-/// ví dụ `vault (1).pwv`, `vault (2).pwv`.
+/// Phần đuôi tên file (sau tên gốc) có phải kiểu bản xung đột của dịch vụ đồng bộ không:
+/// - Google Drive: `vault (1).pwv`
+/// - Dropbox (mọi ngôn ngữ): `vault (Binh's conflicted copy 2026-11-20).pwv`,
+///   `vault (bản sao xung đột của Binh 2026-11-20).pwv`
+/// - OneDrive: `vault-DESKTOP-AB12CD.pwv` (thêm tên máy viết hoa)
+///
+/// Nhận nhầm cũng vô hại: chỉ file có cùng `vault_id` (cùng kho) mới được gộp.
+fn is_conflict_suffix(rest: &str) -> bool {
+    let paren = rest.trim_start();
+    if paren.len() >= 3 && paren.starts_with('(') && paren.ends_with(')') {
+        return !paren[1..paren.len() - 1].trim().is_empty();
+    }
+    if let Some(machine) = rest.strip_prefix('-') {
+        return machine.len() >= 2
+            && machine.chars().any(|c| c.is_ascii_alphanumeric())
+            && machine
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-');
+    }
+    false
+}
+
+/// Tìm các bản xung đột mà Google Drive / Dropbox / OneDrive tạo ra cạnh file kho.
 pub fn conflict_copies(path: &Path) -> Vec<PathBuf> {
     let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) else {
         return Vec::new();
@@ -145,11 +166,7 @@ pub fn conflict_copies(path: &Path) -> Vec<PathBuf> {
             let Some(rest) = s.strip_prefix(&stem) else {
                 return false;
             };
-            let rest = rest.trim_start();
-            rest.len() >= 3
-                && rest.starts_with('(')
-                && rest.ends_with(')')
-                && rest[1..rest.len() - 1].chars().all(|c| c.is_ascii_digit())
+            is_conflict_suffix(rest)
         })
         .collect();
     out.sort();
@@ -186,23 +203,41 @@ mod tests {
     }
 
     #[test]
-    fn finds_drive_conflict_copies() {
+    fn finds_conflict_copies_of_drive_dropbox_onedrive() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("vault.pwv");
         for n in [
             "vault.pwv",
+            // Google Drive
             "vault (1).pwv",
             "vault(2).pwv",
-            "vault (x).pwv",
+            // Dropbox, tiếng Anh và tiếng Việt
+            "vault (Binh's conflicted copy 2026-11-20).pwv",
+            "vault (bản sao xung đột của Binh 2026-11-20).pwv",
+            // OneDrive
+            "vault-DESKTOP-AB12CD.pwv",
+            // Không phải bản xung đột
+            "vault ().pwv",
+            "vault-backup.pwv",
+            "vault2.pwv",
             "vault (1).txt",
             "other (1).pwv",
         ] {
             fs::write(d.path().join(n), b"x").unwrap();
         }
-        let names: Vec<String> = conflict_copies(&p)
+        let mut names: Vec<String> = conflict_copies(&p)
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, vec!["vault (1).pwv", "vault(2).pwv"]);
+        names.sort();
+        let mut expected = vec![
+            "vault (1).pwv",
+            "vault (Binh's conflicted copy 2026-11-20).pwv",
+            "vault (bản sao xung đột của Binh 2026-11-20).pwv",
+            "vault(2).pwv",
+            "vault-DESKTOP-AB12CD.pwv",
+        ];
+        expected.sort();
+        assert_eq!(names, expected);
     }
 }

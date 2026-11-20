@@ -93,8 +93,9 @@ Mọi thời gian là mili-giây kể từ 1970-01-01 UTC.
    - Header có `key_changed_at` lớn hơn được giữ lại.
 3. Ghi nguyên tử: file tạm cùng thư mục → `fsync` → sao lưu file cũ vào `<tên>.backups/`
    (giữ 10 bản) → `rename` đè; thử lại khi Windows báo file đang bị khoá.
-4. Bản xung đột Drive tạo ra (`vault (1).pwv`) phải có cùng `vault_id`; sau khi gộp được
-   chuyển vào thư mục sao lưu.
+4. Bản xung đột do dịch vụ đồng bộ tạo ra — Google Drive `vault (1).pwv`, Dropbox
+   `vault (… conflicted copy …).pwv`, OneDrive `vault-TÊN-MÁY.pwv` — phải có cùng `vault_id`;
+   sau khi gộp được chuyển vào thư mục sao lưu.
 
 Giả định: đồng hồ các máy lệch nhau không quá vài giây (Windows tự đồng bộ giờ qua Internet).
 

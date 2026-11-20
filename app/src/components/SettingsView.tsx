@@ -75,7 +75,7 @@ export function SettingsView({ status, onImported, onSwitchVault }: { status: St
             <span className="muted">Sao lưu tự động (10 bản gần nhất):</span> <span className="path selectable">{backups}</span>
           </p>
           <p className="muted small">
-            Đồng bộ: đặt file kho trong thư mục Google Drive for Desktop trên mỗi máy. App tự kiểm tra thay đổi mỗi 20 giây và tự gộp
+            Đồng bộ: đặt file kho trong thư mục Google Drive, Dropbox hoặc OneDrive trên mỗi máy. App tự kiểm tra thay đổi mỗi 20 giây và tự gộp
             khi hai máy cùng sửa.
           </p>
           <button className="btn" onClick={onSwitchVault}>

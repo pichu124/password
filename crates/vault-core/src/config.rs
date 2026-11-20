@@ -53,23 +53,40 @@ impl Config {
     }
 }
 
-/// Gợi ý vị trí đặt kho: ưu tiên thư mục Google Drive for Desktop
-/// (bản tiếng Anh "My Drive" hoặc tiếng Việt "Drive của tôi"), nếu không có thì Documents.
+/// Gợi ý vị trí đặt kho, theo thứ tự: thư mục Google Drive for Desktop (bản tiếng Anh
+/// "My Drive" hoặc tiếng Việt "Drive của tôi"), Dropbox, OneDrive, cuối cùng là Documents.
 pub fn suggest_vault_location() -> PathBuf {
+    sync_folder_candidates()
+        .into_iter()
+        .find(|d| d.is_dir())
+        .map(|d| d.join("Passwords").join("vault.pwv"))
+        .unwrap_or_else(|| {
+            dirs::document_dir()
+                .or_else(dirs::home_dir)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("vault.pwv")
+        })
+}
+
+fn sync_folder_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
     if cfg!(windows) {
         for letter in b'D'..=b'Z' {
             for name in ["My Drive", "Drive của tôi"] {
-                let dir = PathBuf::from(format!("{}:\\{name}", letter as char));
-                if dir.is_dir() {
-                    return dir.join("Passwords").join("vault.pwv");
-                }
+                out.push(PathBuf::from(format!("{}:\\{name}", letter as char)));
             }
         }
     }
-    dirs::document_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("vault.pwv")
+    if let Some(home) = dirs::home_dir() {
+        out.push(home.join("Dropbox"));
+    }
+    // OneDrive đặt biến môi trường trỏ tới thư mục của nó.
+    for var in ["OneDrive", "OneDriveConsumer"] {
+        if let Some(p) = std::env::var_os(var) {
+            out.push(PathBuf::from(p));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

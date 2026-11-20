@@ -63,7 +63,7 @@ export function UnlockScreen({ status, onUnlocked, onChangeVault }: { status: St
   );
 }
 
-/** Lần đầu sử dụng: tạo kho mới hoặc mở kho có sẵn (ví dụ từ máy khác qua Google Drive). */
+/** Lần đầu sử dụng: tạo kho mới hoặc mở kho có sẵn (ví dụ từ máy khác qua Google Drive / Dropbox / OneDrive). */
 export function SetupScreen({ status, onDone }: { status: Status; onDone: () => void }) {
   const [mode, setMode] = useState<"choose" | "create">("choose");
   const [path, setPath] = useState(status.suggested_path);
@@ -123,12 +123,12 @@ export function SetupScreen({ status, onDone }: { status: Status; onDone: () => 
         <div className="lock-card">
           <img src="/icon.svg" alt="" className="lock-logo" />
           <h1>Chào mừng đến với pwv</h1>
-          <p className="muted">Kho mật khẩu cá nhân, mã hoá trên máy bạn và đồng bộ qua Google Drive.</p>
+          <p className="muted">Kho mật khẩu cá nhân, mã hoá trên máy bạn và đồng bộ qua Google Drive, Dropbox hoặc OneDrive.</p>
           <button className="btn primary wide" onClick={() => setMode("create")}>
             <Icon name="plus" /> Tạo kho mới
           </button>
           <button className="btn wide" onClick={openExisting}>
-            Mở kho có sẵn (từ máy khác / Google Drive)
+            Mở kho có sẵn (từ máy khác / thư mục đồng bộ)
           </button>
         </div>
       </div>
@@ -147,7 +147,7 @@ export function SetupScreen({ status, onDone }: { status: Status; onDone: () => 
               Chọn…
             </button>
           </div>
-          <small className="muted">Đặt trong thư mục Google Drive (ví dụ “G:\My Drive”) để tự đồng bộ giữa các máy.</small>
+          <small className="muted">Đặt trong thư mục Google Drive, Dropbox hoặc OneDrive để tự đồng bộ giữa các máy.</small>
         </label>
         <label className="field">
           <span>Master password</span>

@@ -560,7 +560,7 @@ fn unlock(path: &Path, warn_conflicts: bool) -> Result<Vault> {
     let conflicts = v.conflict_copies();
     if warn_conflicts && !conflicts.is_empty() {
         eprintln!(
-            "⚠  Có {} bản xung đột của Google Drive. Chạy `pwv sync` để gộp.",
+            "⚠  Có {} bản xung đột từ dịch vụ đồng bộ (Drive/Dropbox/OneDrive). Chạy `pwv sync` để gộp.",
             conflicts.len()
         );
     }

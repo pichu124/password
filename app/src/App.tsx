@@ -97,7 +97,7 @@ function VaultScreen({ status, onLocked, onSwitchVault }: { status: Status; onLo
         } else if (manual) {
           toast("Đã đồng bộ — không có thay đổi mới");
         }
-        if (r.conflicts_merged) toast(`Đã gộp ${r.conflicts_merged} bản xung đột của Google Drive`, "info");
+        if (r.conflicts_merged) toast(`Đã gộp ${r.conflicts_merged} bản xung đột từ dịch vụ đồng bộ`, "info");
         r.errors.forEach((e) => toast(e, "error"));
         if (r.password_changed_elsewhere) toast("Master password đã được đổi ở máy khác — lần sau hãy dùng mật khẩu mới", "info");
       } catch (e) {
@@ -198,7 +198,7 @@ function VaultScreen({ status, onLocked, onSwitchVault }: { status: Status; onLo
 
       {status.conflict_copies > 0 && (
         <div className="banner">
-          Google Drive đã tạo {status.conflict_copies} bản xung đột. <button className="btn link" onClick={() => sync(true)}>Gộp ngay</button>
+          Dịch vụ đồng bộ (Drive/Dropbox/OneDrive) đã tạo {status.conflict_copies} bản xung đột. <button className="btn link" onClick={() => sync(true)}>Gộp ngay</button>
         </div>
       )}
 

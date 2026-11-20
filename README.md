@@ -86,7 +86,7 @@ lưu ở hai nơi, và dọn Thùng rác.
 Trên Windows, mật khẩu khi copy sẽ **không** lưu vào lịch sử clipboard (Win+V) và không đồng bộ
 lên cloud clipboard.
 
-## Đồng bộ qua Google Drive
+## Đồng bộ qua Google Drive / Dropbox / OneDrive
 
 1. Cài **Google Drive for Desktop** trên mỗi máy.
 2. Máy đầu tiên: `pwv init` và chọn vị trí trong thư mục Drive (ví dụ `G:\My Drive\Passwords\vault.pwv`).
@@ -94,6 +94,12 @@ lên cloud clipboard.
 4. Nếu Drive tạo file `vault (1).pwv` vì hai máy sửa cùng lúc, chạy `pwv sync` để gộp.
 
 Nên bật chế độ **“Mirror files”** (lưu bản sao trên máy) cho thư mục chứa kho để vẫn dùng được khi mất mạng.
+
+
+**Dropbox / OneDrive** dùng y hệt: đặt `vault.pwv` trong thư mục `Dropbox` hoặc `OneDrive` thay cho thư mục Drive.
+App tự nhận ra bản xung đột của cả ba dịch vụ (`vault (1).pwv`, `vault (… conflicted copy …).pwv`,
+`vault-TÊN-MÁY.pwv`) và gộp lại. Với Dropbox, bấm chuột phải thư mục chứa kho → **Make available offline**;
+với OneDrive chọn **Always keep on this device**.
 
 ## Cứu hộ dữ liệu
 

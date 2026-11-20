@@ -257,3 +257,37 @@ fn rejects_garbage_files() {
     fs::write(&p, &b).unwrap();
     assert!(matches!(Vault::open(&p, PW), Err(Error::BadFormat)));
 }
+
+/// Bản xung đột kiểu Dropbox / OneDrive cũng được gộp và chuyển vào thư mục sao lưu.
+#[test]
+fn merges_dropbox_and_onedrive_conflict_copies() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    let mut v = Vault::create(&p, PW, opts()).unwrap();
+    v.add(login("Base", "b", "b"));
+    v.save().unwrap();
+    for (name, title) in [
+        (
+            "vault (Binh's conflicted copy 2026-11-20).pwv",
+            "Từ Dropbox",
+        ),
+        ("vault-DESKTOP-AB12CD.pwv", "Từ OneDrive"),
+    ] {
+        let c = d.path().join(name);
+        fs::copy(&p, &c).unwrap();
+        let mut other = Vault::open(&c, PW).unwrap();
+        other.add(login(title, "x", "x"));
+        other.save().unwrap();
+    }
+    let mut v = Vault::open(&p, PW).unwrap();
+    let results = v.merge_conflict_copies();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|(_, r)| r.is_ok()));
+    v.save().unwrap();
+    let titles: Vec<&str> = v.entries().iter().map(|e| e.title.as_str()).collect();
+    assert!(titles.contains(&"Từ Dropbox") && titles.contains(&"Từ OneDrive"));
+    assert!(
+        v.conflict_copies().is_empty(),
+        "đã chuyển vào thư mục sao lưu"
+    );
+}
