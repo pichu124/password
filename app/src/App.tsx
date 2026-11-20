@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, pickFile, reloadPage, stashForReload, takeStashed } from "./api";
+import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, pickFile, reloadPage, STASHED_LOCK_NOTE, STASHED_UNLOCK_INFO, stashForReload } from "./api";
 import { EntryForm } from "./components/EntryForm";
 import { EntryView } from "./components/EntryView";
 import { Generator } from "./components/Generator";
@@ -25,9 +25,8 @@ const UPDATE_CHECK_EVERY_MS = 24 * 60 * 60 * 1000;
 const TOUCH_EVERY_MS = 15_000;
 
 // Thông tin (không bí mật) mà trang trước để lại trước khi nạp lại: lý do khoá, kết quả mở khoá.
-// Đọc một lần khi nạp module (StrictMode chạy effect hai lần).
-const STASHED_NOTE = takeStashed<string>("lock-note");
-const STASHED_UNLOCK = takeStashed<UnlockInfo>("unlock-info");
+const STASHED_NOTE = STASHED_LOCK_NOTE;
+const STASHED_UNLOCK = STASHED_UNLOCK_INFO;
 
 let pageLoaded: Promise<void> | null = null;
 /** Báo backend trang vừa được nạp — đúng một lần cho mỗi lần nạp trang. */

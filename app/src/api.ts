@@ -220,6 +220,12 @@ export function takeStashed<T>(key: string): T | null {
   }
 }
 
+// Đọc đúng MỘT lần khi nạp trang (main.tsx nạp cả App lẫn MobileApp; StrictMode chạy effect hai lần).
+/** Lý do khoá do trang trước để lại. */
+export const STASHED_LOCK_NOTE = takeStashed<string>("lock-note");
+/** Kết quả mở khoá (không bí mật) do trang trước để lại. */
+export const STASHED_UNLOCK_INFO = takeStashed<UnlockInfo>("unlock-info");
+
 let reloading = false;
 /** Đang nạp lại trang (để các thông báo lỗi không chen vào lúc đó). */
 export const isReloading = () => reloading;

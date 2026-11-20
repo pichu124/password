@@ -1,6 +1,6 @@
 // Giao diện điện thoại (Android): chỉ xem + sao chép. Thêm/sửa làm trên máy tính.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorCode, errorText, isReloading, lockAndReload, onEvent, onSessionLost, pickFile, reloadPage, takeStashed } from "./api";
+import { api, errorCode, errorText, isReloading, lockAndReload, onEvent, onSessionLost, pickFile, reloadPage, STASHED_LOCK_NOTE } from "./api";
 import { EntryView } from "./components/EntryView";
 import { Generator } from "./components/Generator";
 import { avatarHue, formatDateTime, Icon, initials, useClipboardGuard, useToast } from "./components/ui";
@@ -12,7 +12,7 @@ const LOCK_WHEN_HIDDEN_MS = 60_000;
 type Screen = { kind: "list" } | { kind: "detail"; id: string } | { kind: "settings" } | { kind: "generator" };
 
 // Lý do khoá do trang trước để lại (trên điện thoại, page_loaded khoá lại và xoá lock_note của backend).
-const STASHED_NOTE = takeStashed<string>("lock-note");
+const STASHED_NOTE = STASHED_LOCK_NOTE;
 
 let pageLoaded: Promise<void> | null = null;
 /** Trang mới trên điện thoại ⇒ backend khoá lại cho chắc (Android có thể vừa dựng lại WebView). */
@@ -53,7 +53,7 @@ export default function MobileApp() {
     });
     // Mật khẩu chính đã đổi trên máy tính / kho đã khoá ⇒ về màn hình mở khoá (nạp lại trang).
     onSessionLost((e: AppError) =>
-      reloadPage(e.code === "password_changed" ? `${e.message} Hãy nhập mật khẩu chính MỚI (mật khẩu bạn vừa đặt trên máy tính).` : "Kho đã bị khoá."),
+      reloadPage(e.code === "password_changed" ? `${e.message.replace(/[.\s]*$/, ".")} Hãy nhập mật khẩu chính MỚI (mật khẩu bạn vừa đặt trên máy tính).` : "Kho đã bị khoá."),
     );
     return () => {
       alive = false;

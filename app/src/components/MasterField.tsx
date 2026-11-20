@@ -97,9 +97,10 @@ export function MasterPasswordField({
         </button>
       </div>
       {suggested && show && (
-        <small className="hint-ok">
-          Hãy chép cụm từ này ra giấy ngay (đúng từng chữ và dấu gạch), cất ở nơi an toàn, rồi nhập lại ở ô bên dưới.
-        </small>
+        <div className="passphrase-show">
+          <div className="mono selectable">{value}</div>
+          <small>Hãy chép cụm từ này ra giấy ngay (đúng từng chữ và dấu gạch), cất ở nơi an toàn, rồi nhập lại ở ô bên dưới.</small>
+        </div>
       )}
       {mc.check && <small className={mc.check.ok ? "check-ok" : "error"}>{mc.check.ok ? "✓ Đạt yêu cầu" : mc.check.message}</small>}
       {mc.checkError && <small className="error">{mc.checkError}</small>}
