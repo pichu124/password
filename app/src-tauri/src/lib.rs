@@ -1,6 +1,7 @@
 //! Lớp Tauri: chuyển lời gọi từ giao diện vào `Session`.
 
 mod session;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -183,6 +184,31 @@ fn move_vault(state: State<AppState>, path: String) -> AppResult<MoveView> {
 }
 
 #[tauri::command]
+fn app_version() -> &'static str {
+    update::CURRENT_VERSION
+}
+
+/// Kiểm tra bản mới (cần mạng ⇒ chạy nền). Trả về None nếu chưa có bản phát hành nào.
+#[tauri::command]
+async fn check_update() -> AppResult<Option<update::UpdateInfo>> {
+    tauri::async_runtime::spawn_blocking(update::check)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Mở trang tải bản mới trong trình duyệt. Chỉ cho phép link release của repo pwv.
+#[tauri::command]
+fn open_release_page(app: tauri::AppHandle, url: String) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    if !url.starts_with(update::RELEASES_PAGE_PREFIX) {
+        return Err("Link không hợp lệ".into());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_settings(state: State<AppState>) -> AppResult<Settings> {
     with(&state, |s| Ok(s.settings()))
 }
@@ -243,6 +269,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage::<AppState>(Mutex::new(Session::default()))
         .setup(|app| {
             // Luồng tự khoá: chạy độc lập với giao diện, nên vẫn khoá kể cả khi JS bị treo.
@@ -292,6 +319,9 @@ pub fn run() {
             health_report,
             import_csv,
             move_vault,
+            app_version,
+            check_update,
+            open_release_page,
             get_settings,
             set_settings,
             backups_dir,

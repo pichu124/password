@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errorText, pickFile } from "../api";
-import type { Settings, Status, Strength } from "../types";
+import type { Settings, Status, Strength, UpdateInfo } from "../types";
 import { Icon, StrengthMeter, useDebounced, useToast } from "./ui";
 
 export function SettingsView({
@@ -72,6 +72,8 @@ export function SettingsView({
           </p>
         </section>
 
+        {s && <AboutUpdates settings={s} onChange={update} />}
+
         <ChangeMaster />
 
         <ImportCsv onImported={onImported} />
@@ -101,6 +103,61 @@ export function SettingsView({
         </section>
       </div>
     </div>
+  );
+}
+
+function AboutUpdates({ settings, onChange }: { settings: Settings; onChange: (s: Settings) => void }) {
+  const toast = useToast();
+  const [version, setVersion] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [found, setFound] = useState<UpdateInfo | null>(null);
+
+  useEffect(() => {
+    api.appVersion().then(setVersion);
+  }, []);
+
+  async function checkNow() {
+    setBusy(true);
+    try {
+      const u = await api.checkUpdate();
+      setFound(u?.available ? u : null);
+      if (!u) toast("Chưa có bản phát hành nào trên GitHub", "info");
+      else if (!u.available) toast(`Bạn đang dùng bản mới nhất (${u.current})`);
+    } catch (e) {
+      toast(errorText(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h3>Phiên bản & cập nhật</h3>
+      <p className="small">
+        <span className="muted">Đang dùng:</span> <strong>pwv {version}</strong>
+      </p>
+      <label className="check">
+        <input type="checkbox" checked={settings.check_updates} onChange={(e) => onChange({ ...settings, check_updates: e.target.checked })} />
+        Tự kiểm tra bản mới mỗi ngày
+      </label>
+      <p className="muted small">
+        App chỉ hỏi GitHub xem có bản mới không rồi báo cho bạn; không tự tải hay tự cài. Không có dữ liệu kho nào được gửi đi.
+      </p>
+      {found && (
+        <div className="confirm-box">
+          <p className="small">
+            Có bản mới <strong>{found.latest}</strong>.
+          </p>
+          {found.notes && <pre className="notes small">{found.notes}</pre>}
+          <button className="btn primary" onClick={() => api.openReleasePage(found.page_url)}>
+            Mở trang tải
+          </button>
+        </div>
+      )}
+      <button className="btn" disabled={busy} onClick={checkNow}>
+        {busy ? "Đang kiểm tra…" : "Kiểm tra ngay"}
+      </button>
+    </section>
   );
 }
 

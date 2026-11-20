@@ -211,6 +211,12 @@ pub struct MoveView {
 pub struct Settings {
     pub auto_lock_minutes: u32,
     pub clipboard_clear_secs: u32,
+    #[serde(default = "yes")]
+    pub check_updates: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 // ----------------------------------------------------------------------------- logic
@@ -612,12 +618,14 @@ impl Session {
         Settings {
             auto_lock_minutes: self.config.auto_lock_minutes,
             clipboard_clear_secs: self.config.clipboard_clear_secs,
+            check_updates: self.config.check_updates,
         }
     }
 
     pub fn set_settings(&mut self, s: Settings) -> AppResult<()> {
         self.config.auto_lock_minutes = s.auto_lock_minutes.min(240);
         self.config.clipboard_clear_secs = s.clipboard_clear_secs.clamp(5, 300);
+        self.config.check_updates = s.check_updates;
         self.config.save().map_err(err)
     }
 

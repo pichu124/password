@@ -117,6 +117,18 @@ Các bản sao lưu tự động nằm trong `vault.pwv.backups\` (10 bản gầ
   password manager đã được audit (Bitwarden/KeePassXC) cho các tài khoản quan trọng nhất.
 - Không chống được mã độc/keylogger đang chạy trên máy khi bạn mở kho.
 
+## Phát hành bản mới
+
+1. Nâng phiên bản (cập nhật cả 4 file cấu hình cùng lúc):
+   ```bash
+   python tools/set_version.py 0.1.3
+   ```
+2. Commit và push.
+3. Vào tab **Actions → Release → Run workflow**. Workflow chạy test, build bộ cài + `pwv-cli.exe`,
+   rồi tạo bản phát hành `v0.1.3` trên GitHub Releases kèm `SHA256SUMS.txt`.
+4. App đang cài trên các máy sẽ tự hiện thông báo “Có phiên bản mới” trong vòng 24 giờ
+   (hoặc vào **Cài đặt → Kiểm tra ngay**).
+
 ## Phát triển
 
 ```bash

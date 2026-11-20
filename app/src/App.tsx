@@ -7,7 +7,7 @@ import { Health } from "./components/Health";
 import { SetupScreen, UnlockScreen } from "./components/Lock";
 import { SettingsView } from "./components/SettingsView";
 import { avatarHue, Icon, initials, useToast } from "./components/ui";
-import type { EntrySummary, Status } from "./types";
+import type { EntrySummary, Status, UpdateInfo } from "./types";
 
 type View =
   | { kind: "empty" }
@@ -18,11 +18,39 @@ type View =
   | { kind: "settings" };
 
 const SYNC_EVERY_MS = 20_000;
+const UPDATE_CHECK_EVERY_MS = 24 * 60 * 60 * 1000;
+
+/** Kiểm tra bản mới khi mở app và mỗi 24 giờ (nếu người dùng bật trong Cài đặt). */
+function useUpdateCheck(): UpdateInfo | null {
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const run = async () => {
+      try {
+        const s = await api.getSettings();
+        if (!s.check_updates) return;
+        const u = await api.checkUpdate();
+        if (alive && u?.available) setInfo(u);
+      } catch {
+        /* mất mạng hoặc GitHub lỗi: thử lại lần sau, không làm phiền người dùng */
+      }
+    };
+    const first = setTimeout(run, 4000);
+    const every = setInterval(run, UPDATE_CHECK_EVERY_MS);
+    return () => {
+      alive = false;
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, []);
+  return info;
+}
 const TOUCH_EVERY_MS = 15_000;
 
 export default function App() {
   const toast = useToast();
   const [status, setStatus] = useState<Status | null>(null);
+  const update = useUpdateCheck();
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -56,16 +84,18 @@ export default function App() {
   if (!status) return null;
   if (!status.vault_path || !status.vault_exists) return <SetupScreen status={status} onDone={refreshStatus} />;
   if (!status.unlocked) return <UnlockScreen status={status} onUnlocked={refreshStatus} onChangeVault={switchVault} />;
-  return <VaultScreen status={status} onLocked={refreshStatus} onStatusChange={refreshStatus} onSwitchVault={switchVault} />;
+  return <VaultScreen status={status} update={update} onLocked={refreshStatus} onStatusChange={refreshStatus} onSwitchVault={switchVault} />;
 }
 
 function VaultScreen({
   status,
+  update,
   onLocked,
   onStatusChange,
   onSwitchVault,
 }: {
   status: Status;
+  update: UpdateInfo | null;
   onLocked: () => void;
   onStatusChange: () => void;
   onSwitchVault: () => void;
@@ -75,6 +105,7 @@ function VaultScreen({
   const [entries, setEntries] = useState<EntrySummary[]>([]);
   const [view, setView] = useState<View>({ kind: "empty" });
   const [syncing, setSyncing] = useState(false);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(async () => {
@@ -206,6 +237,17 @@ function VaultScreen({
         </nav>
       </header>
 
+      {update && !updateDismissed && (
+        <div className="banner info">
+          Có phiên bản mới <strong>{update.latest}</strong> (bạn đang dùng {update.current}).{" "}
+          <button className="btn link" onClick={() => api.openReleasePage(update.page_url)}>
+            Mở trang tải
+          </button>{" "}
+          <button className="btn link muted-link" onClick={() => setUpdateDismissed(true)}>
+            Để sau
+          </button>
+        </div>
+      )}
       {status.conflict_copies > 0 && (
         <div className="banner">
           Dịch vụ đồng bộ (Drive/Dropbox/OneDrive) đã tạo {status.conflict_copies} bản xung đột. <button className="btn link" onClick={() => sync(true)}>Gộp ngay</button>

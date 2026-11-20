@@ -142,4 +142,14 @@ export interface MoveView {
 export interface Settings {
   auto_lock_minutes: number;
   clipboard_clear_secs: number;
+  check_updates: boolean;
+}
+
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  available: boolean;
+  page_url: string;
+  notes: string;
+  published_at: string;
 }

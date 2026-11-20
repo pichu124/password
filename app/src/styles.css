@@ -813,3 +813,10 @@ textarea {
   color: var(--accent);
   background: none;
 }
+
+.banner.info {
+  background: var(--accent-soft);
+}
+.btn.link.muted-link {
+  color: var(--muted);
+}

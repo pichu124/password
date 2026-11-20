@@ -15,6 +15,7 @@ import type {
   Strength,
   SyncResult,
   TotpCode,
+  UpdateInfo,
 } from "./types";
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -66,6 +67,9 @@ export const api = {
   getSettings: () => call<Settings>("get_settings"),
   setSettings: (settings: Settings) => call<void>("set_settings", { settings }),
   backupsDir: () => call<string | null>("backups_dir"),
+  appVersion: () => call<string>("app_version"),
+  checkUpdate: () => call<UpdateInfo | null>("check_update"),
+  openReleasePage: (url: string) => call<void>("open_release_page", { url }),
 };
 
 /** Lắng nghe sự kiện từ backend (ví dụ "vault-locked"). */

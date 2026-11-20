@@ -14,6 +14,8 @@ pub struct Config {
     pub auto_lock_minutes: u32,
     /// Tự xoá clipboard sau bao nhiêu giây.
     pub clipboard_clear_secs: u32,
+    /// App tự kiểm tra bản mới trên GitHub (mỗi ngày một lần).
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -22,6 +24,7 @@ impl Default for Config {
             vault: None,
             auto_lock_minutes: 5,
             clipboard_clear_secs: 20,
+            check_updates: true,
         }
     }
 }
@@ -98,6 +101,7 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"vault":"C:\\x\\vault.pwv"}"#).unwrap();
         assert_eq!(c.auto_lock_minutes, 5);
         assert_eq!(c.clipboard_clear_secs, 20);
+        assert!(c.check_updates);
         assert!(c.vault.is_some());
     }
 }
