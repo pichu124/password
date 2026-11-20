@@ -1,5 +1,7 @@
 /target
 *.pwv
+# File kho mẫu dùng cho test tương thích ngược (đã mã hoá, mật khẩu ghi trong test).
+!crates/vault-core/tests/fixtures/*.pwv
 *.pwv.backups/
 *.tmp
 __pycache__/

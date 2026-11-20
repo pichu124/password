@@ -4,7 +4,7 @@
 use proptest::prelude::*;
 use pwv_vault_core::format;
 use pwv_vault_core::import::import_csv;
-use pwv_vault_core::{CreateOptions, Entry, KdfParams, Totp, Vault};
+use pwv_vault_core::{CreateOptions, Entry, KdfParams, OpenOptions, Totp, Vault};
 
 const PW: &[u8] = b"fuzz-master-password";
 
@@ -33,11 +33,12 @@ proptest! {
     #[test]
     fn parse_never_panics_on_random_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
         let _ = format::parse(&bytes);
+        let _ = format::peek_header(&bytes);
     }
 
     #[test]
     fn parse_never_panics_with_valid_magic(mut tail in proptest::collection::vec(any::<u8>(), 0..512), len in any::<u32>()) {
-        let mut b = b"PWV1\x01\x00".to_vec();
+        let mut b = b"PWV1\x02\x00".to_vec();
         b.extend_from_slice(&(len % 1024).to_le_bytes());
         b.append(&mut tail);
         let _ = format::parse(&b);
@@ -75,6 +76,13 @@ proptest! {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("bad.pwv");
         std::fs::write(&p, &bad).unwrap();
-        prop_assert!(Vault::open(&p, PW).is_err());
+        let opened = Vault::open_with(
+            &p,
+            PW,
+            OpenOptions {
+                allow_weak_kdf: true,
+            },
+        );
+        prop_assert!(opened.is_err());
     }
 }

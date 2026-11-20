@@ -1,10 +1,36 @@
-//! Mô hình dữ liệu bên trong kho (toàn bộ đều được mã hoá trên đĩa).
+//! Mô hình dữ liệu bên trong kho (toàn bộ đều được mã hoá trên đĩa) và thuật toán gộp hai
+//! phiên bản của cùng một kho.
+//!
+//! # Gộp (merge)
+//!
+//! Mỗi trường của một mục là một "ô ghi-sau-thắng": cặp *(thời điểm sửa, giá trị)*. Gộp hai phiên
+//! bản = với TỪNG TRƯỜNG lấy cặp lớn hơn (so thời điểm trước; nếu bằng nhau thì so giá trị theo thứ
+//! tự từ điển — chỉ để hai máy luôn chọn giống nhau). Hệ quả:
+//!
+//! - Máy A đổi mật khẩu, máy B (chưa thấy thay đổi đó) sửa ghi chú ⇒ kết quả có cả hai thay đổi.
+//! - Hai máy cùng đổi mật khẩu của một mục ⇒ bản sửa sau thắng, mật khẩu kia vào lịch sử.
+//! - Xoá = chuyển vào thùng rác (cũng là một "trường" có thời điểm riêng), nên xoá ở máy này và sửa
+//!   ở máy kia không làm mất gì: mục nằm trong thùng rác với nội dung mới nhất.
+//! - Xoá vĩnh viễn để lại một *tombstone*: mục đó biến mất trên MỌI máy và không bao giờ quay lại
+//!   qua đồng bộ (muốn lấy lại phải khôi phục từ bản sao lưu — khi đó nó là một mục mới).
+//!
+//! Phép gộp có tính giao hoán, kết hợp và luỹ đẳng (kiểm chứng bằng property test trong
+//! `tests/merge_props.rs`), nên các máy gộp theo thứ tự nào cũng ra đúng một kết quả, và hai máy
+//! không bao giờ "ghi đè qua lại" vô hạn.
+
+use std::collections::btree_map::Entry as MapEntry;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::crypto::KEY_LEN;
+use crate::error::{Error, Result};
+
 /// Số bản mật khẩu cũ giữ lại cho mỗi mục.
 pub const MAX_HISTORY: usize = 20;
+/// Số khoá cũ (của các lần đổi master password trước) giữ lại để còn mở được bản sao lưu cũ.
+pub const MAX_OLD_KEYS: usize = 16;
 
 /// Thời gian hiện tại, mili-giây kể từ 1970 (UTC).
 pub fn now_ms() -> i64 {
@@ -14,16 +40,74 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct HistoryItem {
     pub password: String,
     /// Thời điểm mật khẩu này bị thay thế.
     pub replaced_at: i64,
 }
 
+impl std::fmt::Debug for HistoryItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistoryItem")
+            .field("replaced_at", &self.replaced_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Thời điểm sửa cuối (ms) của từng trường trong một mục. 0 = chưa biết (file định dạng v1):
+/// khi nạp sẽ được thay bằng `updated_at` của mục.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FieldTimes {
+    pub title: i64,
+    pub username: i64,
+    pub password: i64,
+    pub urls: i64,
+    pub notes: i64,
+    pub totp: i64,
+    pub tags: i64,
+    pub favorite: i64,
+    /// Lần cuối mục được chuyển vào / lấy ra khỏi thùng rác (0 = chưa bao giờ).
+    pub deleted: i64,
+}
+
+impl FieldTimes {
+    fn all_content(t: i64) -> Self {
+        Self {
+            title: t,
+            username: t,
+            password: t,
+            urls: t,
+            notes: t,
+            totp: t,
+            tags: t,
+            favorite: t,
+            deleted: 0,
+        }
+    }
+
+    /// Thời điểm sửa nội dung gần nhất (không tính việc chuyển vào/ra thùng rác).
+    fn content_max(&self) -> i64 {
+        [
+            self.title,
+            self.username,
+            self.password,
+            self.urls,
+            self.notes,
+            self.totp,
+            self.tags,
+            self.favorite,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+}
+
 // Lưu ý: không dùng `#[serde(default)]` ở cấp struct vì `Entry` có `Drop` (zeroize);
 // thay vào đó đặt default cho từng trường để file cũ thiếu trường vẫn đọc được.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct Entry {
     pub id: String,
     #[serde(default)]
@@ -47,8 +131,23 @@ pub struct Entry {
     pub password_history: Vec<HistoryItem>,
     #[serde(default)]
     pub created_at: i64,
+    /// Lần sửa nội dung gần nhất = giá trị lớn nhất trong `field_times` (trừ `deleted`).
     #[serde(default)]
     pub updated_at: i64,
+    #[serde(default)]
+    #[zeroize(skip)]
+    pub field_times: FieldTimes,
+}
+
+/// Không bao giờ in bí mật ra log / thông báo lỗi.
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for Entry {
@@ -67,6 +166,7 @@ impl Default for Entry {
             password_history: Vec::new(),
             created_at: now,
             updated_at: now,
+            field_times: FieldTimes::all_content(now),
         }
     }
 }
@@ -90,32 +190,112 @@ impl Entry {
             || self.urls.iter().any(|u| u.to_lowercase().contains(&q))
             || self.tags.iter().any(|t| t.to_lowercase().contains(&q))
     }
+
+    /// Thời điểm mục được chuyển vào thùng rác (chỉ có nghĩa với mục đang nằm trong thùng rác).
+    pub fn trashed_at(&self) -> i64 {
+        self.field_times.deleted
+    }
+
+    /// Điền thời điểm cho các trường chưa có (file v1) và tính lại `updated_at`.
+    fn normalize_times(&mut self) {
+        // max(...) để chuẩn hoá hai lần cũng cho cùng một kết quả.
+        let base = self.updated_at.max(self.field_times.content_max());
+        let ft = &mut self.field_times;
+        for t in [
+            &mut ft.title,
+            &mut ft.username,
+            &mut ft.password,
+            &mut ft.urls,
+            &mut ft.notes,
+            &mut ft.totp,
+            &mut ft.tags,
+            &mut ft.favorite,
+        ] {
+            if *t == 0 {
+                *t = base;
+            }
+        }
+        self.updated_at = ft.content_max();
+    }
+
+    /// Đưa lịch sử mật khẩu về dạng chuẩn: mỗi mật khẩu một dòng (giữ thời điểm muộn nhất), không
+    /// chứa mật khẩu hiện tại, không có dòng nào "muộn hơn" mật khẩu hiện tại, mới nhất trước,
+    /// tối đa [`MAX_HISTORY`] dòng. (Hai điều kiện giữa là thứ làm cho phép gộp có tính kết hợp.)
+    fn canon_history(&mut self) {
+        let mut hist = std::mem::take(&mut self.password_history);
+        let current_since = self.field_times.password;
+        for h in &mut hist {
+            h.replaced_at = h.replaced_at.min(current_since);
+        }
+        hist.sort_by(|a, b| {
+            b.replaced_at
+                .cmp(&a.replaced_at)
+                .then_with(|| a.password.cmp(&b.password))
+        });
+        let mut out: Vec<HistoryItem> = Vec::with_capacity(hist.len().min(MAX_HISTORY));
+        for h in hist {
+            if h.password.is_empty()
+                || h.password == self.password
+                || out.iter().any(|x| x.password == h.password)
+            {
+                continue; // `h` bị drop ⇒ tự xoá khỏi RAM (ZeroizeOnDrop)
+            }
+            if out.len() < MAX_HISTORY {
+                out.push(h);
+            }
+        }
+        self.password_history = out;
+    }
 }
 
-/// Ghi nhận một mục đã bị xoá, để việc đồng bộ không làm nó "sống lại".
+/// Ghi nhận một mục đã bị xoá vĩnh viễn, để việc đồng bộ không làm nó "sống lại".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tombstone {
     pub id: String,
     pub deleted_at: i64,
 }
 
+/// Khoá kho của một lần đổi master password trước. Nằm TRONG phần đã mã hoá: ai mở được kho hiện
+/// tại thì mở được các bản sao lưu / bản xung đột cũ; người chỉ biết mật khẩu cũ không mở được kho mới.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct OldKey {
+    #[serde(with = "crate::format::b64_array")]
+    pub key: [u8; KEY_LEN],
+    /// Thời điểm khoá này ngừng được dùng (= lần đổi master password).
+    pub retired_at: i64,
+}
+
+impl std::fmt::Debug for OldKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OldKey")
+            .field("retired_at", &self.retired_at)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct VaultData {
+    /// Các mục đang dùng.
     pub entries: Vec<Entry>,
+    /// Thùng rác: các mục đã xoá nhưng còn khôi phục được.
+    pub trash: Vec<Entry>,
+    /// Các mục đã xoá vĩnh viễn.
     pub tombstones: Vec<Tombstone>,
     /// Lần sửa cuối cùng của nội dung kho.
     pub modified_at: i64,
+    /// Khoá của các lần đổi master password trước (mới nhất trước).
+    pub old_keys: Vec<OldKey>,
 }
 
-/// Thống kê sau khi gộp hai phiên bản kho.
+/// Thống kê sau khi gộp hai phiên bản kho (tính trên danh sách mục đang dùng).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MergeStats {
-    /// Mục chỉ có ở phía kia, được thêm vào.
+    /// Mục mới xuất hiện.
     pub added: usize,
-    /// Mục có ở cả hai, phía kia mới hơn nên được lấy.
+    /// Mục có nội dung thay đổi.
     pub updated: usize,
-    /// Mục bị xoá vì phía kia đã xoá.
+    /// Mục biến mất (bị xoá ở phía kia).
     pub deleted: usize,
 }
 
@@ -125,108 +305,385 @@ impl MergeStats {
     }
 }
 
-impl VaultData {
-    /// Gộp `other` vào `self` theo từng mục: mục nào `updated_at` mới hơn thì thắng;
-    /// mục bị xoá (tombstone) sau lần sửa cuối thì bị loại.
-    /// Nếu cả hai phía đều đổi mật khẩu của cùng một mục, mật khẩu của phía thua
-    /// được đưa vào lịch sử để không bao giờ bị mất.
-    pub fn merge_from(&mut self, other: &VaultData) -> MergeStats {
-        use std::collections::HashMap;
-        let mut stats = MergeStats::default();
+/// Một mục cùng trạng thái "đang trong thùng rác" trong lúc gộp.
+struct State {
+    e: Entry,
+    deleted: bool,
+}
 
-        // 1. Gộp tombstone (lấy thời điểm xoá muộn nhất).
-        let mut tombs: HashMap<String, i64> = HashMap::new();
-        for t in self.tombstones.iter().chain(other.tombstones.iter()) {
-            let e = tombs.entry(t.id.clone()).or_insert(t.deleted_at);
-            *e = (*e).max(t.deleted_at);
+/// `a.$f` ← giá trị thắng giữa `a.$f` và `b.$f`. Giá trị cũ được xoá khỏi RAM trước khi ghi đè.
+macro_rules! lww {
+    ($a:expr, $b:expr, $($f:ident),+) => {$(
+        if ($b.field_times.$f, &$b.$f) > ($a.field_times.$f, &$a.$f) {
+            $a.$f.zeroize();
+            $a.$f = $b.$f.clone();
+            $a.field_times.$f = $b.field_times.$f;
         }
+    )+};
+}
 
-        // 2. Gộp các mục.
-        for theirs in &other.entries {
-            match self.entries.iter_mut().find(|e| e.id == theirs.id) {
-                None => {
-                    self.entries.push(theirs.clone());
-                    stats.added += 1;
-                }
-                Some(ours) if ours == theirs => {}
-                Some(ours) => {
-                    let (winner, loser) = if theirs.updated_at > ours.updated_at {
-                        stats.updated += 1;
-                        (theirs.clone(), ours.clone())
-                    } else {
-                        (ours.clone(), theirs.clone())
-                    };
-                    *ours = merge_histories(winner, &loser);
+/// Gộp `b` vào `a` (cùng id).
+fn merge_state(a: &mut State, b: &State) {
+    lww!(a.e, b.e, title, username, urls, notes, totp, tags, favorite);
+
+    // Mật khẩu: bản thua không bị mất mà vào lịch sử, kèm thời điểm nó được đặt.
+    a.e.password_history
+        .extend(b.e.password_history.iter().cloned());
+    let b_wins =
+        (b.e.field_times.password, &b.e.password) > (a.e.field_times.password, &a.e.password);
+    if a.e.password != b.e.password {
+        let (loser, loser_t) = if b_wins {
+            (&a.e.password, a.e.field_times.password)
+        } else {
+            (&b.e.password, b.e.field_times.password)
+        };
+        if !loser.is_empty() {
+            let item = HistoryItem {
+                password: loser.clone(),
+                replaced_at: loser_t,
+            };
+            a.e.password_history.push(item);
+        }
+    }
+    if b_wins {
+        a.e.password.zeroize();
+        a.e.password = b.e.password.clone();
+        a.e.field_times.password = b.e.field_times.password;
+    }
+
+    if (b.e.field_times.deleted, b.deleted) > (a.e.field_times.deleted, a.deleted) {
+        a.deleted = b.deleted;
+        a.e.field_times.deleted = b.e.field_times.deleted;
+    }
+
+    a.e.created_at = match (a.e.created_at, b.e.created_at) {
+        (0, x) | (x, 0) => x,
+        (x, y) => x.min(y),
+    };
+}
+
+fn sort_entries(v: &mut [Entry]) {
+    v.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+/// Hợp nhất nhiều phiên bản của cùng một kho thành một phiên bản ở DẠNG CHUẨN (thứ tự cố định,
+/// thời điểm từng trường đầy đủ, lịch sử gọn) — hai kho giống nhau về nội dung thì bằng nhau từng byte.
+fn join(parts: &[&VaultData]) -> VaultData {
+    let mut tombs: BTreeMap<String, i64> = BTreeMap::new();
+    let mut map: BTreeMap<String, State> = BTreeMap::new();
+    let mut keys: Vec<OldKey> = Vec::new();
+    let mut modified_at = 0;
+
+    for part in parts {
+        modified_at = modified_at.max(part.modified_at);
+        for t in &part.tombstones {
+            let x = tombs.entry(t.id.clone()).or_insert(t.deleted_at);
+            *x = (*x).max(t.deleted_at);
+        }
+        for (list, deleted) in [(&part.entries, false), (&part.trash, true)] {
+            for e in list {
+                let mut st = State {
+                    e: e.clone(),
+                    deleted,
+                };
+                st.e.normalize_times();
+                st.e.canon_history();
+                match map.entry(e.id.clone()) {
+                    MapEntry::Vacant(v) => {
+                        v.insert(st);
+                    }
+                    MapEntry::Occupied(mut o) => merge_state(o.get_mut(), &st),
                 }
             }
         }
-
-        // 3. Loại các mục đã bị xoá sau lần sửa cuối cùng.
-        let before = self.entries.len();
-        self.entries.retain(|e| {
-            tombs
-                .get(&e.id)
-                .is_none_or(|&deleted| deleted < e.updated_at)
-        });
-        stats.deleted = before - self.entries.len();
-
-        self.tombstones = tombs
-            .into_iter()
-            .map(|(id, deleted_at)| Tombstone { id, deleted_at })
-            .collect();
-        self.tombstones.sort_by(|a, b| a.id.cmp(&b.id));
-        self.entries.sort_by_key(|e| e.created_at);
-        self.modified_at = self.modified_at.max(other.modified_at);
-        stats
-    }
-}
-
-fn merge_histories(mut winner: Entry, loser: &Entry) -> Entry {
-    let mut hist: Vec<HistoryItem> = winner.password_history.clone();
-    for h in &loser.password_history {
-        if !hist.iter().any(|x| x.password == h.password) {
-            hist.push(h.clone());
+        for k in &part.old_keys {
+            match keys.iter_mut().find(|x| x.key == k.key) {
+                Some(x) => x.retired_at = x.retired_at.max(k.retired_at),
+                None => keys.push(k.clone()),
+            }
         }
     }
-    if loser.password != winner.password
-        && !loser.password.is_empty()
-        && !hist.iter().any(|x| x.password == loser.password)
-    {
-        hist.push(HistoryItem {
-            password: loser.password.clone(),
-            replaced_at: loser.updated_at,
-        });
+
+    let mut out = VaultData {
+        modified_at,
+        ..Default::default()
+    };
+    for (id, mut st) in map {
+        if tombs.contains_key(&id) {
+            continue; // đã xoá vĩnh viễn ở đâu đó ⇒ xoá ở mọi nơi
+        }
+        st.e.canon_history();
+        st.e.updated_at = st.e.field_times.content_max();
+        let State { e, deleted } = st;
+        if deleted {
+            out.trash.push(e);
+        } else {
+            out.entries.push(e);
+        }
     }
-    hist.retain(|h| h.password != winner.password);
-    hist.sort_by_key(|h| std::cmp::Reverse(h.replaced_at));
-    hist.truncate(MAX_HISTORY);
-    winner.password_history = hist;
-    winner
+    sort_entries(&mut out.entries);
+    sort_entries(&mut out.trash);
+    out.tombstones = tombs
+        .into_iter()
+        .map(|(id, deleted_at)| Tombstone { id, deleted_at })
+        .collect();
+    keys.sort_by(|a, b| {
+        b.retired_at
+            .cmp(&a.retired_at)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    keys.truncate(MAX_OLD_KEYS);
+    out.old_keys = keys;
+    out
+}
+
+impl VaultData {
+    /// Đưa về dạng chuẩn (gọi sau khi đọc từ đĩa).
+    pub fn normalize(&mut self) {
+        *self = join(&[self]);
+    }
+
+    /// Gộp `other` vào `self` (xem mô tả ở đầu file). Kết quả luôn ở dạng chuẩn.
+    pub fn merge_from(&mut self, other: &VaultData) -> MergeStats {
+        let merged = join(&[self, other]);
+        let before: HashMap<&str, &Entry> =
+            self.entries.iter().map(|e| (e.id.as_str(), e)).collect();
+        let mut stats = MergeStats::default();
+        for e in &merged.entries {
+            match before.get(e.id.as_str()) {
+                None => stats.added += 1,
+                Some(old) if *old != e => stats.updated += 1,
+                Some(_) => {}
+            }
+        }
+        stats.deleted = before
+            .keys()
+            .filter(|id| !merged.entries.iter().any(|e| e.id == **id))
+            .count();
+        *self = merged;
+        stats
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    pub fn get_trashed(&self, id: &str) -> Option<&Entry> {
+        self.trash.iter().find(|e| e.id == id)
+    }
+
+    fn tombstone_time(&self, id: &str) -> Option<i64> {
+        self.tombstones
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.deleted_at)
+    }
+
+    fn id_in_use(&self, id: &str) -> bool {
+        self.get(id).is_some()
+            || self.get_trashed(id).is_some()
+            || self.tombstone_time(id).is_some()
+    }
+
+    fn touch(&mut self, t: i64) {
+        self.modified_at = self.modified_at.max(t);
+    }
+
+    /// Thêm mục mới, trả về id. Id trùng (kể cả với mục trong thùng rác / đã xoá vĩnh viễn) hoặc
+    /// rỗng thì được cấp id mới.
+    pub fn add_at(&mut self, mut entry: Entry, now: i64) -> String {
+        if entry.id.is_empty() || self.id_in_use(&entry.id) {
+            entry.id = uuid::Uuid::new_v4().to_string();
+        }
+        entry.created_at = now;
+        entry.updated_at = now;
+        entry.field_times = FieldTimes::all_content(now);
+        entry.canon_history();
+        let id = entry.id.clone();
+        self.entries.push(entry);
+        sort_entries(&mut self.entries);
+        self.touch(now);
+        id
+    }
+
+    /// Sửa một mục đang dùng. Chỉ những trường THỰC SỰ thay đổi mới được ghi nhận thời điểm mới
+    /// (nhờ vậy gộp với máy khác không đè lên trường mà lần sửa này không đụng tới).
+    /// Nếu mật khẩu thay đổi, mật khẩu cũ được đưa vào lịch sử. Trả về true nếu có thay đổi.
+    pub fn update_at(&mut self, id: &str, now: i64, edit: impl FnOnce(&mut Entry)) -> Result<bool> {
+        let e = self
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
+        let before = e.clone();
+        edit(e);
+        // Các trường quản lý không cho sửa trực tiếp.
+        e.id.clone_from(&before.id);
+        e.created_at = before.created_at;
+        e.field_times = before.field_times;
+        e.password_history.clone_from(&before.password_history);
+
+        let mut changed = false;
+        macro_rules! stamp {
+            ($($f:ident),+) => {$(
+                if e.$f != before.$f {
+                    e.field_times.$f = now.max(before.field_times.$f + 1);
+                    changed = true;
+                }
+            )+};
+        }
+        stamp!(title, username, password, urls, notes, totp, tags, favorite);
+        if e.password != before.password {
+            if !before.password.is_empty() {
+                e.password_history.push(HistoryItem {
+                    password: before.password.clone(),
+                    replaced_at: e.field_times.password,
+                });
+            }
+            e.canon_history();
+        }
+        e.updated_at = e.field_times.content_max();
+        let t = e.updated_at;
+        if changed {
+            self.touch(t);
+        }
+        Ok(changed)
+    }
+
+    /// Chuyển một mục vào thùng rác.
+    pub fn trash_at(&mut self, id: &str, now: i64) -> Result<()> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| e.id == id)
+            .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
+        let mut e = self.entries.remove(idx);
+        e.field_times.deleted = now.max(e.field_times.deleted + 1);
+        let t = e.field_times.deleted;
+        self.trash.push(e);
+        sort_entries(&mut self.trash);
+        self.touch(t);
+        Ok(())
+    }
+
+    /// Lấy một mục ra khỏi thùng rác.
+    pub fn restore_at(&mut self, id: &str, now: i64) -> Result<()> {
+        let idx = self
+            .trash
+            .iter()
+            .position(|e| e.id == id)
+            .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
+        let mut e = self.trash.remove(idx);
+        e.field_times.deleted = now.max(e.field_times.deleted + 1);
+        let t = e.field_times.deleted;
+        self.entries.push(e);
+        sort_entries(&mut self.entries);
+        self.touch(t);
+        Ok(())
+    }
+
+    /// Xoá vĩnh viễn một mục (đang dùng hoặc trong thùng rác) trên mọi thiết bị.
+    /// Id của nó không bao giờ được dùng lại.
+    pub fn purge_at(&mut self, id: &str, now: i64) -> Result<()> {
+        if let Some(i) = self.trash.iter().position(|e| e.id == id) {
+            self.trash.remove(i);
+        } else if let Some(i) = self.entries.iter().position(|e| e.id == id) {
+            self.entries.remove(i);
+        } else {
+            return Err(Error::EntryNotFound(id.to_string()));
+        }
+        match self.tombstones.iter_mut().find(|t| t.id == id) {
+            Some(t) => t.deleted_at = t.deleted_at.max(now),
+            None => self.tombstones.push(Tombstone {
+                id: id.to_string(),
+                deleted_at: now,
+            }),
+        }
+        self.tombstones.sort_by(|a, b| a.id.cmp(&b.id));
+        self.touch(now);
+        Ok(())
+    }
+
+    /// Đưa phiên bản `old` của một mục (lấy từ bản sao lưu) trở lại làm phiên bản hiện hành, dưới
+    /// dạng MỘT LẦN SỬA MỚI — nhờ vậy việc khôi phục lan sang mọi thiết bị thay vì bị gộp ngược lại.
+    /// Mật khẩu đang dùng (nếu khác) được đưa vào lịch sử. Mục đã bị xoá vĩnh viễn được thêm lại
+    /// như một mục mới (id mới). Trả về true nếu có thay đổi.
+    pub fn reinstate_at(&mut self, old: &Entry, now: i64) -> bool {
+        let id = old.id.as_str();
+        let mut changed = false;
+        if self.get_trashed(id).is_some() {
+            let _ = self.restore_at(id, now);
+            changed = true;
+        }
+        if self.get(id).is_some() {
+            changed |= self
+                .update_at(id, now, |e| {
+                    macro_rules! copy {
+                        ($($f:ident),+) => {$(
+                            if e.$f != old.$f {
+                                e.$f.zeroize();
+                                e.$f = old.$f.clone();
+                            }
+                        )+};
+                    }
+                    copy!(title, username, password, urls, notes, totp, tags, favorite);
+                })
+                .unwrap_or(false);
+            return changed;
+        }
+        // Không còn ở đâu: thêm lại (add_at cấp id mới nếu id cũ đã bị xoá vĩnh viễn).
+        self.add_at(old.clone(), now);
+        true
+    }
+
+    /// Ghi nhớ một khoá kho vừa ngừng dùng (khi đổi master password).
+    pub(crate) fn push_old_key(&mut self, key: &[u8; KEY_LEN], retired_at: i64) {
+        if !self.old_keys.iter().any(|k| &k.key == key) {
+            self.old_keys.push(OldKey {
+                key: *key,
+                retired_at,
+            });
+        }
+        self.old_keys.sort_by(|a, b| {
+            b.retired_at
+                .cmp(&a.retired_at)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        self.old_keys.truncate(MAX_OLD_KEYS);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(id: &str, pw: &str, updated: i64) -> Entry {
+    fn entry(id: &str, pw: &str, t: i64) -> Entry {
         let mut e = Entry::new(id);
         e.id = id.into();
         e.password = pw.into();
         e.created_at = 1;
-        e.updated_at = updated;
+        e.updated_at = t;
+        e.field_times = FieldTimes::all_content(t);
         e
     }
 
+    fn data(entries: Vec<Entry>) -> VaultData {
+        let mut d = VaultData {
+            entries,
+            ..Default::default()
+        };
+        d.normalize();
+        d
+    }
+
     #[test]
-    fn newer_wins_and_loser_password_kept_in_history() {
-        let mut a = VaultData {
-            entries: vec![entry("x", "A-pass", 10)],
-            ..Default::default()
-        };
-        let b = VaultData {
-            entries: vec![entry("x", "B-pass", 20), entry("y", "y", 5)],
-            ..Default::default()
-        };
+    fn newer_password_wins_and_loser_is_kept_in_history() {
+        let mut a = data(vec![entry("x", "A-pass", 10)]);
+        let b = data(vec![entry("x", "B-pass", 20), entry("y", "y", 5)]);
         let s = a.merge_from(&b);
         assert_eq!(
             s,
@@ -236,67 +693,335 @@ mod tests {
                 deleted: 0
             }
         );
-        let x = a.entries.iter().find(|e| e.id == "x").unwrap();
+        let x = a.get("x").unwrap();
         assert_eq!(x.password, "B-pass");
+        assert_eq!(x.password_history.len(), 1);
         assert_eq!(x.password_history[0].password, "A-pass");
     }
 
+    /// Lỗi của bản 0.1.2: máy B (chưa thấy mật khẩu mới của máy A) chỉ bấm ★ là đè mất mật khẩu mới.
     #[test]
-    fn tombstone_removes_older_entry_but_not_newer_edit() {
-        let mut a = VaultData {
-            entries: vec![entry("x", "1", 10), entry("z", "1", 50)],
-            ..Default::default()
-        };
-        let b = VaultData {
-            tombstones: vec![
-                Tombstone {
-                    id: "x".into(),
-                    deleted_at: 20,
-                },
-                Tombstone {
-                    id: "z".into(),
-                    deleted_at: 30,
-                },
-            ],
-            ..Default::default()
-        };
-        let s = a.merge_from(&b);
-        assert_eq!(s.deleted, 1);
-        assert_eq!(a.entries.len(), 1);
-        assert_eq!(a.entries[0].id, "z");
+    fn stale_device_editing_another_field_keeps_the_new_password() {
+        let base = data(vec![entry("bank", "old", 10)]);
+        let mut a = base.clone();
+        let mut b = base.clone();
+        a.update_at("bank", 100, |e| {
+            e.password = "new-from-A".into();
+            e.totp = Some("JBSWY3DPEHPK3PXP".into());
+        })
+        .unwrap();
+        // B sửa SAU đó (theo đồng hồ) nhưng không biết thay đổi của A.
+        b.update_at("bank", 200, |e| e.favorite = true).unwrap();
+        b.update_at("bank", 201, |e| e.notes = "ghi chú từ B".into())
+            .unwrap();
+
+        let mut ab = a.clone();
+        ab.merge_from(&b);
+        let mut ba = b.clone();
+        ba.merge_from(&a);
+        assert_eq!(ab, ba);
+        let e = ab.get("bank").unwrap();
+        assert_eq!(e.password, "new-from-A");
+        assert_eq!(e.totp.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+        assert!(e.favorite);
+        assert_eq!(e.notes, "ghi chú từ B");
+        assert_eq!(e.password_history[0].password, "old");
+        assert_eq!(e.updated_at, 201);
     }
 
     #[test]
-    fn merge_is_idempotent_and_symmetric_in_content() {
-        let a0 = VaultData {
-            entries: vec![entry("x", "1", 10), entry("q", "q", 3)],
-            tombstones: vec![Tombstone {
-                id: "w".into(),
-                deleted_at: 9,
-            }],
-            modified_at: 10,
-        };
-        let b0 = VaultData {
-            entries: vec![entry("x", "2", 11), entry("w", "w", 2)],
-            tombstones: vec![],
-            modified_at: 11,
-        };
+    fn equal_timestamps_converge_to_the_same_value_on_both_devices() {
+        let a0 = data(vec![entry("x", "from-A", 50)]);
+        let b0 = data(vec![entry("x", "from-B", 50)]);
         let mut ab = a0.clone();
         ab.merge_from(&b0);
         let mut ba = b0.clone();
         ba.merge_from(&a0);
-        let ids = |v: &VaultData| {
-            let mut i: Vec<_> = v
-                .entries
+        assert_eq!(ab, ba);
+        let x = ab.get("x").unwrap();
+        assert_eq!(x.password, "from-B", "thứ tự từ điển quyết định khi hoà");
+        assert_eq!(x.password_history[0].password, "from-A");
+    }
+
+    #[test]
+    fn delete_goes_to_trash_and_a_concurrent_edit_is_not_lost() {
+        let base = data(vec![entry("x", "p1", 10)]);
+        let mut a = base.clone();
+        let mut b = base.clone();
+        a.trash_at("x", 100).unwrap();
+        assert!(a.get("x").is_none() && a.get_trashed("x").is_some());
+        b.update_at("x", 150, |e| e.password = "p2".into()).unwrap();
+        let mut m = a.clone();
+        let s = m.merge_from(&b);
+        assert_eq!(s.deleted, 0, "phía a đã không còn mục này trong danh sách");
+        assert!(m.get("x").is_none(), "vẫn bị xoá…");
+        let t = m.get_trashed("x").unwrap();
+        assert_eq!(
+            t.password, "p2",
+            "…nhưng mật khẩu mới vẫn còn trong thùng rác"
+        );
+        assert_eq!(t.trashed_at(), 100);
+        // Khôi phục ở đâu thì mọi máy cùng thấy lại.
+        m.restore_at("x", 300).unwrap();
+        let mut b2 = b.clone();
+        b2.merge_from(&m);
+        assert_eq!(b2.get("x").unwrap().password, "p2");
+        let mut a2 = a.clone();
+        a2.merge_from(&m);
+        assert_eq!(a2, b2);
+    }
+
+    #[test]
+    fn purge_is_permanent_on_every_device() {
+        let base = data(vec![entry("x", "p1", 10), entry("z", "zz", 10)]);
+        let mut a = base.clone();
+        a.trash_at("x", 20).unwrap();
+        a.purge_at("x", 100).unwrap();
+        assert!(a.get_trashed("x").is_none());
+        assert_eq!(a.tombstones.len(), 1);
+
+        // Máy chưa biết gì: mục bị xoá hẳn, mục khác không ảnh hưởng.
+        let mut stale = base.clone();
+        let s = stale.merge_from(&a);
+        assert_eq!(s.deleted, 1);
+        assert!(stale.get("x").is_none() && stale.get_trashed("x").is_none());
+        assert!(stale.get("z").is_some());
+
+        // Máy đã sửa mục đó sau thời điểm xoá: vẫn bị xoá (xoá vĩnh viễn là dứt khoát), và hai
+        // chiều gộp cho cùng một kết quả.
+        let mut late = base.clone();
+        late.update_at("x", 150, |e| e.notes = "sửa sau khi đã xoá".into())
+            .unwrap();
+        late.trash_at("x", 160).unwrap();
+        late.restore_at("x", 170).unwrap();
+        let mut m1 = late.clone();
+        m1.merge_from(&a);
+        let mut m2 = a.clone();
+        m2.merge_from(&late);
+        assert_eq!(m1, m2);
+        assert!(m1.get("x").is_none() && m1.get_trashed("x").is_none());
+        assert!(matches!(
+            m1.purge_at("x", 200),
+            Err(Error::EntryNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn v1_data_without_field_times_behaves_like_whole_entry_timestamps() {
+        // File định dạng v1: không có field_times, không có thùng rác.
+        let v1 = r#"{"entries":[{"id":"x","title":"T","password":"p","created_at":1,"updated_at":10,
+            "password_history":[{"password":"p","replaced_at":5},{"password":"o","replaced_at":4}]}],
+            "tombstones":[{"id":"gone","deleted_at":7}],"modified_at":10}"#;
+        let mut d: VaultData = serde_json::from_str(v1).unwrap();
+        d.normalize();
+        let x = d.get("x").unwrap();
+        assert_eq!(x.field_times, FieldTimes::all_content(10));
+        assert_eq!(
+            x.password_history
                 .iter()
-                .map(|e| (e.id.clone(), e.password.clone()))
-                .collect();
-            i.sort();
-            i
+                .map(|h| h.password.as_str())
+                .collect::<Vec<_>>(),
+            vec!["o"],
+            "dòng lịch sử trùng mật khẩu hiện tại bị bỏ"
+        );
+        // Tombstone của file v1 vẫn có hiệu lực.
+        let mut other = data(vec![entry("gone", "g", 6)]);
+        other.merge_from(&d);
+        assert!(other.get("gone").is_none() && other.get_trashed("gone").is_none());
+    }
+
+    #[test]
+    fn update_only_stamps_fields_that_changed() {
+        let mut d = data(vec![entry("x", "p", 10)]);
+        assert!(!d.update_at("x", 50, |_| {}).unwrap());
+        assert!(d
+            .update_at("x", 50, |e| {
+                e.title = "x".into(); // không đổi
+                e.username = "u".into();
+                e.id = "hack".into();
+                e.created_at = 999;
+                e.password_history.clear();
+            })
+            .unwrap());
+        let e = d.get("x").unwrap();
+        assert_eq!(e.created_at, 1);
+        assert_eq!(e.field_times.username, 50);
+        assert_eq!(e.field_times.title, 10);
+        assert_eq!(e.field_times.password, 10);
+        assert_eq!(e.updated_at, 50);
+        // Đồng hồ lùi: thời điểm vẫn tăng.
+        d.update_at("x", 3, |e| e.username = "u2".into()).unwrap();
+        assert_eq!(d.get("x").unwrap().field_times.username, 51);
+        assert!(matches!(
+            d.update_at("nope", 1, |_| {}),
+            Err(Error::EntryNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn history_is_capped_and_unique() {
+        let mut d = data(vec![entry("x", "p0", 10)]);
+        for i in 1..=30 {
+            d.update_at("x", 10 + i, |e| e.password = format!("p{i}"))
+                .unwrap();
+        }
+        d.update_at("x", 100, |e| e.password = "p29".into())
+            .unwrap();
+        let e = d.get("x").unwrap();
+        assert_eq!(e.password, "p29");
+        assert_eq!(e.password_history.len(), MAX_HISTORY);
+        assert_eq!(e.password_history[0].password, "p30");
+        assert!(e.password_history.iter().all(|h| h.password != "p29"));
+    }
+
+    #[test]
+    fn reinstate_from_backup_is_a_new_edit_that_wins_everywhere() {
+        let mut d = data(vec![entry("x", "good", 10)]);
+        let backup = d.clone();
+        d.update_at("x", 20, |e| {
+            e.password = "mistake".into();
+            e.notes = "oops".into();
+        })
+        .unwrap();
+        let other_device = d.clone();
+        // Khôi phục từ bản sao lưu.
+        assert!(d.reinstate_at(backup.get("x").unwrap(), 30));
+        assert!(
+            !d.reinstate_at(backup.get("x").unwrap(), 31),
+            "đã giống rồi"
+        );
+        let mut o = other_device.clone();
+        o.merge_from(&d);
+        assert_eq!(o.get("x").unwrap().password, "good");
+        assert_eq!(o.get("x").unwrap().notes, "");
+        assert_eq!(o.get("x").unwrap().password_history[0].password, "mistake");
+
+        // Mục đang trong thùng rác / đã xoá vĩnh viễn cũng lấy lại được.
+        d.trash_at("x", 40).unwrap();
+        assert!(d.reinstate_at(backup.get("x").unwrap(), 50));
+        assert!(d.get("x").is_some());
+        d.purge_at("x", 60).unwrap();
+        assert!(d.reinstate_at(backup.get("x").unwrap(), 55));
+        let mut o2 = other_device.clone();
+        o2.merge_from(&d);
+        assert!(o2.get("x").is_none(), "id cũ đã bị xoá vĩnh viễn");
+        assert_eq!(o2.entries.len(), 1);
+        assert_eq!(o2.entries[0].password, "good");
+        assert_ne!(o2.entries[0].id, "x");
+        assert_eq!(o2, {
+            let mut x = d.clone();
+            x.merge_from(&other_device);
+            x
+        });
+    }
+
+    #[test]
+    fn add_never_reuses_an_id_that_was_deleted() {
+        let mut d = data(vec![entry("x", "p", 10)]);
+        d.purge_at("x", 20).unwrap();
+        let id = d.add_at(entry("x", "new", 0), 30);
+        assert_ne!(id, "x");
+        let id2 = d.add_at(entry("fresh", "new", 0), 31);
+        assert_eq!(id2, "fresh");
+        d.trash_at("fresh", 40).unwrap();
+        assert_ne!(d.add_at(entry("fresh", "again", 0), 41), "fresh");
+    }
+
+    #[test]
+    fn old_keys_are_merged_capped_and_never_printed() {
+        let mut a = VaultData::default();
+        for i in 0..20u8 {
+            a.push_old_key(&[i; KEY_LEN], i64::from(i));
+        }
+        assert_eq!(a.old_keys.len(), MAX_OLD_KEYS);
+        assert_eq!(a.old_keys[0].retired_at, 19);
+        let mut b = VaultData::default();
+        b.push_old_key(&[19; KEY_LEN], 25);
+        b.push_old_key(&[99; KEY_LEN], 30);
+        a.merge_from(&b);
+        assert_eq!(a.old_keys[0].key, [99; KEY_LEN]);
+        assert_eq!(a.old_keys[1].retired_at, 25);
+        assert_eq!(a.old_keys.len(), MAX_OLD_KEYS);
+        let dbg = format!("{a:?}");
+        assert!(!dbg.contains("99, 99"), "khoá cũ không được lọt ra Debug");
+    }
+
+    #[test]
+    fn debug_output_never_contains_secrets() {
+        let mut e = entry("x", "S3CRET-PW", 10);
+        e.notes = "S3CRET-NOTE".into();
+        e.totp = Some("S3CRET-TOTP".into());
+        e.password_history.push(HistoryItem {
+            password: "S3CRET-OLD".into(),
+            replaced_at: 5,
+        });
+        let d = data(vec![e]);
+        let s = format!("{d:?} {:?}", d.entries[0].password_history);
+        assert!(!s.contains("S3CRET"), "{s}");
+    }
+
+    /// Thêm/bớt/đổi tên trường trong dữ liệu lưu trên đĩa là thay đổi định dạng: bản app cũ sẽ làm
+    /// mất trường mới khi ghi lại file. Nếu test này đỏ: tăng `format::VERSION` (để bản cũ từ chối
+    /// mở thay vì âm thầm làm mất dữ liệu), cập nhật docs/FORMAT.md, tools/pwv_recover.py, rồi mới
+    /// sửa danh sách dưới đây.
+    #[test]
+    fn schema_change_requires_format_version_bump() {
+        fn keys(v: &serde_json::Value) -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        }
+        assert_eq!(crate::format::VERSION, 2);
+        let mut e = entry("x", "p", 10);
+        e.password_history.push(HistoryItem {
+            password: "o".into(),
+            replaced_at: 1,
+        });
+        let mut d = VaultData {
+            entries: vec![e],
+            tombstones: vec![Tombstone {
+                id: "t".into(),
+                deleted_at: 1,
+            }],
+            ..Default::default()
         };
-        assert_eq!(ids(&ab), ids(&ba));
-        let again = ab.clone();
-        assert!(!ab.merge_from(&again).changed());
+        d.push_old_key(&[1; KEY_LEN], 1);
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(
+            keys(&v),
+            ["entries", "modified_at", "old_keys", "tombstones", "trash"]
+        );
+        assert_eq!(
+            keys(&v["entries"][0]),
+            [
+                "created_at",
+                "favorite",
+                "field_times",
+                "id",
+                "notes",
+                "password",
+                "password_history",
+                "tags",
+                "title",
+                "totp",
+                "updated_at",
+                "urls",
+                "username"
+            ]
+        );
+        assert_eq!(
+            keys(&v["entries"][0]["field_times"]),
+            [
+                "deleted", "favorite", "notes", "password", "tags", "title", "totp", "urls",
+                "username"
+            ]
+        );
+        assert_eq!(
+            keys(&v["entries"][0]["password_history"][0]),
+            ["password", "replaced_at"]
+        );
+        assert_eq!(keys(&v["tombstones"][0]), ["deleted_at", "id"]);
+        assert_eq!(keys(&v["old_keys"][0]), ["key", "retired_at"]);
     }
 
     #[test]

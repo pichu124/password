@@ -42,10 +42,13 @@ jobs:
           print('cross-check OK')
           "
 
+      # Bản build thử của nhánh đang phát triển — KHÔNG dùng để cài. Bản chính thức nằm ở trang Releases.
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
-          name: pwv-windows
+          name: dev-build-pwv-cli-windows
           path: target/release/pwv.exe
+          retention-days: 5
 
   app-windows:
     runs-on: windows-latest
@@ -76,12 +79,15 @@ jobs:
           cargo test
       - name: Build installer (NSIS + MSI)
         run: npx tauri build
+      # Bản build thử của nhánh đang phát triển — KHÔNG dùng để cài. Bản chính thức nằm ở trang Releases.
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
-          name: pwv-app-windows-installer
+          name: dev-build-pwv-installer-windows
           path: |
             app/src-tauri/target/release/bundle/nsis/*.exe
             app/src-tauri/target/release/bundle/msi/*.msi
+          retention-days: 5
 
   audit:
     runs-on: ubuntu-latest

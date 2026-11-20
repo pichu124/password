@@ -23,4 +23,20 @@ fn main() {
     let id = v.add(e);
     v.update(&id, |e| e.password = "đổi lần 2".into()).unwrap();
     v.save().unwrap();
+    // Một mục trong thùng rác + một lần đổi master password (đổi khoá kho) để công cụ cứu hộ
+    // Python được kiểm tra với đúng những thứ chỉ có ở định dạng v2.
+    let trashed = v.add(Entry::new("Trong thùng rác"));
+    v.delete(&trashed).unwrap();
+    v.save().unwrap();
+    if let Some(new_password) = args.get(3) {
+        v.change_password(
+            new_password.as_bytes(),
+            KdfParams {
+                m_kib: 1024,
+                t: 1,
+                p: 1,
+            },
+        )
+        .unwrap();
+    }
 }

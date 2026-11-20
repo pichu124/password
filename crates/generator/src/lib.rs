@@ -259,6 +259,47 @@ pub fn estimate_strength(password: &str, user_inputs: &[&str]) -> Strength {
     }
 }
 
+/// Số ký tự tối thiểu của master password.
+pub const MASTER_MIN_CHARS: usize = 12;
+/// Số lần đoán tối thiểu (log10) mà zxcvbn ước tính cho master password.
+///
+/// Mức cũ ("điểm ≥ 3", tức chỉ khoảng 10^8 lần đoán) để lọt cả những mật khẩu kiểu "tên + năm sinh"
+/// (`nguyenvanan1990`, `Matkhau@2024`, `Techcombank123`): zxcvbn không có từ điển tiếng Việt nên chấm
+/// chúng như chuỗi ngẫu nhiên. Với 10^14 lần đoán, kẻ có file kho phải chạy Argon2id 256 MiB khoảng
+/// 10^14 lần — hàng nghìn năm-GPU. Cụm 4 từ ngẫu nhiên từ bộ tạo đạt ≈ 10^15,6; 6 từ ≈ 10^23.
+pub const MASTER_MIN_GUESSES_LOG10: f64 = 14.0;
+
+/// Kết quả chấm master password.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MasterCheck {
+    /// Đủ điều kiện làm master password.
+    pub ok: bool,
+    pub guesses_log10: f64,
+    /// "Đạt" hoặc lý do chưa đạt (hiển thị cho người dùng).
+    pub message: String,
+}
+
+/// Chấm một master password theo chính sách của pwv. Dùng chung cho app và CLI.
+pub fn check_master_password(password: &str) -> MasterCheck {
+    let s = estimate_strength(password, &["pwv", "vault", "matkhau", "password", "master"]);
+    let chars = password.chars().count();
+    let message = if chars < MASTER_MIN_CHARS {
+        format!("Quá ngắn: cần ít nhất {MASTER_MIN_CHARS} ký tự (hiện {chars}).")
+    } else if s.guesses_log10 < MASTER_MIN_GUESSES_LOG10 {
+        "Quá dễ đoán (tên, ngày sinh, số điện thoại, từ quen thuộc… ghép lại rất dễ bị dò). \
+         Hãy dùng một cụm 5–6 từ ngẫu nhiên, KHÔNG liên quan đến nhau (bộ tạo mật khẩu của pwv \
+         tạo được cụm như vậy)."
+            .to_string()
+    } else {
+        "Đạt".to_string()
+    };
+    MasterCheck {
+        ok: chars >= MASTER_MIN_CHARS && s.guesses_log10 >= MASTER_MIN_GUESSES_LOG10,
+        guesses_log10: s.guesses_log10,
+        message,
+    }
+}
+
 fn label_for(score: u8) -> &'static str {
     match score {
         0 => "Rất yếu",
@@ -398,5 +439,52 @@ mod tests {
         assert!(estimate_strength("password", &[]).score <= 1);
         let strong = generate_password(&PasswordOptions::default()).unwrap();
         assert_eq!(estimate_strength(&strong, &[]).score, 4);
+    }
+
+    /// Lỗi của bản 0.1.2: các mật khẩu dưới đây đều được chấp nhận làm master password và còn
+    /// được gắn nhãn "Mạnh".
+    #[test]
+    fn master_password_policy_rejects_name_and_year_style_passwords() {
+        for weak in [
+            "nguyenvanan1990",
+            "Matkhau@2024",
+            "0912345678ab",
+            "Concho123456",
+            "Mai19951995!",
+            "Baby@20102012",
+            "tranthimai1995",
+            "quangtrung1985",
+            "Minhanh@2010",
+            "Vietcombank@1",
+            "Techcombank123",
+            "yeuemnhieulam",
+            "123456789012",
+            "short",
+            "",
+        ] {
+            let c = check_master_password(weak);
+            assert!(
+                !c.ok,
+                "{weak} lẽ ra phải bị từ chối ({:.1})",
+                c.guesses_log10
+            );
+            assert_ne!(c.message, "Đạt");
+        }
+        // Mọi cụm từ do bộ tạo sinh ra (4–6 từ) đều đạt.
+        for words in 4..=6 {
+            for _ in 0..50 {
+                let p = generate_passphrase(&PassphraseOptions {
+                    words,
+                    ..Default::default()
+                })
+                .unwrap();
+                let c = check_master_password(&p);
+                assert!(c.ok, "{} ({:.1})", *p, c.guesses_log10);
+                assert_eq!(c.message, "Đạt");
+            }
+        }
+        // Mật khẩu ngẫu nhiên 20 ký tự cũng đạt.
+        let p = generate_password(&PasswordOptions::default()).unwrap();
+        assert!(check_master_password(&p).ok);
     }
 }

@@ -22,7 +22,7 @@ tauri-plugin-clipboard-manager = "2"
 ureq = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-zeroize = "1"
+zeroize = { version = "1", features = ["serde"] }
 pwv-generator = { path = "../../crates/generator" }
 pwv-vault-core = { path = "../../crates/vault-core" }
 pwv-health = { path = "../../crates/health" }

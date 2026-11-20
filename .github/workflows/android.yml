@@ -83,7 +83,9 @@ jobs:
           rm -f release.jks
           ls -la pwv-android-arm64.apk
 
+      # Bản build thử của nhánh đang phát triển — KHÔNG dùng để cài. Bản chính thức nằm ở trang Releases.
       - uses: actions/upload-artifact@v4
         with:
-          name: pwv-android-apk
+          name: dev-build-pwv-android-apk
           path: pwv-android-arm64.apk
+          retention-days: 5

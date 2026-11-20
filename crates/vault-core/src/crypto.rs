@@ -41,15 +41,17 @@ impl KdfParams {
         t: 3,
         p: 4,
     };
-    /// Mức tối thiểu chấp nhận khi mở kho (chặn file bị sửa để hạ tham số xuống quá thấp
-    /// trước khi đổi mật khẩu). Mức này cao hơn mức tối thiểu của OWASP (19 MiB, t=2).
+    /// Mức tối thiểu chấp nhận khi tạo và khi mở kho (chặn file bị sửa để hạ tham số xuống thấp).
+    /// Mức này cao hơn mức tối thiểu của OWASP (19 MiB, t=2).
     pub const MINIMUM: KdfParams = KdfParams {
         m_kib: 64 * 1024,
         t: 2,
         p: 1,
     };
-    /// Tối đa khi đọc file (chống file độc yêu cầu 1 TB RAM).
-    pub const MAXIMUM_M_KIB: u32 = 4 * 1024 * 1024;
+    /// Giới hạn trên khi đọc file: chống file bị sửa để bắt máy chạy Argon2 hàng giờ / hàng chục GB.
+    pub const MAXIMUM_M_KIB: u32 = 1024 * 1024;
+    pub const MAXIMUM_T: u32 = 16;
+    pub const MAXIMUM_P: u32 = 16;
 
     /// CHỈ dùng trong test: tham số rất thấp cho chạy nhanh.
     #[doc(hidden)]
@@ -60,7 +62,12 @@ impl KdfParams {
     };
 
     pub(crate) fn validate(&self, allow_insecure: bool) -> Result<()> {
-        if self.m_kib > Self::MAXIMUM_M_KIB || self.t > 100 || self.p == 0 || self.p > 64 {
+        if self.m_kib > Self::MAXIMUM_M_KIB
+            || self.t == 0
+            || self.t > Self::MAXIMUM_T
+            || self.p == 0
+            || self.p > Self::MAXIMUM_P
+        {
             return Err(Error::InvalidKdfParams);
         }
         if !allow_insecure && (self.m_kib < Self::MINIMUM.m_kib || self.t < Self::MINIMUM.t) {
@@ -68,6 +75,40 @@ impl KdfParams {
         }
         Ok(())
     }
+}
+
+/// Chuẩn hoá master password trước khi đưa vào KDF.
+///
+/// Cùng một chữ tiếng Việt có thể được bàn phím gõ ra ở dạng dựng sẵn (NFC, ví dụ "ế" là 1 ký tự)
+/// hoặc dạng tổ hợp (NFD, "e" + dấu mũ + dấu sắc) — nhìn giống hệt nhau nhưng khác byte, nên máy này
+/// tạo kho, máy kia gõ đúng mà vẫn bị báo sai mật khẩu. Vì vậy mật khẩu luôn được đưa về NFC.
+///
+/// Trả về các phương án cần thử khi MỞ kho, theo thứ tự: NFC, nguyên văn (kho tạo bởi bản ≤ 0.1.2
+/// không chuẩn hoá), NFD. Với mật khẩu ASCII cả ba trùng nhau ⇒ chỉ có một phương án.
+/// Khi TẠO kho / ĐỔI mật khẩu luôn dùng phương án đầu tiên.
+pub fn password_candidates(password: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(3);
+    let mut push = |v: Zeroizing<Vec<u8>>| {
+        if !out.iter().any(|x| **x == *v) {
+            out.push(v);
+        }
+    };
+    match std::str::from_utf8(password) {
+        Ok(s) => {
+            push(Zeroizing::new(s.nfc().collect::<String>().into_bytes()));
+            push(Zeroizing::new(password.to_vec()));
+            push(Zeroizing::new(s.nfd().collect::<String>().into_bytes()));
+        }
+        // Không phải UTF-8 hợp lệ (chỉ xảy ra khi gọi từ code, không phải từ bàn phím): dùng nguyên văn.
+        Err(_) => push(Zeroizing::new(password.to_vec())),
+    }
+    out
+}
+
+/// Dạng chuẩn (NFC) của master password — dùng khi tạo kho / đổi mật khẩu.
+pub fn normalized_password(password: &[u8]) -> Zeroizing<Vec<u8>> {
+    password_candidates(password).swap_remove(0)
 }
 
 /// Argon2id(password, salt) → master key 32 byte, rồi HKDF → KEK.
@@ -200,5 +241,64 @@ mod tests {
             p: 1,
         };
         assert!(huge.validate(true).is_err());
+        // File bị sửa để bắt chạy Argon2 rất lâu / rất nhiều RAM cũng bị từ chối.
+        for bad in [
+            KdfParams {
+                m_kib: 2 * 1024 * 1024,
+                t: 3,
+                p: 4,
+            },
+            KdfParams {
+                m_kib: 262_144,
+                t: 100,
+                p: 4,
+            },
+            KdfParams {
+                m_kib: 262_144,
+                t: 0,
+                p: 4,
+            },
+            KdfParams {
+                m_kib: 262_144,
+                t: 3,
+                p: 0,
+            },
+            KdfParams {
+                m_kib: 262_144,
+                t: 3,
+                p: 64,
+            },
+        ] {
+            assert!(bad.validate(true).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn password_is_normalized_to_nfc() {
+        // "mật khẩu" gõ kiểu dựng sẵn (NFC) và kiểu tổ hợp (NFD) phải cho cùng một kết quả.
+        let nfc = "m\u{1ead}t kh\u{1ea9}u";
+        let nfd = "ma\u{323}\u{302}t kha\u{302}\u{309}u";
+        assert_ne!(nfc.as_bytes(), nfd.as_bytes());
+        assert_eq!(
+            *normalized_password(nfc.as_bytes()),
+            *normalized_password(nfd.as_bytes())
+        );
+        assert_eq!(*normalized_password(nfd.as_bytes()), nfc.as_bytes());
+        // Gõ NFD: thử NFC trước, rồi nguyên văn (= NFD).
+        let c = password_candidates(nfd.as_bytes());
+        assert_eq!(c.len(), 2);
+        assert_eq!(*c[0], nfc.as_bytes());
+        assert_eq!(*c[1], nfd.as_bytes());
+        // Gõ NFC: thử NFC, rồi NFD (kho cũ có thể được tạo bằng NFD).
+        let c = password_candidates(nfc.as_bytes());
+        assert_eq!(c.len(), 2);
+        assert_eq!(*c[1], nfd.as_bytes());
+        // ASCII: chỉ một phương án ⇒ không tốn thêm lần chạy Argon2 nào.
+        assert_eq!(
+            password_candidates(b"correct horse battery staple").len(),
+            1
+        );
+        // Byte không phải UTF-8: giữ nguyên.
+        assert_eq!(*password_candidates(&[0xff, 0xfe])[0], [0xff, 0xfe]);
     }
 }

@@ -8,12 +8,15 @@
 //!   Bật `Add-Padding` để kích thước phản hồi không tiết lộ gì.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use pwv_generator::estimate_strength;
 use pwv_vault_core::model::now_ms;
 use pwv_vault_core::Entry;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
+use zeroize::Zeroizing;
 
 pub const OLD_AFTER_DAYS: i64 = 365;
 pub const HIBP_RANGE_URL: &str = "https://api.pwnedpasswords.com/range/";
@@ -84,13 +87,14 @@ impl Report {
     }
 }
 
-/// Lần cuối mật khẩu được đặt (ms).
+/// Lần cuối mật khẩu được đặt (ms). Với mục nhập từ CSV, đây là thời điểm nhập (file CSV không
+/// cho biết tuổi thật của mật khẩu).
 fn password_set_at(e: &Entry) -> i64 {
-    e.password_history
-        .iter()
-        .map(|h| h.replaced_at)
-        .max()
-        .unwrap_or(e.created_at)
+    if e.field_times.password > 0 {
+        e.field_times.password
+    } else {
+        e.created_at
+    }
 }
 
 /// Kiểm tra không cần mạng: yếu, trùng, cũ.
@@ -149,10 +153,105 @@ pub fn count_in_range_response(body: &str, suffix: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Phản hồi có đúng là danh sách của API range không? (Mọi dòng dạng `35 ký tự hex:số`, và đủ
+/// nhiều dòng — khi bật `Add-Padding` máy chủ luôn trả 800–1000 dòng.)
+///
+/// Nếu không kiểm tra, một trang HTML trả về với mã 200 (phần mềm diệt virus soi HTTPS, cổng đăng
+/// nhập Wi-Fi, proxy công ty) sẽ bị hiểu là "không mật khẩu nào bị lộ".
+pub fn looks_like_range_response(body: &str) -> bool {
+    let mut lines = 0;
+    for l in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let Some((suffix, count)) = l.split_once(':') else {
+            return false;
+        };
+        if suffix.len() != 35
+            || !suffix.bytes().all(|b| b.is_ascii_hexdigit())
+            || count.is_empty()
+            || !count.bytes().all(|b| b.is_ascii_digit())
+        {
+            return false;
+        }
+        lines += 1;
+    }
+    lines >= MIN_RANGE_LINES
+}
+
+/// Số dòng tối thiểu của một phản hồi thật (thực tế luôn ≥ 800 khi có `Add-Padding`).
+pub const MIN_RANGE_LINES: usize = 100;
+/// Thời gian tối đa cho MỘT yêu cầu mạng.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Thời gian tối đa cho cả lượt kiểm tra rò rỉ.
+pub const TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+
 #[derive(Debug, thiserror::Error)]
 pub enum BreachError {
     #[error("không kết nối được Have I Been Pwned: {0}")]
     Network(String),
+    #[error("phản hồi nhận được không phải của Have I Been Pwned (có thể mạng đang bị chặn hoặc soi HTTPS)")]
+    BadResponse,
+    #[error("kiểm tra rò rỉ mất quá nhiều thời gian (mạng chậm) — chưa kiểm tra xong")]
+    TooSlow,
+}
+
+/// Một câu hỏi gửi tới Have I Been Pwned cho một mục. KHÔNG chứa mật khẩu, chỉ chứa mã băm SHA-1
+/// của nó (đã tách đôi); phần `suffix` không bao giờ rời máy và được xoá khỏi RAM khi dùng xong.
+pub struct BreachQuery {
+    pub id: String,
+    prefix: String,
+    suffix: Zeroizing<String>,
+}
+
+/// Chuẩn bị các câu hỏi cho mọi mục có mật khẩu. Tách riêng bước này để app chỉ cần giữ khoá phiên
+/// trong lúc chuẩn bị, rồi nhả ra trước khi gọi mạng (mạng treo không còn làm treo cả app).
+pub fn breach_queries(entries: &[Entry]) -> Vec<BreachQuery> {
+    entries
+        .iter()
+        .filter(|e| !e.password.is_empty())
+        .map(|e| {
+            let (prefix, suffix) = sha1_prefix_suffix(&e.password);
+            BreachQuery {
+                id: e.id.clone(),
+                prefix,
+                suffix: Zeroizing::new(suffix),
+            }
+        })
+        .collect()
+}
+
+/// Gửi các câu hỏi (mỗi tiền tố chỉ hỏi 1 lần). Trả về id → số lần bị lộ (chỉ gồm mục bị lộ).
+/// Lỗi ở bất kỳ yêu cầu nào ⇒ cả lượt coi như CHƯA kiểm tra (không báo "an toàn" một cách sai).
+pub fn run_breach_queries(
+    queries: &[BreachQuery],
+    mut fetch: impl FnMut(&str) -> Result<String, BreachError>,
+) -> Result<HashMap<String, u64>, BreachError> {
+    let started = Instant::now();
+    let mut cache: HashMap<&str, String> = HashMap::new();
+    let mut found = HashMap::new();
+    for q in queries {
+        if !cache.contains_key(q.prefix.as_str()) {
+            if started.elapsed() > TOTAL_TIMEOUT {
+                return Err(BreachError::TooSlow);
+            }
+            let body = fetch(&q.prefix)?;
+            if !looks_like_range_response(&body) {
+                return Err(BreachError::BadResponse);
+            }
+            cache.insert(q.prefix.as_str(), body);
+        }
+        let count = count_in_range_response(&cache[q.prefix.as_str()], &q.suffix);
+        if count > 0 {
+            found.insert(q.id.clone(), count);
+        }
+    }
+    Ok(found)
+}
+
+/// Ghi kết quả kiểm tra rò rỉ vào báo cáo.
+pub fn apply_breaches(report: &mut Report, found: &HashMap<String, u64>) {
+    for (id, &count) in found {
+        report.push(id, Issue::Breached { count });
+    }
+    report.breach_check_done = true;
 }
 
 /// Kiểm tra rò rỉ cho mọi mật khẩu (mỗi tiền tố chỉ hỏi 1 lần).
@@ -160,30 +259,31 @@ pub enum BreachError {
 pub fn check_breaches(
     entries: &[Entry],
     report: &mut Report,
-    mut fetch: impl FnMut(&str) -> Result<String, BreachError>,
+    fetch: impl FnMut(&str) -> Result<String, BreachError>,
 ) -> Result<(), BreachError> {
-    let mut cache: HashMap<String, String> = HashMap::new();
-    for e in entries.iter().filter(|e| !e.password.is_empty()) {
-        let (prefix, suffix) = sha1_prefix_suffix(&e.password);
-        if !cache.contains_key(&prefix) {
-            let body = fetch(&prefix)?;
-            cache.insert(prefix.clone(), body);
-        }
-        let count = count_in_range_response(&cache[&prefix], &suffix);
-        if count > 0 {
-            report.push(&e.id, Issue::Breached { count });
-        }
-    }
-    report.breach_check_done = true;
+    let found = run_breach_queries(&breach_queries(entries), fetch)?;
+    apply_breaches(report, &found);
     Ok(())
 }
 
-/// Gọi API thật của Have I Been Pwned (miễn phí, không cần khoá API).
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .user_agent("pwv-password-manager")
+            .build()
+            .new_agent()
+    })
+}
+
+/// Gọi API thật của Have I Been Pwned (miễn phí, không cần khoá API). Có giới hạn thời gian, và
+/// dùng lại kết nối giữa các lần gọi.
 pub fn hibp_fetch(prefix: &str) -> Result<String, BreachError> {
     debug_assert_eq!(prefix.len(), 5);
-    let mut resp = ureq::get(format!("{HIBP_RANGE_URL}{prefix}"))
+    let mut resp = agent()
+        .get(format!("{HIBP_RANGE_URL}{prefix}"))
         .header("Add-Padding", "true")
-        .header("User-Agent", "pwv-password-manager")
         .call()
         .map_err(|e| BreachError::Network(e.to_string()))?;
     resp.body_mut()
@@ -216,6 +316,7 @@ mod tests {
     fn offline_checks() {
         let mut old = e("c", "Cũ", "Q7#vLp2!mZ9@wX4$kR8");
         old.created_at = now_ms() - 400 * 86_400_000;
+        old.field_times.password = old.created_at;
         let entries = vec![
             e("a", "A", "123456"),
             e("b", "B", "Tr0ub4dor&3-horse-staple-xyz"),
@@ -232,6 +333,18 @@ mod tests {
         assert_eq!(r.score(), 25);
     }
 
+    /// Phản hồi giả giống thật: nhiều dòng đệm (count 0) + các dòng cho sẵn.
+    fn fake_range(extra: &[(&str, u64)]) -> String {
+        let mut body = String::new();
+        for i in 0..MIN_RANGE_LINES {
+            body.push_str(&format!("{:035X}:0\r\n", i + 1));
+        }
+        for (suffix, count) in extra {
+            body.push_str(&format!("{suffix}:{count}\r\n"));
+        }
+        body
+    }
+
     #[test]
     fn breach_check_with_fake_api_and_cache() {
         let entries = vec![
@@ -244,20 +357,55 @@ mod tests {
         check_breaches(&entries, &mut r, |prefix| {
             calls.push(prefix.to_string());
             Ok(if prefix == "5BAA6" {
-                // Có dòng đệm (count 0) giống phản hồi thật khi bật Add-Padding.
-                "0018A45C4D1DEF81644B54AB7F969B88D65:0\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD8:10434004\r\n".into()
+                fake_range(&[("1E4C9B93F3F0682250B6CF8331B7EE68FD8", 10434004)])
             } else {
-                "0018A45C4D1DEF81644B54AB7F969B88D65:0\r\n".into()
+                fake_range(&[])
             })
         })
         .unwrap();
         assert_eq!(calls.len(), 2, "mỗi tiền tố chỉ hỏi 1 lần: {calls:?}");
         assert!(calls.iter().all(|p| p.len() == 5), "chỉ được gửi 5 ký tự");
         assert_eq!(r.issues["a"][0], Issue::Breached { count: 10434004 });
+        assert_eq!(r.issues["b"][0], Issue::Breached { count: 10434004 });
         assert!(r
             .issues
             .get("c")
             .is_none_or(|v| !v.iter().any(|i| matches!(i, Issue::Breached { .. }))));
         assert!(r.breach_check_done);
+    }
+
+    /// Lỗi 0.1.2: mọi phản hồi mã 200 đều được tin ⇒ một trang HTML chặn mạng được hiểu là
+    /// "đã kiểm tra, không mật khẩu nào bị lộ" kèm dấu tích xanh.
+    #[test]
+    fn garbage_responses_are_not_reported_as_clean() {
+        let entries = vec![e("a", "A", "password")];
+        for body in [
+            "<html>Captive portal</html>".to_string(),
+            String::new(),
+            "1E4C9B93F3F0682250B6CF8331B7EE68FD8:3\r\n".to_string(), // quá ít dòng
+            format!("{}\nkhông phải dòng hợp lệ\n", fake_range(&[])),
+        ] {
+            let mut r = offline_report(&entries);
+            let res = check_breaches(&entries, &mut r, |_| Ok(body.clone()));
+            assert!(matches!(res, Err(BreachError::BadResponse)), "{body:.40}");
+            assert!(!r.breach_check_done);
+        }
+        assert!(looks_like_range_response(&fake_range(&[])));
+        // Lỗi mạng giữa chừng: cũng không được đánh dấu là đã kiểm tra.
+        let mut r = offline_report(&entries);
+        assert!(
+            check_breaches(&entries, &mut r, |_| Err(BreachError::Network("x".into()))).is_err()
+        );
+        assert!(!r.breach_check_done);
+    }
+
+    #[test]
+    fn queries_never_contain_the_password() {
+        let entries = vec![e("a", "A", "hunter2-rat-bi-mat"), e("b", "B", "")];
+        let q = breach_queries(&entries);
+        assert_eq!(q.len(), 1, "mục không có mật khẩu thì không hỏi");
+        assert_eq!(q[0].prefix.len(), 5);
+        assert_eq!(q[0].suffix.len(), 35);
+        assert!(!q[0].suffix.contains("hunter2"));
     }
 }
