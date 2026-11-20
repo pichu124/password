@@ -123,12 +123,13 @@ function UnlockError({ code, text, busy, canRecover, onRecover }: { code: string
     return (
       <div className="problem-box">
         <p>
-          <strong>File kho bị hỏng hoặc chưa tải xong.</strong> {text}
+          <strong>File kho bị hỏng hoặc chưa tải xong.</strong>
         </p>
         <p className="small muted">
           Nếu dịch vụ đồng bộ đang tải file về, hãy chờ một chút rồi bấm “Mở khoá” lại. Nếu vẫn lỗi, app có thể dựng lại kho từ các bản sao lưu tự
           động (file hỏng được cất lại, không bị xoá).
         </p>
+        <p className="small muted">Chi tiết: {text}</p>
         <button type="button" className="btn primary" disabled={busy || !canRecover} onClick={onRecover}>
           <Icon name="restore" /> {busy ? "Đang khôi phục…" : "Khôi phục từ bản sao lưu"}
         </button>

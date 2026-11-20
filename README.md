@@ -60,9 +60,10 @@ Xem mục *Phát hành* để tạo khoá ký cố định.
   LastPass, Dashlane, Safari. Không dòng nào bị bỏ trừ khi trống hoặc giống hệt mục đã có. Sau khi
   nhập, hãy xoá file CSV (app có nút) **và dọn thùng rác**, kể cả thùng rác trên cloud nếu file nằm
   trong thư mục đồng bộ; rồi xoá mật khẩu đã lưu trong trình duyệt.
-- **Tự khoá** khi không dùng (mặc định 5 phút) và khi máy vừa ngủ dậy; **tự xoá clipboard** sau 20
-  giây và khi app khoá/đóng. Trên Windows mật khẩu khi sao chép không vào lịch sử clipboard (Win+V),
-  không đồng bộ lên cloud clipboard.
+- **Tự khoá** khi không dùng (mặc định 5 phút), khi máy vừa ngủ dậy và khi đóng cửa sổ. **Tự xoá
+  clipboard** sau 20 giây — kể cả khi bạn đã khoá hoặc đóng app trong lúc đó (app chạy ẩn cho tới
+  khi xoá xong rồi mới thoát hẳn). Trên Windows, thứ bạn sao chép từ app không vào lịch sử clipboard
+  (Win+V) và không đồng bộ lên cloud clipboard.
 - Cửa sổ app được loại khỏi ảnh chụp / quay màn hình (Windows 10 2004 trở lên; Android chặn chụp màn hình).
 
 ### Đổi master password
@@ -100,6 +101,10 @@ các tài khoản quan trọng (ngân hàng, email).
 | Không mở được kho (file hỏng) khi đang khoá | File kho hỏng hẳn | *Khôi phục từ bản sao lưu* ngay trên màn hình mở khoá |
 
 App không bao giờ tự ghi đè file kho khi nó hỏng, biến mất, thuộc kho khác hay do bản mới hơn ghi.
+
+Nếu app phải khoá (hết giờ, đóng cửa sổ) trong lúc file kho đang có vấn đề và còn thay đổi chưa ghi
+được, nó để lại một **bản cứu hộ** (đã mã hoá bằng master password của bạn) trong
+`%LOCALAPPDATA%\vn.pwv.vault\rescue` và tự gộp lại ở lần mở khoá sau — bạn không phải làm gì.
 
 ## Công cụ dòng lệnh `pwv.exe` (tuỳ chọn)
 
@@ -148,6 +153,9 @@ lập với app (chỉ dựa trên [docs/FORMAT.md](docs/FORMAT.md)) và đọc 
   Android đời mới đã bật sẵn).
 - **Bản sao cũ của file kho** trong lịch sử phiên bản của dịch vụ đồng bộ vẫn mở được bằng master
   password của thời điểm đó (xem *Đổi master password*).
+- **Clipboard khi app bị tắt đột ngột:** nếu app bị buộc dừng (Task Manager) hoặc gặp sự cố trong
+  20 giây sau khi sao chép, mật khẩu vừa chép nằm lại trong clipboard cho tới khi bạn chép thứ khác
+  hoặc đăng xuất / tắt máy.
 - **Master password yếu.** Ai lấy được file kho đều có thể thử mật khẩu ngoại tuyến; Argon2id chỉ
   làm việc đó chậm đi. Cụm 6 từ ngẫu nhiên là đủ an toàn; tên + năm sinh thì không.
 - Phần mềm đã qua một đợt rà soát mã nguồn kỹ nhưng **chưa được một tổ chức kiểm định độc lập**, và
@@ -161,7 +169,8 @@ Hãy làm với một kho thử (vài mục giả) trước:
 **Windows**
 1. Tạo kho trong thư mục đồng bộ, thêm vài mục, khoá, mở lại.
 2. Sao chép một mật khẩu → dán thử → bấm **Win+V**: mật khẩu KHÔNG nằm trong lịch sử. Chờ 20 giây →
-   dán lại: đã trống. Sao chép rồi **đóng app ngay** → dán: cũng phải trống.
+   dán lại: đã trống. Sao chép rồi **đóng app ngay** → trong 20 giây vẫn dán được, sau đó dán lại:
+   phải trống, và trong Task Manager không còn `pwv` (app chạy ẩn tới khi xoá xong rồi tự thoát).
 3. Bấm **Win+Shift+S** chụp cửa sổ app: phần app phải đen.
 4. Gập máy (Sleep) khi kho đang mở → mở máy: app phải đang khoá.
 5. Trên hai máy: sửa ở máy A → trong 1 phút thấy ở máy B. Tắt mạng máy B, sửa GHI CHÚ một mục ở B và
