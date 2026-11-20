@@ -178,6 +178,11 @@ fn import_csv(state: State<AppState>, path: String, delete_after: bool) -> AppRe
 }
 
 #[tauri::command]
+fn move_vault(state: State<AppState>, path: String) -> AppResult<MoveView> {
+    with(&state, |s| s.move_vault(&PathBuf::from(path)))
+}
+
+#[tauri::command]
 fn get_settings(state: State<AppState>) -> AppResult<Settings> {
     with(&state, |s| Ok(s.settings()))
 }
@@ -286,6 +291,7 @@ pub fn run() {
             change_master_password,
             health_report,
             import_csv,
+            move_vault,
             get_settings,
             set_settings,
             backups_dir,

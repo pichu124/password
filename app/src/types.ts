@@ -132,6 +132,13 @@ export interface ImportView {
   csv_deleted: boolean;
 }
 
+export interface MoveView {
+  new_path: string;
+  backups_moved: boolean;
+  old_removed: boolean;
+  conflicts_merged: number;
+}
+
 export interface Settings {
   auto_lock_minutes: number;
   clipboard_clear_secs: number;

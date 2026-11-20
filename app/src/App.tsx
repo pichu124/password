@@ -56,10 +56,20 @@ export default function App() {
   if (!status) return null;
   if (!status.vault_path || !status.vault_exists) return <SetupScreen status={status} onDone={refreshStatus} />;
   if (!status.unlocked) return <UnlockScreen status={status} onUnlocked={refreshStatus} onChangeVault={switchVault} />;
-  return <VaultScreen status={status} onLocked={refreshStatus} onSwitchVault={switchVault} />;
+  return <VaultScreen status={status} onLocked={refreshStatus} onStatusChange={refreshStatus} onSwitchVault={switchVault} />;
 }
 
-function VaultScreen({ status, onLocked, onSwitchVault }: { status: Status; onLocked: () => void; onSwitchVault: () => void }) {
+function VaultScreen({
+  status,
+  onLocked,
+  onStatusChange,
+  onSwitchVault,
+}: {
+  status: Status;
+  onLocked: () => void;
+  onStatusChange: () => void;
+  onSwitchVault: () => void;
+}) {
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [entries, setEntries] = useState<EntrySummary[]>([]);
@@ -288,7 +298,7 @@ function VaultScreen({ status, onLocked, onSwitchVault }: { status: Status; onLo
             </div>
           )}
           {view.kind === "health" && <Health onOpen={(id) => setView({ kind: "entry", id })} />}
-          {view.kind === "settings" && <SettingsView status={status} onImported={reload} onSwitchVault={onSwitchVault} />}
+          {view.kind === "settings" && <SettingsView status={status} onImported={reload} onSwitchVault={onSwitchVault} onMoved={onStatusChange} />}
         </section>
       </main>
     </div>

@@ -28,6 +28,17 @@ impl Default for CreateOptions {
     }
 }
 
+/// Kết quả của việc chuyển kho sang thư mục khác.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MoveReport {
+    /// Thư mục sao lưu đã được chuyển theo.
+    pub backups_moved: bool,
+    /// File ở vị trí cũ đã được xoá (false nếu không xoá được — kho mới vẫn dùng bình thường).
+    pub old_removed: bool,
+    /// Số bản xung đột đã gộp trước khi chuyển.
+    pub conflicts_merged: usize,
+}
+
 /// Kết quả của một lần lưu.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SaveReport {
@@ -344,6 +355,61 @@ impl Vault {
             Err(e) => return Err(e.into()),
         }
         self.write_to_disk(true)?;
+        Ok(report)
+    }
+
+    /// Chuyển kho sang vị trí mới (ví dụ từ Documents sang thư mục Dropbox).
+    ///
+    /// Trình tự an toàn: gộp bản xung đột + lưu ở chỗ cũ → ghi bản sao ở chỗ mới →
+    /// **đọc lại và giải mã thử** bản mới → chỉ khi đúng mới chuyển thư mục sao lưu và xoá file cũ.
+    /// Lỗi ở bất kỳ bước nào trước khi xác minh xong thì kho cũ giữ nguyên.
+    pub fn move_to(&mut self, new_path: impl AsRef<Path>) -> Result<MoveReport> {
+        let new_path = std::path::absolute(new_path.as_ref())?;
+        let old_path = std::path::absolute(&self.path)?;
+        if new_path == old_path {
+            return Err(Error::SamePath);
+        }
+        if new_path.exists() {
+            return Err(Error::AlreadyExists(new_path.display().to_string()));
+        }
+        if let Some(dir) = new_path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+
+        // 1. Đưa chỗ cũ về trạng thái mới nhất.
+        let mut report = MoveReport {
+            conflicts_merged: self
+                .merge_conflict_copies()
+                .iter()
+                .filter(|(_, r)| r.is_ok())
+                .count(),
+            ..Default::default()
+        };
+        self.save()?;
+
+        // 2. Ghi ở chỗ mới rồi xác minh.
+        let bytes = format::serialize(&self.header, &self.data, &self.vault_key)?;
+        fsutil::atomic_write(&new_path, &bytes, false)?;
+        let verified = fs::read(&new_path).ok().is_some_and(|b| {
+            format::parse(&b)
+                .and_then(|raw| raw.decrypt_body(&self.vault_key))
+                .is_ok_and(|d| d == self.data)
+        });
+        if !verified {
+            let _ = fs::remove_file(&new_path);
+            return Err(Error::MoveVerifyFailed);
+        }
+
+        // 3. Từ đây kho mới đã dùng được; các bước còn lại là dọn dẹp, lỗi không làm hỏng gì.
+        self.path = new_path.clone();
+        self.disk_fingerprint = Some(fingerprint(&bytes));
+
+        let old_backups = fsutil::backup_dir(&old_path);
+        let new_backups = fsutil::backup_dir(&new_path);
+        if old_backups.is_dir() && !new_backups.exists() {
+            report.backups_moved = fsutil::move_flat_dir(&old_backups, &new_backups).is_ok();
+        }
+        report.old_removed = fsutil::retry(|| fs::remove_file(&old_path)).is_ok();
         Ok(report)
     }
 

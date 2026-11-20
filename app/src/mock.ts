@@ -129,6 +129,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       };
     }
     case "import_csv": return { imported: 12, duplicates: 3, skipped: 1, detected: "Chrome / Edge", csv_deleted: a.deleteAfter };
+    case "move_vault": await sleep(400); return { new_path: a.path, backups_moved: true, old_removed: true, conflicts_merged: 0 };
     case "get_settings": return settings;
     case "set_settings": settings = a.settings; return null;
     case "backups_dir": return "G:\\My Drive\\Passwords\\vault.pwv.backups";

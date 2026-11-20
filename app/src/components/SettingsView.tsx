@@ -3,7 +3,17 @@ import { api, errorText, pickFile } from "../api";
 import type { Settings, Status, Strength } from "../types";
 import { Icon, StrengthMeter, useDebounced, useToast } from "./ui";
 
-export function SettingsView({ status, onImported, onSwitchVault }: { status: Status; onImported: () => void; onSwitchVault: () => void }) {
+export function SettingsView({
+  status,
+  onImported,
+  onSwitchVault,
+  onMoved,
+}: {
+  status: Status;
+  onImported: () => void;
+  onSwitchVault: () => void;
+  onMoved: () => void;
+}) {
   const toast = useToast();
   const [s, setS] = useState<Settings | null>(null);
   const [backups, setBackups] = useState<string | null>(null);
@@ -78,10 +88,89 @@ export function SettingsView({ status, onImported, onSwitchVault }: { status: St
             Đồng bộ: đặt file kho trong thư mục Google Drive, Dropbox hoặc OneDrive trên mỗi máy. App tự kiểm tra thay đổi mỗi 20 giây và tự gộp
             khi hai máy cùng sửa.
           </p>
-          <button className="btn" onClick={onSwitchVault}>
-            Mở kho khác…
+          <MoveVault
+            status={status}
+            onMoved={() => {
+              api.backupsDir().then(setBackups);
+              onMoved();
+            }}
+          />
+          <button className="btn subtle-link" onClick={onSwitchVault}>
+            Mở một kho khác…
           </button>
         </section>
+      </div>
+    </div>
+  );
+}
+
+/** Chuyển kho sang thư mục khác (ví dụ từ Documents sang Dropbox), có bước xác nhận. */
+function MoveVault({ status, onMoved }: { status: Status; onMoved: () => void }) {
+  const toast = useToast();
+  const [target, setTarget] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function choose() {
+    setError(null);
+    const fileName = status.vault_path?.split(/[\\/]/).pop() ?? "vault.pwv";
+    const suggestedDir = status.suggested_path.replace(/[\\/][^\\/]*$/, "");
+    const p = await pickFile({
+      save: true,
+      title: "Chọn thư mục mới cho kho",
+      defaultPath: `${suggestedDir}${suggestedDir.includes("/") ? "/" : "\\"}${fileName}`,
+      filters: [{ name: "Kho pwv", extensions: ["pwv"] }],
+    });
+    if (p) setTarget(p);
+  }
+
+  async function move() {
+    if (!target) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.moveVault(target);
+      toast(r.old_removed ? "Đã chuyển kho sang vị trí mới" : "Đã chuyển kho. File ở vị trí cũ chưa xoá được — bạn có thể tự xoá.", r.old_removed ? "ok" : "info");
+      setTarget(null);
+      onMoved();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!target) {
+    return (
+      <>
+        <button className="btn" onClick={choose}>
+          Chuyển kho sang thư mục khác…
+        </button>
+        {error && <p className="error">{error}</p>}
+      </>
+    );
+  }
+  return (
+    <div className="confirm-box">
+      <p className="small">
+        <strong>Chuyển kho</strong>
+        <br />
+        <span className="muted">Từ:</span> <span className="path">{status.vault_path}</span>
+        <br />
+        <span className="muted">Sang:</span> <span className="path">{target}</span>
+      </p>
+      <ul className="small muted">
+        <li>App ghi kho sang chỗ mới, đọc lại để kiểm tra, rồi mới xoá file ở chỗ cũ. Thư mục sao lưu được chuyển theo.</li>
+        <li>Trên máy khác, mở app và chọn “Mở kho có sẵn” ở vị trí mới.</li>
+      </ul>
+      {error && <p className="error">{error}</p>}
+      <div className="row gap">
+        <button className="btn primary" disabled={busy} onClick={move}>
+          {busy ? "Đang chuyển…" : "Chuyển"}
+        </button>
+        <button className="btn" disabled={busy} onClick={() => setTarget(null)}>
+          Huỷ
+        </button>
       </div>
     </div>
   );

@@ -199,6 +199,14 @@ pub struct ImportView {
     pub csv_deleted: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MoveView {
+    pub new_path: String,
+    pub backups_moved: bool,
+    pub old_removed: bool,
+    pub conflicts_merged: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub auto_lock_minutes: u32,
@@ -585,6 +593,21 @@ impl Session {
         })
     }
 
+    /// Chuyển kho đang mở sang vị trí mới và ghi nhớ vị trí đó.
+    pub fn move_vault(&mut self, new_path: &Path) -> AppResult<MoveView> {
+        self.touch();
+        let v = self.vault_mut()?;
+        let r = v.move_to(new_path).map_err(err)?;
+        let new_path = v.path().to_path_buf();
+        self.config.set_vault(&new_path).map_err(err)?;
+        Ok(MoveView {
+            new_path: new_path.display().to_string(),
+            backups_moved: r.backups_moved,
+            old_removed: r.old_removed,
+            conflicts_merged: r.conflicts_merged,
+        })
+    }
+
     pub fn settings(&self) -> Settings {
         Settings {
             auto_lock_minutes: self.config.auto_lock_minutes,
@@ -779,6 +802,19 @@ mod tests {
             "bản xung đột đã được chuyển vào thư mục sao lưu"
         );
         assert!(!s.sync().unwrap().changed);
+    }
+
+    #[test]
+    fn move_vault_keeps_data() {
+        let (mut s, d) = session();
+        open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let target = d.path().join("Dropbox").join("vault.pwv");
+        // set_vault ghi config thật ⇒ chỉ kiểm tra phần Vault ở đây.
+        let r = s.vault.as_mut().unwrap().move_to(&target).unwrap();
+        assert!(r.old_removed);
+        assert_eq!(s.list("").unwrap().len(), 1);
+        assert!(Vault::open(&target, MP.as_bytes()).is_ok());
     }
 
     #[test]

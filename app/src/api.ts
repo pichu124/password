@@ -9,6 +9,7 @@ import type {
   HealthView,
   HistoryView,
   ImportView,
+  MoveView,
   Settings,
   Status,
   Strength,
@@ -61,6 +62,7 @@ export const api = {
   health: (online: boolean) => call<HealthView>("health_report", { online }),
   importCsv: (path: string, deleteAfter: boolean) =>
     call<ImportView>("import_csv", { path, deleteAfter }),
+  moveVault: (path: string) => call<MoveView>("move_vault", { path }),
   getSettings: () => call<Settings>("get_settings"),
   setSettings: (settings: Settings) => call<void>("set_settings", { settings }),
   backupsDir: () => call<string | null>("backups_dir"),

@@ -791,3 +791,25 @@ textarea {
     display: none;
   }
 }
+
+.confirm-box {
+  width: 100%;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.confirm-box ul {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+}
+.btn.subtle-link {
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 4px 0;
+}
+.btn.subtle-link:hover {
+  color: var(--accent);
+  background: none;
+}

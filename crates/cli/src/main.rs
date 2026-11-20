@@ -124,6 +124,8 @@ enum Cmd {
     },
     /// Đồng bộ: nạp thay đổi từ máy khác và gộp các bản xung đột của Google Drive.
     Sync,
+    /// Chuyển kho sang vị trí mới (ví dụ vào thư mục Dropbox) — kèm thư mục sao lưu.
+    Move { new_path: PathBuf },
     /// Cấu hình đường dẫn kho mặc định.
     Config { path: Option<PathBuf> },
 }
@@ -406,6 +408,26 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Health { offline } => health(v, offline),
+        Cmd::Move { new_path } => {
+            let from = v.path().display().to_string();
+            let r = v.move_to(&new_path)?;
+            write_config(v.path())?;
+            println!(
+                "Đã chuyển kho:\n  từ  {from}\n  sang {}",
+                v.path().display()
+            );
+            if r.backups_moved {
+                println!("Thư mục sao lưu đã được chuyển theo.");
+            }
+            if !r.old_removed {
+                eprintln!("⚠  Chưa xoá được file ở vị trí cũ — hãy tự xoá: {from}");
+            }
+            println!(
+                "Trên máy khác: chạy `pwv config \"{}\"`.",
+                v.path().display()
+            );
+            Ok(())
+        }
         Cmd::Import { file, delete_csv } => {
             let f = std::fs::File::open(&file)
                 .with_context(|| format!("không mở được {}", file.display()))?;

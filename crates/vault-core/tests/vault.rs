@@ -291,3 +291,50 @@ fn merges_dropbox_and_onedrive_conflict_copies() {
         "đã chuyển vào thư mục sao lưu"
     );
 }
+
+#[test]
+fn move_vault_to_another_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let old = d.path().join("Documents").join("vault.pwv");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    let mut v = Vault::create(&old, PW, opts()).unwrap();
+    let id = v.add(login("Gmail", "u", "p1"));
+    v.save().unwrap();
+    v.update(&id, |e| e.password = "p2".into()).unwrap();
+    v.save().unwrap(); // tạo thư mục sao lưu ở chỗ cũ
+    assert!(
+        fs::read_dir(pwv_vault_core::fsutil::backup_dir(&old))
+            .unwrap()
+            .count()
+            > 0
+    );
+
+    let new = d.path().join("Dropbox").join("Passwords").join("vault.pwv");
+    let r = v.move_to(&new).unwrap();
+    assert!(r.old_removed && r.backups_moved);
+    assert!(!old.exists());
+    assert!(!pwv_vault_core::fsutil::backup_dir(&old).exists());
+    assert!(pwv_vault_core::fsutil::backup_dir(&new).is_dir());
+    assert_eq!(v.path(), new.as_path());
+
+    // Kho ở chỗ mới mở được, dữ liệu đủ, và lưu tiếp vào chỗ mới.
+    v.add(login("Sau khi chuyển", "a", "a"));
+    v.save().unwrap();
+    let reopened = Vault::open(&new, PW).unwrap();
+    assert_eq!(reopened.entries().len(), 2);
+    assert_eq!(reopened.get(&id).unwrap().password, "p2");
+    assert!(!old.exists(), "không được ghi lại file ở chỗ cũ");
+}
+
+#[test]
+fn move_refuses_existing_target_and_same_path() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    let mut v = Vault::create(&p, PW, opts()).unwrap();
+    assert!(matches!(v.move_to(&p), Err(Error::SamePath)));
+    let other = d.path().join("khac.pwv");
+    fs::write(&other, b"x").unwrap();
+    assert!(matches!(v.move_to(&other), Err(Error::AlreadyExists(_))));
+    assert!(p.exists(), "kho cũ phải còn nguyên");
+    assert_eq!(fs::read(&other).unwrap(), b"x", "không ghi đè file có sẵn");
+}

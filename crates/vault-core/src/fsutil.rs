@@ -91,8 +91,24 @@ fn make_backup(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Chuyển một thư mục (chỉ gồm file, không có thư mục con). Thử `rename` trước;
+/// nếu khác ổ đĩa (ví dụ từ D:\ sang G:\) thì chép từng file rồi xoá bản cũ.
+pub(crate) fn move_flat_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let p = entry?.path();
+        if p.is_file() {
+            fs::copy(&p, to.join(p.file_name().unwrap_or_default()))?;
+        }
+    }
+    fs::remove_dir_all(from)
+}
+
 /// Thử lại khi gặp lỗi tạm thời (file đang bị process khác mở — thường gặp trên Windows).
-fn retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+pub(crate) fn retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
     let mut delay = Duration::from_millis(50);
     for attempt in 0.. {
         match op() {

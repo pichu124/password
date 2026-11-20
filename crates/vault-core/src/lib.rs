@@ -23,4 +23,4 @@ pub use crypto::KdfParams;
 pub use error::{Error, Result};
 pub use model::{Entry, HistoryItem, MergeStats, VaultData};
 pub use totp::{Totp, TotpError};
-pub use vault::{CreateOptions, SaveReport, Vault};
+pub use vault::{CreateOptions, MoveReport, SaveReport, Vault};

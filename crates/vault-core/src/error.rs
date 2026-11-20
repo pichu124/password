@@ -16,6 +16,10 @@ pub enum Error {
     EntryNotFound(String),
     #[error("file kho đã tồn tại: {0}")]
     AlreadyExists(String),
+    #[error("vị trí mới trùng với vị trí hiện tại")]
+    SamePath,
+    #[error("bản sao ở vị trí mới không đọc lại được — đã huỷ chuyển, kho cũ giữ nguyên")]
+    MoveVerifyFailed,
     #[error("lỗi đọc/ghi file: {0}")]
     Io(#[from] std::io::Error),
     #[error("lỗi dữ liệu: {0}")]
