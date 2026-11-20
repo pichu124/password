@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Mỗi sáng thứ Hai: chạy lại kiểm tra lỗ hổng của thư viện dù không có commit mới.
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -12,6 +15,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -20,27 +25,20 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Build release
-        run: cargo build --release -p pwv-cli
+        run: cargo build --release --locked -p pwv-cli
 
+      # Công cụ cứu hộ Python (viết độc lập với mã Rust) phải đọc được file do app vừa tạo
+      # (định dạng v2, sau một lần đổi master password) và file do bản 0.1.2 tạo (định dạng v1).
       - name: Cross-check format with independent Python decryptor
         shell: bash
         run: |
           pip install pynacl argon2-cffi
-          cargo run -q -p pwv-vault-core --example make_fixture -- fixture.pwv "pässwörd"
-          python -I -c "
-          import sys; sys.path.insert(0, 'tools')
-          from pwv_recover import decrypt_vault
-          d = decrypt_vault(open('fixture.pwv','rb').read(), 'pässwörd'.encode())
-          e = d['entries'][0]
-          assert e['title'] == 'Ngân hàng Việt', e
-          assert e['password'] == 'đổi lần 2', e
-          assert e['password_history'][0]['password'] == 'Mật-khẩu-có-dấu-🔐', e
-          print('cross-check OK')
-          "
+          cargo run -q --locked -p pwv-vault-core --example make_fixture -- fixture.pwv "pässwörd" "mật khẩu mới"
+          python -I tools/check_recover.py fixture.pwv
 
       # Bản build thử của nhánh đang phát triển — KHÔNG dùng để cài. Bản chính thức nằm ở trang Releases.
       - uses: actions/upload-artifact@v4
@@ -57,6 +55,8 @@ jobs:
         working-directory: app
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -75,10 +75,10 @@ jobs:
         working-directory: app/src-tauri
         run: |
           cargo fmt -- --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
       - name: Build installer (NSIS + MSI)
-        run: npx tauri build
+        run: npx tauri build -- --locked
       # Bản build thử của nhánh đang phát triển — KHÔNG dùng để cài. Bản chính thức nằm ở trang Releases.
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push'
@@ -89,13 +89,24 @@ jobs:
             app/src-tauri/target/release/bundle/msi/*.msi
           retention-days: 5
 
+  # Lỗ hổng đã biết trong thư viện: cả phần lõi/CLI, phần app (file khoá riêng) và thư viện JavaScript.
   audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
       # Chỉ lỗi khi có lỗ hổng thật; cảnh báo "unmaintained" vẫn được in ra nhưng không làm đỏ CI.
-      - name: cargo audit
+      - name: cargo audit (lõi + CLI)
         run: cargo audit
+      - name: cargo audit (app)
+        run: cargo audit --file app/src-tauri/Cargo.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm audit (thư viện đi kèm app)
+        working-directory: app
+        run: npm audit --omit=dev

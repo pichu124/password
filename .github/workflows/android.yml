@@ -1,4 +1,6 @@
-# Build app Android (APK, chỉ xem + sao chép) và tải lên dưới dạng artifact.
+# Build app Android (APK, chỉ xem + sao chép).
+# - Khi push: tạo bản build thử `dev-build-…` (KHÔNG dùng để cài).
+# - Được workflow Release gọi lại để tạo APK của bản phát hành.
 name: Android
 
 on:
@@ -8,6 +10,16 @@ on:
       - "crates/**"
       - ".github/workflows/android.yml"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact-name:
+        type: string
+        default: dev-build-pwv-android-apk
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -17,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-java@v4
         with:
@@ -26,10 +40,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: app/src-tauri
-          key: android
 
       - uses: actions/setup-node@v4
         with:
@@ -43,49 +53,83 @@ jobs:
 
       - name: Generate Android project
         working-directory: app
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npx tauri android init --ci
           npx tauri icon assets/icon.png
 
+      # Dự án Android được sinh lại ở mỗi lần build nên các thiết lập bảo mật được vá vào đây,
+      # và build sẽ ĐỎ nếu vá không thành (mẫu của Tauri thay đổi).
+      - name: Harden generated Android project
+        working-directory: app/src-tauri
+        run: |
+          set -euo pipefail
+          GEN=gen/android/app/src/main
+          MAIN=$(find "$GEN/java" -name MainActivity.kt)
+          test -n "$MAIN"
+          PKG=$(grep -m1 '^package ' "$MAIN")
+          { echo "$PKG"; echo; cat android-overrides/MainActivity.kt; } > "$MAIN.new"
+          mv "$MAIN.new" "$MAIN"
+          grep -q 'FLAG_SECURE' "$MAIN"
+          grep -q 'IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS' "$MAIN"
+
+          mkdir -p "$GEN/res/xml"
+          cp android-overrides/data_extraction_rules.xml "$GEN/res/xml/"
+          MAN="$GEN/AndroidManifest.xml"
+          sed -i '0,/<application/s|<application|<application\n        android:allowBackup="false"\n        android:fullBackupContent="false"\n        android:dataExtractionRules="@xml/data_extraction_rules"|' "$MAN"
+          grep -q 'android:allowBackup="false"' "$MAN"
+          grep -q 'android:dataExtractionRules="@xml/data_extraction_rules"' "$MAN"
+          echo "----- MainActivity.kt"; cat "$MAIN"
+          echo "----- AndroidManifest.xml"; cat "$MAN"
+
       - name: Build APK (arm64)
         working-directory: app
         run: |
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          npx tauri android build --apk --target aarch64
+          npx tauri android build --apk --target aarch64 -- --locked
 
       - name: Sign APK
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          set -e
+          set -euo pipefail
           APK=$(find app/src-tauri/gen/android -name "*-unsigned.apk" | head -1)
           echo "APK chưa ký: $APK"
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          if [ -n "$KEYSTORE_B64" ]; then
+          if [ -n "${KEYSTORE_B64:-}" ]; then
             echo "$KEYSTORE_B64" | base64 -d > release.jks
             PASS="$KEYSTORE_PASSWORD"
+            SIGNER="khoá cố định của kho mã (cài đè lên bản cũ được)"
           else
             # Chưa có khoá ký cố định trong Secrets ⇒ tạo khoá tạm cho lần build này.
             # Hệ quả: muốn cài bản mới phải gỡ bản cũ trước (kho trên Drive/Dropbox không bị ảnh hưởng).
             PASS="pwv-temp-$(openssl rand -hex 12)"
             keytool -genkeypair -keystore release.jks -storepass "$PASS" -keypass "$PASS" \
               -alias pwv -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=pwv"
+            SIGNER="KHOÁ TẠM của riêng lần build này (phải gỡ bản cũ trước khi cài)"
             echo "::warning::Đang ký APK bằng khoá tạm. Thêm secret ANDROID_KEYSTORE_BASE64 để cập nhật được mà không cần gỡ app."
           fi
           "$BT/zipalign" -f -p 4 "$APK" pwv-aligned.apk
           "$BT/apksigner" sign --ks release.jks --ks-pass "pass:$PASS" --ks-key-alias pwv \
             --out pwv-android-arm64.apk pwv-aligned.apk
-          "$BT/apksigner" verify --print-certs pwv-android-arm64.apk
           rm -f release.jks
+          "$BT/apksigner" verify --print-certs pwv-android-arm64.apk | tee certs.txt
+          # Kiểm tra trên CHÍNH file APK: không cho sao lưu dữ liệu app.
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml pwv-android-arm64.apk > manifest.txt
+          grep -A1 'allowBackup' manifest.txt
+          grep -A1 'allowBackup' manifest.txt | grep -q '=false\|0x0'
+          {
+            echo "Ký bằng: $SIGNER"
+            grep -i 'SHA-256' certs.txt | head -1
+          } > pwv-android-signer.txt
+          cat pwv-android-signer.txt
           ls -la pwv-android-arm64.apk
 
-      # Bản build thử của nhánh đang phát triển — KHÔNG dùng để cài. Bản chính thức nằm ở trang Releases.
       - uses: actions/upload-artifact@v4
         with:
-          name: dev-build-pwv-android-apk
-          path: pwv-android-arm64.apk
+          name: ${{ inputs.artifact-name || 'dev-build-pwv-android-apk' }}
+          path: |
+            pwv-android-arm64.apk
+            pwv-android-signer.txt
           retention-days: 5

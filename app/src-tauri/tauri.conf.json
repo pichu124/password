@@ -18,7 +18,8 @@
         "minWidth": 780,
         "minHeight": 520,
         "contentProtected": true,
-        "center": true
+        "center": true,
+        "generalAutofillEnabled": false
       }
     ],
     "security": {

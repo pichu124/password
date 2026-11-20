@@ -1,7 +1,7 @@
 //! Các thao tác mật mã. KHÔNG tự viết thuật toán — chỉ ghép các thư viện RustCrypto:
 //! Argon2id (KDF), HKDF-SHA256 (tách khoá), XChaCha20-Poly1305 (AEAD).
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
@@ -9,7 +9,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
 
@@ -112,14 +112,27 @@ pub fn normalized_password(password: &[u8]) -> Zeroizing<Vec<u8>> {
 }
 
 /// Argon2id(password, salt) → master key 32 byte, rồi HKDF → KEK.
+///
+/// Vùng nhớ làm việc của Argon2 (mặc định 256 MiB) do hàm này tự cấp phát để:
+/// - báo lỗi [`Error::OutOfMemory`] khi máy không đủ RAM (điện thoại yếu) thay vì để tiến trình bị
+///   hệ điều hành huỷ không một lời giải thích;
+/// - XOÁ nó trước khi trả lại cho hệ điều hành — từ nội dung vùng nhớ này có thể tính lại KEK.
 pub fn derive_kek(password: &[u8], salt: &[u8; SALT_LEN], params: &KdfParams) -> Result<Key> {
     let p = Params::new(params.m_kib, params.t, params.p, Some(KEY_LEN))
         .map_err(|_| Error::InvalidKdfParams)?;
+    let blocks = p.block_count();
+    let mut memory: Vec<Block> = Vec::new();
+    memory
+        .try_reserve_exact(blocks)
+        .map_err(|_| Error::OutOfMemory(params.m_kib / 1024))?;
+    memory.resize(blocks, Block::default());
+
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, p);
     let mut master = Zeroizing::new([0u8; KEY_LEN]);
-    argon
-        .hash_password_into(password, salt, master.as_mut())
-        .map_err(|_| Error::InvalidKdfParams)?;
+    let hashed = argon.hash_password_into_with_memory(password, salt, master.as_mut(), &mut memory);
+    memory.zeroize();
+    drop(memory);
+    hashed.map_err(|_| Error::InvalidKdfParams)?;
 
     let hk = Hkdf::<Sha256>::new(None, master.as_ref());
     let mut kek = Zeroizing::new([0u8; KEY_LEN]);

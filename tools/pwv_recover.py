@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Công cụ cứu hộ ĐỘC LẬP cho file kho .pwv (định dạng v1).
+"""Công cụ cứu hộ ĐỘC LẬP cho file kho .pwv (định dạng v1 và v2).
 
 Không dùng chung dòng code nào với app Rust. Mục đích:
   1. Kiểm tra chéo rằng định dạng trong docs/FORMAT.md đúng với thực tế.
@@ -8,6 +8,9 @@ Không dùng chung dòng code nào với app Rust. Mục đích:
 Cài đặt:  pip install pynacl argon2-cffi
 Dùng:     python pwv_recover.py "G:\\My Drive\\Passwords\\vault.pwv"
           (in ra JSON đã giải mã — CẨN THẬN, đây là toàn bộ mật khẩu của bạn!)
+
+Dùng được cho cả file trong thư mục sao lưu (vault.pwv.backups\\...).
+Trong JSON: "entries" là các mục đang dùng, "trash" là thùng rác.
 """
 import base64
 import getpass
@@ -16,9 +19,13 @@ import hmac
 import json
 import struct
 import sys
+import unicodedata
 
 from argon2.low_level import Type, hash_secret_raw
 from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_decrypt as xchacha_decrypt
+from nacl.exceptions import CryptoError
+
+SUPPORTED_VERSIONS = (1, 2)
 
 
 def hkdf_sha256(ikm: bytes, info: bytes, length: int = 32) -> bytes:
@@ -31,12 +38,32 @@ def hkdf_sha256(ikm: bytes, info: bytes, length: int = 32) -> bytes:
     return okm[:length]
 
 
-def decrypt_vault(data: bytes, password: bytes) -> dict:
+def password_candidates(password) -> list:
+    """Các dạng byte của master password cần thử, theo đúng thứ tự app dùng.
+
+    App (từ 0.2.0) chuẩn hoá mật khẩu về Unicode NFC trước khi dẫn xuất khoá. Kho tạo bởi bản
+    cũ hơn dùng nguyên văn những gì bàn phím gõ ra (có thể là dạng tổ hợp NFD).
+    """
+    if isinstance(password, bytes):
+        try:
+            password = password.decode("utf-8")
+        except UnicodeDecodeError:
+            return [password]
+    out = []
+    for form in ("NFC", None, "NFD"):
+        b = (unicodedata.normalize(form, password) if form else password).encode("utf-8")
+        if b not in out:
+            out.append(b)
+    return out
+
+
+def decrypt_vault(data: bytes, password) -> dict:
+    """Giải mã file kho. `password` là str (hoặc bytes UTF-8)."""
     if data[:4] != b"PWV1":
         raise ValueError("không phải file pwv")
     version, header_len = struct.unpack_from("<HI", data, 4)
-    if version != 1:
-        raise ValueError(f"phiên bản {version} chưa hỗ trợ")
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError(f"phiên bản định dạng {version} chưa hỗ trợ — hãy dùng bản mới hơn của công cụ này")
     header_end = 10 + header_len
     header = json.loads(data[10:header_end])
     aad = data[:header_end]
@@ -44,18 +71,26 @@ def decrypt_vault(data: bytes, password: bytes) -> dict:
     body_ct = data[header_end + 24:]
 
     kdf = header["kdf"]
-    master = hash_secret_raw(
-        password, base64.b64decode(header["salt"]),
-        time_cost=kdf["t"], memory_cost=kdf["m_kib"], parallelism=kdf["p"],
-        hash_len=32, type=Type.ID, version=19,
-    )
-    kek = hkdf_sha256(master, b"pwv/v1/key-encryption-key")
-    vault_key = xchacha_decrypt(
-        base64.b64decode(header["wrapped_key"]),
-        b"pwv/v1/wrap:" + header["vault_id"].encode(),
-        base64.b64decode(header["key_nonce"]),
-        kek,
-    )
+    vault_key = None
+    for candidate in password_candidates(password):
+        master = hash_secret_raw(
+            candidate, base64.b64decode(header["salt"]),
+            time_cost=kdf["t"], memory_cost=kdf["m_kib"], parallelism=kdf["p"],
+            hash_len=32, type=Type.ID, version=19,
+        )
+        kek = hkdf_sha256(master, b"pwv/v1/key-encryption-key")
+        try:
+            vault_key = xchacha_decrypt(
+                base64.b64decode(header["wrapped_key"]),
+                b"pwv/v1/wrap:" + header["vault_id"].encode(),
+                base64.b64decode(header["key_nonce"]),
+                kek,
+            )
+            break
+        except CryptoError:
+            continue
+    if vault_key is None:
+        raise CryptoError("sai master password (hoặc header của file đã bị sửa)")
     plain = xchacha_decrypt(body_ct, aad, body_nonce, vault_key)
     (n,) = struct.unpack_from("<I", plain, 0)
     return json.loads(plain[4:4 + n])
@@ -67,12 +102,14 @@ def main() -> None:
         sys.exit(2)
     with open(sys.argv[1], "rb") as f:
         data = f.read()
-    pw = getpass.getpass("Master password: ").encode()
+    pw = getpass.getpass("Master password: ")
     try:
         vault = decrypt_vault(data, pw)
-    except Exception as e:  # nacl ném CryptoError khi sai mật khẩu
+    except Exception as e:  # nacl ném CryptoError khi sai mật khẩu / file hỏng
         print(f"Không mở được: {e}", file=sys.stderr)
         sys.exit(1)
+    # Khoá của các lần đổi master password trước: không cần cho việc cứu dữ liệu, không in ra.
+    vault.pop("old_keys", None)
     print(json.dumps(vault, ensure_ascii=False, indent=2))
 
 

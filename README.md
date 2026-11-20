@@ -1,172 +1,229 @@
 # pwv — Kho mật khẩu cá nhân
 
 > ⚠ **Đang cập nhật lớn (bản 0.2.0, chưa phát hành).** Mã nguồn trên nhánh này đang được sửa sau đợt
-> rà soát bảo mật và CHƯA dùng được. Chỉ cài app từ trang
+> rà soát bảo mật. Chỉ cài app từ trang
 > [Releases](https://github.com/pichu124/password/releases) — **không** tải các file `dev-build-…` trong tab Actions.
 
-Phần mềm tạo mật khẩu mạnh và lưu chúng trong một file được mã hoá, đồng bộ giữa các máy
-Windows qua Google Drive. Chỉ người biết **master password** mới mở được.
+Phần mềm tạo mật khẩu mạnh và lưu chúng trong **một file được mã hoá**, đồng bộ giữa các máy Windows
+và điện thoại Android qua thư mục Google Drive / Dropbox / OneDrive. Chỉ người biết **master
+password** mới mở được.
 
-- Mã hoá: **Argon2id** (256 MiB) → HKDF-SHA256 → **XChaCha20-Poly1305**. Mọi thứ đều được
-  mã hoá, kể cả tên trang web và username.
-- Đồng bộ: đặt file `vault.pwv` trong thư mục Google Drive. App tự gộp khi hai máy cùng sửa.
-- Có công cụ cứu hộ độc lập (`tools/pwv_recover.py`) để lấy lại dữ liệu nếu app gặp sự cố.
+- Mã hoá: **Argon2id** (256 MiB) → HKDF-SHA256 → **XChaCha20-Poly1305**. Mọi thứ đều được mã hoá,
+  kể cả tên trang web và username.
+- Đồng bộ: đặt file `vault.pwv` trong thư mục đồng bộ. Hai máy cùng sửa thì app **gộp theo từng
+  trường** (máy này đổi mật khẩu, máy kia sửa ghi chú ⇒ giữ được cả hai).
+- An toàn dữ liệu: thùng rác, lịch sử mật khẩu, sao lưu tự động theo ngày/tháng, khôi phục ngay
+  trong app, và một công cụ cứu hộ độc lập (`tools/pwv_recover.py`).
 
 Kế hoạch tổng thể: [PLAN.md](PLAN.md) · Đặc tả file: [docs/FORMAT.md](docs/FORMAT.md)
 
-## Trạng thái
+## Cài đặt
 
-| Giai đoạn | Trạng thái |
-|---|---|
-| 0. Chuẩn bị, CI Windows | ✅ |
-| 1. Bộ tạo mật khẩu / passphrase | ✅ |
-| 2. Lõi kho (mã hoá, đồng bộ, sao lưu) | ✅ |
-| 3. CLI `pwv.exe` | ✅ |
-| 3b. Mã 2FA (TOTP), kiểm tra sức khoẻ + HIBP, import CSV | ✅ |
-| 4. App giao diện Windows (Tauri) — bộ cài `.exe` / `.msi` | ✅ |
-| 6. Gia cố: fuzz test, khoá RAM chứa khoá giải mã | ✅ |
+Chỉ tải từ trang **[Releases](https://github.com/pichu124/password/releases)** của repo này.
 
-## Cài đặt trên Windows
+### Windows
+1. Tải `pwv_x.y.z_x64-setup.exe` → chạy (cài cho riêng tài khoản của bạn, không cần quyền admin).
+2. Windows hiện cảnh báo SmartScreen vì bộ cài chưa được ký số: **More info → Run anyway**.
+   Chỉ làm vậy với file tải từ đúng trang Releases ở trên.
+3. Cập nhật: tải bản mới và cài đè, không cần gỡ. Kho mật khẩu không bị ảnh hưởng.
 
-### App có giao diện (khuyên dùng)
-Vào tab *Actions* của repo → lần chạy mới nhất có dấu ✓ → tải artifact **`pwv-app-windows-installer`**
-→ giải nén → chạy `pwv_x.y.z_x64-setup.exe` (cài cho riêng tài khoản của bạn, không cần quyền admin).
+### Android (chỉ xem + sao chép)
+1. Tải `pwv_x.y.z_android-arm64.apk` trên điện thoại → mở để cài (cho phép "cài từ nguồn này").
+2. Mở pwv → **Chọn file kho** → chọn Google Drive / Dropbox / OneDrive → chọn `vault.pwv`.
+3. Nhập master password.
 
-Windows có thể hiện cảnh báo SmartScreen vì bộ cài chưa được ký số: bấm **More info → Run anyway**.
+Ghi chú của bản phát hành cho biết APK được ký bằng khoá nào. Nếu là **khoá tạm** thì muốn cài bản
+mới phải gỡ bản cũ trước (kho trên Drive/Dropbox không bị ảnh hưởng; chỉ mất bản xem ngoại tuyến).
+Xem mục *Phát hành* để tạo khoá ký cố định.
 
-Tính năng của app:
-- Tạo kho mới (tự gợi ý thư mục Google Drive) hoặc mở kho có sẵn từ máy khác.
-- Danh sách + tìm kiếm (Ctrl+F), thêm (Ctrl+N), khoá (Ctrl+L), yêu thích, nhóm/tag.
-- Bộ tạo mật khẩu / cụm từ, thanh độ mạnh, lịch sử mật khẩu cũ.
-- Mã 2FA (TOTP) đếm ngược theo thời gian thực.
-- Kiểm tra sức khoẻ mật khẩu + rò rỉ (Have I Been Pwned), nhập CSV từ Chrome/Bitwarden/KeePass.
-- Tự khoá khi không dùng (mặc định 5 phút), tự xoá clipboard (20 giây), tự đồng bộ với Google Drive mỗi 20 giây.
-- Bảo mật: mật khẩu được sao chép trực tiếp từ Rust, không đi qua phần giao diện web; cửa sổ chặn chụp/chia sẻ
-  màn hình; chỉ cho chạy một cửa sổ app để tránh hai tiến trình cùng ghi file.
+> **Khi nâng cấp lên 0.2.0, hãy cập nhật MỌI thiết bị.** File kho chuyển sang định dạng mới; bản app
+> cũ hơn sẽ báo "hãy cập nhật phần mềm" thay vì mở file (không mất dữ liệu).
 
-### Công cụ dòng lệnh `pwv.exe`
+## Dùng app
 
-**Tải bản build sẵn:** vào tab *Actions* của repo → lần chạy mới nhất →
-tải artifact `pwv-windows` → giải nén `pwv.exe` vào một thư mục, ví dụ `C:\Tools\`.
+- **Tạo kho / mở kho có sẵn.** Ở máy thứ hai: chờ dịch vụ đồng bộ tải file về rồi chọn *Mở kho có
+  sẵn* — đừng tạo kho mới trùng tên.
+- **Master password:** tối thiểu 12 ký tự và phải thật khó đoán. Tên + năm sinh, số điện thoại, tên
+  ngân hàng… bị từ chối. Cách tốt nhất: bấm **Gợi ý** để lấy cụm 6 từ ngẫu nhiên, **viết ra giấy** và
+  cất nơi an toàn. **Quên master password = mất toàn bộ dữ liệu**, không ai khôi phục được.
+- **Danh sách + tìm kiếm** (Ctrl+F), thêm (Ctrl+N), khoá (Ctrl+L), yêu thích, nhóm.
+- **Bộ tạo mật khẩu / cụm từ**, thanh độ mạnh, **lịch sử mật khẩu** của từng mục (20 bản gần nhất).
+- **Mã 2FA (TOTP)** đếm ngược theo thời gian thực.
+- **Thùng rác:** xoá một mục là chuyển vào thùng rác; khôi phục được bất cứ lúc nào. *Xoá vĩnh viễn*
+  có hiệu lực trên mọi thiết bị.
+- **Sao lưu & khôi phục** (Cài đặt): app giữ 10 bản gần nhất + bản cuối của mỗi ngày trong 30 ngày +
+  mỗi tháng trong 12 tháng, ở thư mục `vault.pwv.backups` cạnh file kho. Chọn một bản, xem mục nào
+  khác hiện tại, khôi phục từng mục. Khôi phục là "một lần sửa mới": mật khẩu hiện tại được giữ
+  trong lịch sử của mục, và thay đổi lan sang mọi thiết bị.
+- **Kiểm tra sức khoẻ mật khẩu** + rò rỉ (Have I Been Pwned: chỉ gửi 5 ký tự đầu của mã băm).
+- **Nhập CSV** từ Chrome/Edge, Firefox, Bitwarden, KeePass 2/KeePassXC, 1Password, Proton Pass,
+  LastPass, Dashlane, Safari. Không dòng nào bị bỏ trừ khi trống hoặc giống hệt mục đã có. Sau khi
+  nhập, hãy xoá file CSV (app có nút) **và dọn thùng rác**, kể cả thùng rác trên cloud nếu file nằm
+  trong thư mục đồng bộ; rồi xoá mật khẩu đã lưu trong trình duyệt.
+- **Tự khoá** khi không dùng (mặc định 5 phút) và khi máy vừa ngủ dậy; **tự xoá clipboard** sau 20
+  giây và khi app khoá/đóng. Trên Windows mật khẩu khi sao chép không vào lịch sử clipboard (Win+V),
+  không đồng bộ lên cloud clipboard.
+- Cửa sổ app được loại khỏi ảnh chụp / quay màn hình (Windows 10 2004 trở lên; Android chặn chụp màn hình).
 
-**Tự build:**
-1. Cài Rust: <https://rustup.rs> (chọn mặc định, cần “Visual Studio C++ Build Tools”).
-2. Trong PowerShell:
-   ```powershell
-   git clone https://github.com/pichu124/password
-   cd password
-   cargo build --release
-   # file chạy: target\release\pwv.exe
-   ```
-
-## Sử dụng nhanh
-
-```powershell
-pwv init                       # tạo kho; tự gợi ý đặt trong G:\My Drive\Passwords\vault.pwv
-pwv gen -p -w 6                # tạo passphrase 6 từ (dùng làm master password rất tốt)
-pwv add "Vietcombank" -u nguyenvana --url https://vcbdigibank.vietcombank.com.vn -g -l 24
-pwv add "Gmail" -u toi@gmail.com       # tự nhập mật khẩu (để trống = tự tạo)
-pwv list                       # liệt kê
-pwv list ngân                  # tìm kiếm
-pwv copy gmail                 # chép mật khẩu, tự xoá clipboard sau 20 giây
-pwv show gmail --reveal        # xem chi tiết
-pwv edit gmail -g              # đổi sang mật khẩu ngẫu nhiên mới (mật khẩu cũ vào lịch sử)
-pwv delete gmail
-pwv passwd                     # đổi master password
-pwv sync                       # nạp thay đổi từ máy khác + gộp bản xung đột của Drive
-pwv totp google -c             # mã 2FA 6 số (lưu secret bằng --totp khi add/edit)
-pwv health                     # mật khẩu yếu / dùng trùng / lâu chưa đổi / đã bị lộ (HIBP)
-pwv import chrome.csv --delete-csv   # nhập từ Chrome, Edge, Firefox, Bitwarden, KeePass...
-```
-
-### Chuyển mật khẩu từ trình duyệt sang
-- **Chrome/Edge**: Cài đặt → Mật khẩu (Password Manager) → Xuất mật khẩu → lưu `.csv`.
-- **Bitwarden**: Tools → Export vault → định dạng `.csv`.
-- **KeePassXC**: Database → Export → CSV.
-
-Sau đó chạy `pwv import <file.csv> --delete-csv`, rồi **xoá mật khẩu trong trình duyệt** để không còn
-lưu ở hai nơi, và dọn Thùng rác.
-
-Trên Windows, mật khẩu khi copy sẽ **không** lưu vào lịch sử clipboard (Win+V) và không đồng bộ
-lên cloud clipboard.
-
-## App Android (chỉ xem + sao chép)
-
-1. Tab **Actions → Android** → lần chạy mới nhất có dấu ✓ → tải artifact `pwv-android-apk`, giải nén lấy
-   `pwv-android-arm64.apk` và chép sang điện thoại (hoặc tải thẳng trên điện thoại).
-2. Mở file APK để cài. Android sẽ hỏi cho phép cài app từ nguồn này → cho phép.
-3. Mở pwv → **Chọn file kho** → chọn Google Drive / Dropbox / OneDrive ở danh sách bên trái → chọn `vault.pwv`.
-4. Nhập master password.
-
-- Điện thoại **không bao giờ ghi** vào file kho; thêm/sửa làm trên máy tính.
-- App giữ một bản sao (vẫn đã mã hoá) trong bộ nhớ riêng để mở được khi mất mạng. Bấm ⟳ để tải bản mới.
-  Nếu Android báo hết quyền đọc file, bấm **Chọn lại file** (không cần nhập lại master password).
-- Tự khoá sau vài phút không dùng và khi app nằm nền quá 1 phút.
-- Hiện APK được ký bằng khoá tạm cho mỗi lần build, nên muốn cài bản mới phải **gỡ bản cũ trước**
-  (kho trên Drive/Dropbox không bị ảnh hưởng). Muốn cập nhật đè được: tạo keystore (alias `pwv`) và lưu
-  vào Secrets của repo với tên `ANDROID_KEYSTORE_BASE64` và `ANDROID_KEYSTORE_PASSWORD`.
+### Đổi master password
+Đổi mật khẩu cũng **đổi luôn khoá mã hoá** của kho và mã hoá lại các bản sao lưu trên máy. Các thiết
+bị khác sẽ hỏi mật khẩu mới. Lưu ý: những bản sao **đã rời khỏi máy** (lịch sử phiên bản / thùng rác
+của Drive-Dropbox-OneDrive, bản xem ngoại tuyến trên điện thoại, máy khác chưa đồng bộ) vẫn mở được
+bằng mật khẩu CŨ và chứa dữ liệu tại thời điểm đó. Nếu nghi mật khẩu cũ bị lộ: đổi cả mật khẩu của
+các tài khoản quan trọng (ngân hàng, email).
 
 ## Đồng bộ qua Google Drive / Dropbox / OneDrive
 
-1. Cài **Google Drive for Desktop** trên mỗi máy.
-2. Máy đầu tiên: `pwv init` và chọn vị trí trong thư mục Drive (ví dụ `G:\My Drive\Passwords\vault.pwv`).
-3. Máy thứ hai: đợi Drive tải file về rồi chạy `pwv config "G:\My Drive\Passwords\vault.pwv"`.
-4. Nếu Drive tạo file `vault (1).pwv` vì hai máy sửa cùng lúc, chạy `pwv sync` để gộp.
+1. Cài ứng dụng đồng bộ trên mỗi máy (Google Drive for Desktop / Dropbox / OneDrive).
+2. Máy đầu tiên: tạo kho trong thư mục đồng bộ (ví dụ `G:\My Drive\Passwords\vault.pwv`).
+3. Máy thứ hai: đợi file tải về rồi chọn **Mở kho có sẵn**.
+4. Giữ file luôn có trên máy: Drive chọn **Mirror files**; Dropbox bấm chuột phải thư mục →
+   **Make available offline**; OneDrive → **Always keep on this device**.
 
-Nên bật chế độ **“Mirror files”** (lưu bản sao trên máy) cho thư mục chứa kho để vẫn dùng được khi mất mạng.
+- App tự nạp thay đổi của máy khác mỗi 20 giây, tự gộp các "bản xung đột" mà dịch vụ đồng bộ tạo ra
+  (`vault (1).pwv`, `vault (… conflicted copy …).pwv`, `vault-TÊN-MÁY.pwv`…) rồi cất chúng vào thư
+  mục sao lưu.
+- **Đừng để bản sao khác của kho trong cùng thư mục** (ví dụ `vault - Copy.pwv`): app sẽ coi đó là
+  bản xung đột, gộp vào và cất đi.
+- Chuyển kho sang thư mục khác: dùng nút **Chuyển kho** trong Cài đặt trên MỘT máy; ở máy còn lại
+  app sẽ báo "không tìm thấy file kho" — chọn *Chọn file kho…* và trỏ tới vị trí mới.
 
+### Khi app báo có vấn đề
 
-**Dropbox / OneDrive** dùng y hệt: đặt `vault.pwv` trong thư mục `Dropbox` hoặc `OneDrive` thay cho thư mục Drive.
-App tự nhận ra bản xung đột của cả ba dịch vụ (`vault (1).pwv`, `vault (… conflicted copy …).pwv`,
-`vault-TÊN-MÁY.pwv`) và gộp lại. Với Dropbox, bấm chuột phải thư mục chứa kho → **Make available offline**;
-với OneDrive chọn **Always keep on this device**.
+| App báo | Nghĩa là | Việc cần làm |
+|---|---|---|
+| Mật khẩu chính đã được đổi trên thiết bị khác | Máy kia đã đổi master password | Nhập mật khẩu mới |
+| File kho trên đĩa đang hỏng hoặc chưa đồng bộ xong | Dịch vụ đồng bộ đang tải dở, hoặc file bị hỏng | Chờ rồi bấm *Thử lại*. Nếu vẫn vậy: *Ghi đè bằng bản đang mở* (file hỏng được cất vào thư mục sao lưu, không bị xoá) |
+| Không còn thấy file kho | File bị chuyển/xoá, hoặc chưa đồng bộ về | *Chọn file kho…* nếu đã chuyển chỗ; *Tạo lại file ở đây* nếu bị xoá nhầm |
+| File kho cũ hơn bản máy này từng thấy | Dịch vụ đồng bộ khôi phục bản cũ, hoặc có người chép đè | Kiểm tra các mục mới thêm gần đây; dùng *Sao lưu & khôi phục* nếu thiếu |
+| Hãy cập nhật phần mềm | File do bản app mới hơn ghi | Cài bản mới nhất trên máy này |
+| Không mở được kho (file hỏng) khi đang khoá | File kho hỏng hẳn | *Khôi phục từ bản sao lưu* ngay trên màn hình mở khoá |
 
-## Cứu hộ dữ liệu
+App không bao giờ tự ghi đè file kho khi nó hỏng, biến mất, thuộc kho khác hay do bản mới hơn ghi.
+
+## Công cụ dòng lệnh `pwv.exe` (tuỳ chọn)
+
+Tải `pwv-cli.exe` ở trang Releases, hoặc tự build (`cargo build --release -p pwv-cli`).
+
+```powershell
+pwv init                       # tạo kho; gợi ý đặt trong thư mục đồng bộ
+pwv gen -p -w 6                # tạo cụm 6 từ (dùng làm master password rất tốt)
+pwv add "Vietcombank" -u nguyenvana --url https://vcbdigibank.vietcombank.com.vn -g -l 24
+pwv add "Gmail" -u toi@gmail.com --totp --notes   # mật khẩu, secret 2FA, ghi chú được HỎI sau khi chạy lệnh
+pwv list ngân                  # tìm kiếm
+pwv copy gmail                 # chép mật khẩu, tự xoá clipboard sau 20 giây
+pwv show gmail --reveal        # xem chi tiết (mật khẩu và ghi chú chỉ hiện khi có --reveal)
+pwv edit gmail -g              # đổi sang mật khẩu ngẫu nhiên mới (mật khẩu cũ vào lịch sử)
+pwv delete gmail               # chuyển vào thùng rác
+pwv trash                      # xem thùng rác;  pwv trash restore gmail | purge gmail | empty
+pwv passwd                     # đổi master password (đổi luôn khoá mã hoá)
+pwv sync                       # nạp thay đổi từ máy khác + gộp bản xung đột
+pwv totp google -c             # mã 2FA 6 số
+pwv health                     # mật khẩu yếu / dùng trùng / lâu chưa đổi / đã bị lộ
+pwv import chrome.csv --delete-csv
+pwv backups                    # liệt kê bản sao lưu
+pwv restore --from 3 gmail     # lấy lại mục "gmail" từ bản sao lưu số 3  (hoặc --all)
+pwv recover                    # file kho hỏng/mất: dựng lại từ thư mục sao lưu
+pwv move "D:\Dropbox\Passwords\vault.pwv"
+```
+
+Mật khẩu, secret 2FA và ghi chú không bao giờ nhận qua tham số dòng lệnh (chúng sẽ nằm lại trong lịch
+sử lệnh của PowerShell).
+
+## Cứu hộ dữ liệu không cần app
 
 ```powershell
 pip install pynacl argon2-cffi
 python tools\pwv_recover.py "G:\My Drive\Passwords\vault.pwv" > backup.json
 ```
-⚠ `backup.json` chứa toàn bộ mật khẩu ở dạng rõ — xoá ngay sau khi dùng.
-Các bản sao lưu tự động nằm trong `vault.pwv.backups\` (10 bản gần nhất).
+⚠ `backup.json` chứa toàn bộ mật khẩu ở dạng rõ — xoá ngay sau khi dùng. Công cụ này được viết độc
+lập với app (chỉ dựa trên [docs/FORMAT.md](docs/FORMAT.md)) và đọc được cả file trong thư mục sao lưu.
 
-## Lưu ý an toàn
+## Giới hạn — những gì phần mềm KHÔNG bảo vệ được
 
-- **Quên master password = mất dữ liệu.** Viết master password ra giấy và cất ở nơi an toàn.
-- Phần mềm chưa được kiểm định bảo mật độc lập. Trong thời gian đầu hãy giữ song song một
-  password manager đã được audit (Bitwarden/KeePassXC) cho các tài khoản quan trọng nhất.
-- Không chống được mã độc/keylogger đang chạy trên máy khi bạn mở kho.
+- **Mã độc / keylogger đang chạy trên máy** khi bạn mở kho: không phần mềm quản lý mật khẩu nào chống được.
+- **Máy đang mở khoá kho mà bị người khác dùng.** Hãy khoá app (Ctrl+L) khi rời máy; đừng tắt tự khoá.
+- **Ổ đĩa không mã hoá:** khi kho đang mở, hệ điều hành có thể ghi một phần bộ nhớ xuống đĩa (pagefile,
+  file ngủ đông). Hãy bật **mã hoá ổ đĩa** (BitLocker / "Device encryption" trên Windows; điện thoại
+  Android đời mới đã bật sẵn).
+- **Bản sao cũ của file kho** trong lịch sử phiên bản của dịch vụ đồng bộ vẫn mở được bằng master
+  password của thời điểm đó (xem *Đổi master password*).
+- **Master password yếu.** Ai lấy được file kho đều có thể thử mật khẩu ngoại tuyến; Argon2id chỉ
+  làm việc đó chậm đi. Cụm 6 từ ngẫu nhiên là đủ an toàn; tên + năm sinh thì không.
+- Phần mềm đã qua một đợt rà soát mã nguồn kỹ nhưng **chưa được một tổ chức kiểm định độc lập**, và
+  bộ cài chưa được ký số. Hãy làm các bước kiểm tra dưới đây trước khi đưa tài khoản ngân hàng vào.
 
-## Phát hành bản mới
+## Kiểm tra trên thiết bị thật trước khi tin dùng
 
-1. Nâng phiên bản (cập nhật cả 4 file cấu hình cùng lúc):
+App được kiểm thử tự động trên Windows (CI), nhưng một số thứ chỉ kiểm tra được trên máy của bạn.
+Hãy làm với một kho thử (vài mục giả) trước:
+
+**Windows**
+1. Tạo kho trong thư mục đồng bộ, thêm vài mục, khoá, mở lại.
+2. Sao chép một mật khẩu → dán thử → bấm **Win+V**: mật khẩu KHÔNG nằm trong lịch sử. Chờ 20 giây →
+   dán lại: đã trống. Sao chép rồi **đóng app ngay** → dán: cũng phải trống.
+3. Bấm **Win+Shift+S** chụp cửa sổ app: phần app phải đen.
+4. Gập máy (Sleep) khi kho đang mở → mở máy: app phải đang khoá.
+5. Trên hai máy: sửa ở máy A → trong 1 phút thấy ở máy B. Tắt mạng máy B, sửa GHI CHÚ một mục ở B và
+   đổi MẬT KHẨU mục đó ở A → bật mạng lại: mục đó phải có cả hai thay đổi.
+6. Đổi master password ở máy A → máy B phải hỏi mật khẩu mới.
+7. Xoá một mục → lấy lại từ Thùng rác. Sửa một mục → lấy lại bản cũ ở *Sao lưu & khôi phục*.
+
+**Android**
+1. Cài APK, chọn file kho từ Drive/Dropbox/OneDrive, mở khoá (mất 1–3 giây; nếu app báo không đủ bộ
+   nhớ hoặc tự thoát thì điện thoại không đủ RAM cho bước dẫn xuất khoá 256 MiB).
+2. Thử chụp màn hình khi đang xem một mục: phải bị chặn; trong màn hình "Ứng dụng gần đây" nội dung
+   phải bị che.
+3. Sao chép mật khẩu: khung xem trước clipboard không hiện mật khẩu; sau 20 giây dán ra trống.
+4. Bật chế độ máy bay → mở app: vẫn xem được bằng bản đã lưu, có ghi chú cho biết.
+5. Sửa một mục trên máy tính → trên điện thoại bấm ⟳: thấy thay đổi, dòng "Dữ liệu cập nhật lúc…" đổi.
+6. Để app ở nền hơn 1 phút → quay lại: app phải đang khoá.
+
+## Phát hành bản mới (dành cho người bảo trì)
+
+1. Nâng phiên bản (cập nhật cả 4 file cấu hình và các file khoá):
    ```bash
-   python tools/set_version.py 0.1.3
+   python tools/set_version.py 0.2.1
    ```
-2. Commit và push.
-3. Vào tab **Actions → Release → Run workflow**. Workflow chạy test, build bộ cài + `pwv-cli.exe`,
-   rồi tạo bản phát hành `v0.1.3` trên GitHub Releases kèm `SHA256SUMS.txt`.
-4. App đang cài trên các máy sẽ tự hiện thông báo “Có phiên bản mới” trong vòng 24 giờ
-   (hoặc vào **Cài đặt → Kiểm tra ngay**).
+2. Commit và push; chờ CI xanh.
+3. Tab **Actions → Release → Run workflow** (chỉ chạy được trên nhánh mặc định). Workflow chạy test,
+   build bộ cài Windows + `pwv-cli.exe` + APK Android, rồi tạo bản phát hành `v0.2.1` kèm `SHA256SUMS.txt`.
+4. App đang cài trên các máy sẽ hiện "Có phiên bản mới" trong vòng 24 giờ.
+
+**Khoá ký APK cố định** (để cài đè được, không phải gỡ app): tạo một keystore có alias `pwv`
+(`keytool -genkeypair -keystore release.jks -alias pwv -keyalg RSA -keysize 3072 -validity 10000`),
+lưu vào Secrets của repo: `ANDROID_KEYSTORE_BASE64` (nội dung file mã hoá base64) và
+`ANDROID_KEYSTORE_PASSWORD`. **Giữ một bản sao của keystore ở nơi an toàn** — mất nó là quay lại cảnh
+phải gỡ app để cập nhật. Không bao giờ đổi tên tài khoản GitHub chứa repo này: app kiểm tra bản mới
+theo đúng tên đó.
+
+`SHA256SUMS.txt` nằm cùng chỗ với file cài nên chỉ giúp phát hiện file tải bị lỗi, không chứng minh
+được nguồn gốc.
 
 ## Phát triển
 
 ```bash
-cargo test --workspace                          # lõi + CLI
+cargo test --workspace                          # lõi + CLI (có property test cho thuật toán gộp)
 cargo clippy --workspace --all-targets -- -D warnings
 cd app && npm ci && npm run build               # giao diện
 cd src-tauri && cargo test                      # backend của app
 cd .. && npx tauri dev                          # chạy app ở chế độ phát triển
 npx vite --mode mock                            # xem giao diện trong trình duyệt với dữ liệu giả
-                                                # (mật khẩu demo: demo-demo-demo-demo)
 ```
 
 Cấu trúc:
 ```
-crates/generator   tạo mật khẩu, passphrase EFF, zxcvbn
-crates/vault-core  mật mã, định dạng file, đồng bộ, TOTP, import CSV, cấu hình
+crates/generator   tạo mật khẩu, passphrase EFF, zxcvbn, chính sách master password
+crates/vault-core  mật mã, định dạng file, gộp/đồng bộ, sao lưu, TOTP, import CSV, cấu hình
 crates/health      kiểm tra yếu/trùng/cũ + Have I Been Pwned
 crates/cli         pwv.exe
 app/               app Tauri 2 (src-tauri = Rust, src = React/TypeScript)
-tools/             công cụ cứu hộ Python độc lập
+tools/             công cụ cứu hộ Python độc lập + script kiểm tra chéo
+docs/FORMAT.md     đặc tả định dạng file
 ```
+
+## Giấy phép
+
+GPL-3.0-or-later — xem [LICENSE](LICENSE). Danh sách từ dùng cho cụm mật khẩu là
+[EFF Large Wordlist](https://www.eff.org/dice) của Electronic Frontier Foundation, phát hành theo
+giấy phép Creative Commons Attribution 3.0 US.

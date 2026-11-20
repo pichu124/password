@@ -10,6 +10,8 @@ pub enum Error {
     UnsupportedVersion(u16),
     #[error("tham số Argon2 không hợp lệ hoặc quá yếu")]
     InvalidKdfParams,
+    #[error("không đủ bộ nhớ để mở kho (cần khoảng {0} MB RAM trống) — hãy đóng bớt ứng dụng khác rồi thử lại")]
+    OutOfMemory(u32),
     #[error("hai file không thuộc cùng một kho (vault_id khác nhau)")]
     DifferentVault,
     #[error("không tìm thấy mục {0}")]

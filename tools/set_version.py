@@ -29,10 +29,17 @@ def main() -> None:
         data["version"] = v
         js.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    # Cập nhật lockfile cho khớp.
-    subprocess.run(["cargo", "update", "--workspace", "--offline"], cwd=ROOT, check=False)
-    subprocess.run(["cargo", "update", "-p", "pwv-app", "--offline"], cwd=ROOT / "app/src-tauri", check=False)
-    subprocess.run(["npm", "install", "--package-lock-only", "--no-audit", "--no-fund"], cwd=ROOT / "app", check=False, shell=sys.platform == "win32")
+    # Cập nhật lockfile cho khớp. CI build với --locked nên lockfile lệch là build đỏ: báo lỗi ngay ở đây.
+    steps = [
+        (["cargo", "update", "--workspace", "--offline"], ROOT),
+        (["cargo", "update", "-p", "pwv-app", "--offline"], ROOT / "app/src-tauri"),
+        (["npm", "install", "--package-lock-only", "--no-audit", "--no-fund"], ROOT / "app"),
+    ]
+    for cmd, cwd in steps:
+        r = subprocess.run(cmd, cwd=cwd, check=False, shell=sys.platform == "win32")
+        if r.returncode != 0:
+            print(f"LỖI: lệnh {' '.join(cmd)} (trong {cwd}) thất bại — file khoá chưa được cập nhật.")
+            sys.exit(1)
     print(f"Đã đặt phiên bản {v}.")
 
 

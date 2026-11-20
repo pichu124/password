@@ -29,7 +29,7 @@
 
 ### MVP (bản dùng được đầu tiên)
 - Tạo kho mới với master password; mở khoá / khoá kho.
-- **Tự khoá** sau N phút không dùng, khi máy sleep/lock màn hình.
+- **Tự khoá** sau N phút không dùng và ngay khi máy vừa ngủ dậy. (Khoá TRƯỚC khi máy ngủ / khi khoá màn hình Windows: chưa làm — xem mục 9.)
 - Thêm / sửa / xoá / tìm kiếm mục: tiêu đề, username, mật khẩu, URL, ghi chú, tag, mục yêu thích.
 - **Bộ tạo mật khẩu**:
   - Ngẫu nhiên: độ dài 8–128, chọn nhóm ký tự (hoa, thường, số, ký hiệu), loại ký tự dễ nhầm (`0 O l 1 I`).
@@ -37,7 +37,7 @@
   - Hiển thị **entropy (bit)** và độ mạnh ước tính (zxcvbn).
 - Sao chép vào clipboard và **tự xoá clipboard sau 20–30 giây**.
 - Lịch sử mật khẩu của từng mục (để khôi phục khi đổi nhầm).
-- Sao lưu tự động có phiên bản; xuất file mã hoá.
+- Sao lưu tự động có phiên bản (theo ngày/tháng), thùng rác, khôi phục từng mục ngay trong app.
 
 ### Bản 1.x
 - **Kiểm tra sức khoẻ mật khẩu**: yếu, trùng lặp, cũ; kiểm tra rò rỉ qua **Have I Been Pwned** bằng k-anonymity (chỉ gửi 5 ký tự đầu của SHA-1, không gửi mật khẩu).
@@ -184,32 +184,72 @@ password/
 ---
 
 ## 7. Checklist bảo mật bắt buộc trước khi dùng cho tài khoản thật
-- [ ] Không có thuật toán mật mã tự viết; chỉ dùng thư viện đã kiểm định.
-- [ ] Toàn bộ metadata được mã hoá; file kho không chứa chuỗi đọc được nào ngoài header.
-- [ ] Tham số Argon2id ≥ 64 MiB; header được xác thực (AAD).
-- [ ] Khoá được `zeroize` khi khoá kho; không log dữ liệu nhạy cảm (có test kiểm tra).
-- [ ] Clipboard tự xoá; tự khoá khi rảnh / khoá màn hình.
-- [ ] Ghi file nguyên tử + backup; đã thử rút điện/kill tiến trình giữa lúc lưu.
-- [ ] Fuzz bộ đọc file; test vectors cố định cho định dạng.
-- [ ] `cargo audit` sạch; bản phát hành được ký.
-- [ ] Có Emergency Kit / recovery key; người dùng được cảnh báo rõ “quên master password = mất dữ liệu”.
-- [ ] Một người có chuyên môn bảo mật đã review phần `vault-core`.
+Trạng thái tại bản 0.2.0 (sau đợt rà soát ở mục 9):
+- [x] Không có thuật toán mật mã tự viết; chỉ dùng thư viện đã kiểm định (RustCrypto).
+- [x] Toàn bộ metadata được mã hoá; file kho không chứa chuỗi đọc được nào ngoài header (có test).
+- [x] Tham số Argon2id ≥ 64 MiB, kiểm tra cả khi mở; header được xác thực (AAD).
+- [x] Khoá và các mục được `zeroize` khi khoá kho; kiểu dữ liệu chứa bí mật không in ra log/Debug (có test).
+      *Giới hạn:* bản sao tạm trong bộ nhớ của WebView và của thư viện không xoá được — xem README.
+- [x] Clipboard tự xoá (kể cả khi đóng/khoá app); tự khoá khi rảnh và khi máy vừa ngủ dậy.
+      *Chưa có:* khoá ngay khi khoá màn hình Windows / trước khi máy ngủ.
+- [x] Ghi file nguyên tử + đọc lại kiểm tra + sao lưu trước và sau mỗi lần ghi; thao tác sửa là giao dịch có hoàn tác.
+- [x] Fuzz bộ đọc file; file mẫu của bản 0.1.2 nằm trong repo và được test ở mỗi lần build; công cụ giải mã độc lập bằng Python được kiểm tra chéo trong CI.
+- [x] `cargo audit` cho cả lõi lẫn app + `npm audit`, chạy hằng tuần.
+- [ ] Bản phát hành được **ký số** (Authenticode cho Windows, khoá cố định cho APK) — chưa.
+- [x] Người dùng được cảnh báo rõ "quên master password = mất dữ liệu"; chính sách master password chặn mật khẩu dễ đoán.
+- [ ] Một **tổ chức/người độc lập** có chuyên môn review phần `vault-core` — chưa (mới có đợt rà soát nội bộ ở mục 9).
+- [ ] Các bước kiểm tra trên thiết bị thật trong README (Windows + Android) — người dùng tự làm.
 
-> ⚠️ **Khuyến nghị thực tế:** trong lúc phát triển, **tiếp tục dùng song song** một phần mềm đã được audit (Bitwarden hoặc KeePassXC) cho các tài khoản quan trọng, và luôn giữ bản export dự phòng. Chỉ chuyển hẳn sang phần mềm tự làm khi đã qua checklist trên.
+> ⚠️ **Khuyến nghị thực tế:** làm xong các bước kiểm tra trên thiết bị thật với một kho thử trước khi đưa tài khoản ngân hàng vào, và luôn giữ được đường lui (thư mục sao lưu + `tools/pwv_recover.py`).
 
 ---
 
 ## 8. Quyết định đã chốt (19/11/2026)
 1. **Nền tảng**: Windows trước (Windows 10/11, 64-bit).
 2. **Đồng bộ**: qua **Google Drive for Desktop** — file kho nằm trong thư mục Drive (ví dụ `G:\My Drive\Passwords\vault.pwv`). Drive chỉ thấy dữ liệu đã mã hoá.
-   - Trước khi lưu, app kiểm tra file trên đĩa có bị máy khác thay đổi không (so SHA-256 lúc mở). Nếu có → tự **gộp (merge)** theo từng mục: bản nào `updated_at` mới hơn thì thắng, mục đã xoá được ghi “bia mộ” (tombstone) để không sống lại.
-   - Nếu Drive tạo bản xung đột (`vault (1).pwv`), lệnh `pwv merge` / nút trong app sẽ gộp vào kho chính.
-   - Ghi file nguyên tử + thử lại khi Drive/antivirus đang khoá file; giữ 10 bản sao lưu trong thư mục `vault.pwv.backups/`.
+   - Trước mỗi lần sửa, app kiểm tra file trên đĩa có bị máy khác thay đổi không (so SHA-256). Nếu có → tự **gộp (merge)** theo **từng trường** của từng mục (trường nào sửa sau thì thắng); xoá = vào thùng rác; xoá vĩnh viễn để lại "bia mộ" (tombstone). *(Bản 0.1.x gộp theo cả mục — đã thay ở 0.2.0.)*
+   - Bản xung đột do dịch vụ đồng bộ tạo ra được nhận diện theo `vault_id`, tự gộp, rồi cất vào thư mục sao lưu.
+   - Ghi file nguyên tử + thử lại khi Drive/antivirus đang khoá file; sao lưu theo tầng (10 bản gần nhất + theo ngày + theo tháng) trong `vault.pwv.backups/`.
+   - Từ 0.1.1 hỗ trợ cả Dropbox và OneDrive; từ 0.1.2 có app Android chỉ đọc.
 3. **Công nghệ**: Rust + Tauri 2 + React/TypeScript (theo đề xuất).
 4. **Người dùng**: chỉ dùng cá nhân → không cần server, không cần chia sẻ, không phát hành công khai. Vẫn giữ checklist bảo mật ở mục 7.
 
 ### Điều chỉnh thiết kế so với bản nháp
 - Toàn bộ phần thân kho (mọi mục) được mã hoá **một lần** bằng XChaCha20-Poly1305, có **đệm (padding) lên bội số 4 KiB** để không lộ số lượng mục qua kích thước file. Header là AAD. Chi tiết trong `docs/FORMAT.md`.
+
+---
+
+## 9. Đợt rà soát bảo mật 11/2026 và bản 0.2.0
+
+Trước khi dùng cho tài khoản ngân hàng, toàn bộ mã nguồn bản 0.1.2 được rà soát theo 17 mảng (thiết kế
+mật mã, mất dữ liệu khi đồng bộ, bí mật trong bộ nhớ, khoá phiên, ghi file, WebView, nhập CSV/TOTP/HIBP,
+bộ tạo mật khẩu, Windows, Android, chuỗi cung ứng, …); mỗi phát hiện từ mức trung bình trở lên được một
+người rà soát thứ hai kiểm chứng độc lập (đa số bằng thử nghiệm chạy thật).
+
+**Không có lỗi làm lộ dữ liệu cho người chỉ có file kho.** Các lỗi đã sửa ở 0.2.0:
+
+| Nhóm | Lỗi của 0.1.2 | Cách sửa |
+|---|---|---|
+| Mất dữ liệu | Chuyển kho vào chính thư mục sao lưu của nó ⇒ xoá sạch kho và sao lưu | Từ chối; không bao giờ xoá đệ quy |
+| Mất dữ liệu | Máy chưa đồng bộ bấm ★/sửa ghi chú ⇒ đè mất mật khẩu mới của máy kia | Gộp theo từng trường; form chỉ gửi trường đã đổi; gộp trước khi sửa |
+| Mất dữ liệu | Đồng bộ nền gộp vào RAM nhưng không ghi lại | Ghi lại khi bản đang mở có thứ file thiếu |
+| Mất dữ liệu | File trên đĩa hỏng ⇒ mọi lần lưu lỗi "sai mật khẩu", thay đổi mất khi tự khoá | Giao dịch có hoàn tác; lỗi riêng từng loại; ghi đè có xác nhận; bản cứu hộ khi khoá |
+| Mất dữ liệu | File biến mất ⇒ âm thầm tạo lại (kho bị tách đôi) | Báo lỗi, chờ người dùng chọn |
+| Mất dữ liệu | Chỉ giữ 10 bản sao lưu gần nhất; không có thùng rác | Sao lưu theo ngày/tháng; thùng rác; khôi phục trong app |
+| Mất dữ liệu | Nhập CSV bỏ các ghi chú bảo mật và tài khoản dùng chung mật khẩu vì coi là "trùng" | Chỉ bỏ dòng giống hệt mọi trường; không tự xoá CSV |
+| Bảo mật | Đổi master password không đổi khoá kho | Sinh khoá mới, mã hoá lại kho và các bản sao lưu |
+| Bảo mật | Chính sách master password để lọt "tên + năm sinh" | Ngưỡng 10^14 lần đoán |
+| Bảo mật | Clipboard không được xoá nếu đóng app trong 20 giây | Xoá khi đóng/khoá; Ctrl+C ở CLI cũng xoá |
+| Bảo mật | Kiểm tra rò rỉ treo app vô hạn khi mạng treo; trang chặn mạng bị hiểu là "an toàn" | Giới hạn thời gian, gọi mạng ngoài khoá phiên, kiểm tra dạng phản hồi |
+| Bảo mật | Android: mật khẩu hiện trong khung xem trước clipboard, cho chụp màn hình, dữ liệu app vào Google backup | `write_secret`, `FLAG_SECURE`, tắt sao lưu và tự điền |
+| Khác | Mật khẩu có dấu gõ bằng bàn phím khác bị báo sai; tham số Argon2 không được kiểm tra khi mở; … | Xem lịch sử commit |
+
+**Còn để ngỏ (đã ghi rõ trong README):**
+- Bộ cài Windows chưa ký số; APK cần khoá ký cố định (người dùng phải tạo một lần).
+- Khoá kho ngay khi khoá màn hình Windows / trước khi máy ngủ (hiện chỉ khoá khi máy vừa thức dậy).
+- Bí mật còn sót trong bộ nhớ tiến trình cho tới khi app thoát ⇒ cần mã hoá ổ đĩa.
+- Các action của GitHub chưa được ghim theo mã commit.
+- Chưa có kiểm định của bên thứ ba.
 
 ## Nguồn tham khảo
 - Bitwarden Security Whitepaper — https://bitwarden.com/help/bitwarden-security-white-paper/
