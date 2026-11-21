@@ -200,6 +200,8 @@ export interface UnlockInfo {
   local_restored: { added: number; updated: number; deleted: number } | null;
   /** File kho vừa được một máy còn chạy bản 0.1.x ghi lại. */
   old_version_wrote: boolean;
+  /** Số bản lưu riêng / bản cứu hộ trên máy này ghi bằng mật khẩu chính CŨ có nội dung mới: KHÔNG gộp, đã cất `oldkey-…`. */
+  old_local_archived: number;
 }
 
 /** File vừa chọn có vẻ là bản xung đột của một file kho khác cùng thư mục. */
@@ -226,6 +228,8 @@ export interface RecoverInfo {
   rescue_kept: number;
   /** Không còn bản sao lưu dùng được: dựng lại từ bản lưu riêng / bản cứu hộ trên máy này. */
   from_local_copy: boolean;
+  /** Như UnlockInfo.old_local_archived. */
+  old_local_archived: number;
 }
 
 export interface HealthItem {
@@ -275,8 +279,10 @@ export interface PasswordChangeView {
   backups_skipped: number;
   /** Mật khẩu ĐÃ đổi, nhưng chưa đọc lại kiểm tra được file vừa ghi. */
   unverified: boolean;
-  /** Bản sao lưu đọc được nhưng ghi lại không được: VẪN mở được bằng mật khẩu CŨ. */
+  /** Bản sao lưu không đọc được hoặc ghi lại không được (sau một lần thử lại): có thể VẪN mở được bằng mật khẩu CŨ. */
   backups_failed: string[];
+  /** Giữ nguyên mật khẩu (chỉ thay khoá) mà mật khẩu đó không đạt chính sách hiện tại. */
+  policy_warning: string | null;
 }
 
 /** Kết quả "dọn sạch thùng rác". */

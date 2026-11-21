@@ -136,7 +136,12 @@ export function UnlockScreen({
           type="password"
           placeholder="Mật khẩu chính (master password)"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => {
+            setPassword(e.target.value);
+            // Mọi hộp lựa chọn (khôi phục, "vẫn khôi phục bản cũ hơn"…) chỉ áp cho ĐÚNG mật khẩu đã tạo ra nó.
+            setError(null);
+            lastOpts.current = {};
+          }}
           disabled={busy}
           autoComplete="off"
           spellCheck={false}
@@ -430,6 +435,7 @@ function RecoveredCard({ info, older, stale, onContinue }: Recovered & { onConti
             </li>
           )}
           {info.rescue_kept > 0 && <li>{info.rescue_kept} bản cứu hộ chưa gộp được, vẫn được giữ lại (app thử lại ở lần mở khoá sau).</li>}
+          {info.old_local_archived > 0 && <li className="warn-text">Bản lưu riêng trên máy này được ghi bằng mật khẩu chính CŨ và có nội dung mà kho hiện tại không có. App KHÔNG tự gộp nội dung ghi bằng mật khẩu cũ (nếu mật khẩu cũ từng bị lộ, đó có thể không phải thay đổi của bạn). Bản đó đã được cất vào thư mục sao lưu với nhãn «ghi bằng mật khẩu cũ» — mở Cài đặt → Sao lưu để xem và lấy lại từng mục nếu đúng là của bạn.</li>}
         </ul>
         {older === "password" && (
           <div className="warning small">
@@ -578,7 +584,11 @@ export function NotFoundScreen({ status, note, onRetry, onRecovered }: { status:
             <input
               type="password"
               value={pw}
-              onChange={(e) => setPw(e.target.value)}
+              onChange={(e) => {
+                setPw(e.target.value);
+                setError(null);
+                lastOpts.current = {};
+              }}
               autoComplete="off"
               spellCheck={false}
               data-secret

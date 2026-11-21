@@ -27,6 +27,10 @@ const SYNC_EVERY_MS = 20_000;
 const UPDATE_CHECK_EVERY_MS = 24 * 60 * 60 * 1000;
 const TOUCH_EVERY_MS = 15_000;
 
+/** Bản lưu riêng / bản cứu hộ trên máy ghi bằng mật khẩu chính cũ, có nội dung mới: đã cất, không gộp. */
+const OLD_LOCAL_TEXT =
+  "Bản lưu riêng trên máy này được ghi bằng mật khẩu chính CŨ và có nội dung mà kho hiện tại không có. App KHÔNG tự gộp nội dung ghi bằng mật khẩu cũ (nếu mật khẩu cũ từng bị lộ, đó có thể không phải thay đổi của bạn). Bản đó đã được cất vào thư mục sao lưu với nhãn «ghi bằng mật khẩu cũ» — mở Cài đặt → Sao lưu để xem và lấy lại từng mục nếu đúng là của bạn.";
+
 /** Ghi xong nhưng chưa đọc lại kiểm tra được (SyncResult.unverified). */
 const UNVERIFIED_TEXT =
   "Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi (có thể chương trình đồng bộ hoặc diệt virus đang giữ file). App sẽ tự kiểm tra lại ở lần đồng bộ tới.";
@@ -343,6 +347,7 @@ function VaultScreen({
         "warn",
       );
     }
+    if (unlockInfo.old_local_archived > 0) addNotice(OLD_LOCAL_TEXT, "warn");
     if (unlockInfo.old_version_wrote)
       addNotice(
         "File kho vừa được một máy còn chạy bản 0.1.x ghi lại. Hãy cập nhật app trên máy đó: khi còn máy chạy bản cũ, thay đổi ở hai bên có thể ghi đè lẫn nhau.",

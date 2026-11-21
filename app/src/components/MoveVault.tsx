@@ -2,6 +2,9 @@ import { useState } from "react";
 import { api, errorText, pickFile } from "../api";
 import type { MoveView, Status } from "../types";
 
+const SAME_FOLDER_TEXT =
+  "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ thư mục Tài liệu / Documents): file mới đặt cạnh file kho cũ sẽ bị coi là bản xung đột của nó.";
+
 const sep = (p: string) => (p.includes("/") && !p.includes("\\") ? "/" : "\\");
 
 /** Ghi kho đang mở sang vị trí mới (có bước xác nhận). Dùng ở Cài đặt và ở cảnh báo file kho có vấn đề. */
@@ -27,15 +30,23 @@ export function MoveVault({
     setError(null);
     try {
       const fileName = status.vault_path?.split(/[\\/]/).pop() ?? "vault.pwv";
-      const suggested = await api.suggestPath().catch(() => "");
+      // Cứu dữ liệu: không gợi ý thư mục đồng bộ (thường chính là thư mục đang chứa file kho) — để hộp thoại tự mở ở
+      // thư mục mặc định (thường là Tài liệu / Documents).
+      const suggested = rescue ? "" : await api.suggestPath().catch(() => "");
       const dir = suggested.replace(/[\\/][^\\/]*$/, "");
       const p = await pickFile({
         save: true,
-        title: rescue ? "Chọn nơi lưu bản đang mở" : "Chọn thư mục mới cho kho",
+        title: rescue ? "Chọn nơi lưu bản đang mở (một thư mục KHÁC thư mục của file kho)" : "Chọn thư mục mới cho kho",
         defaultPath: dir ? `${dir}${sep(dir)}${fileName}` : fileName,
         filters: [{ name: "Kho pwv", extensions: ["pwv"] }],
       });
-      if (p) setTarget(p);
+      if (!p) return;
+      const folder = (x: string) => x.replace(/[\\/][^\\/]*$/, "").toLowerCase();
+      if (rescue && status.vault_path && folder(p) === folder(status.vault_path)) {
+        setError(SAME_FOLDER_TEXT);
+        return;
+      }
+      setTarget(p);
     } catch (e) {
       setError(errorText(e));
     }

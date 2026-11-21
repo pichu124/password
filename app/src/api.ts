@@ -122,8 +122,12 @@ export const api = {
   revealTotpSecret: (id: string) => call<string>("reveal_totp_secret", { id }),
   history: (id: string) => call<HistoryView[]>("password_history", { id }),
   totp: (id: string) => call<TotpCode>("totp_code", { id }),
-  /** `updatedAt`: thời điểm sửa của mục đang hiện — mục đã đổi ⇒ lỗi `entry_changed`. */
-  copyField: (id: string, field: CopyField, updatedAt?: number) => call<number>("copy_field", { id, field, updatedAt: updatedAt ?? null }),
+  /**
+   * `updatedAt`: thời điểm sửa của mục đang hiện; `shown`: dòng đang hiện (địa chỉ của `url:<i>`, `replaced_at` của
+   * `history:<i>`). Mục / dòng đã đổi ⇒ lỗi `entry_changed`.
+   */
+  copyField: (id: string, field: CopyField, updatedAt?: number, shown?: string) =>
+    call<number>("copy_field", { id, field, updatedAt: updatedAt ?? null, shown: shown ?? null }),
   copyText: (text: string) => call<number>("copy_text", { text }),
   save: (entry: EntryInput) => call<[string, SyncResult]>("save_entry", { entry }).then((r) => reportWrite(r, r[1])),
   /** Chuyển vào thùng rác. */

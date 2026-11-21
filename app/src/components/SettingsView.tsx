@@ -209,6 +209,8 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PasswordChangeView | null>(null);
+  /** Lần đổi vừa rồi giữ nguyên mật khẩu (chỉ thay khoá mã hoá). */
+  const [kept, setKept] = useState(false);
   const mc = useMasterCheck();
 
   async function submit(e: React.FormEvent) {
@@ -217,9 +219,14 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const c = await mc.run(next);
-      if (!c?.ok) return;
+      // Nhập lại đúng mật khẩu đang dùng = chỉ thay khoá mã hoá: không chấm lại theo chính sách (backend kiểm tra mật
+      // khẩu hiện tại, và cảnh báo trong kết quả nếu nó không còn đạt yêu cầu).
+      if (next !== cur) {
+        const c = await mc.run(next);
+        if (!c?.ok) return;
+      }
       const r = await api.changeMaster(cur, next);
+      setKept(next === cur);
       setResult(r);
       // (ví dụ: cảnh báo "nên đổi mật khẩu chính để thay khoá" hết hiện)
       onChanged();
@@ -239,11 +246,24 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
   if (result) {
     return (
       <section className="card">
-        <h3>Đã đổi mật khẩu chính</h3>
-        <p className="small">
-          Mật khẩu chính <strong>đã được đổi</strong>: kho trên máy này đã dùng mật khẩu mới. Đã mã hoá lại <strong>{result.backups_reencrypted}</strong> bản
-          sao lưu bằng mật khẩu mới.
-        </p>
+        <h3>{kept ? "Đã thay khoá mã hoá" : "Đã đổi mật khẩu chính"}</h3>
+        {kept ? (
+          <p className="small">
+            Mật khẩu chính <strong>giữ nguyên</strong>, khoá mã hoá của kho <strong>đã được thay mới</strong>: từ nay một mật khẩu chính cũ cùng một bản sao
+            lưu cũ không còn mở được dữ liệu mới. Đã mã hoá lại <strong>{result.backups_reencrypted}</strong> bản sao lưu bằng khoá mới.
+          </p>
+        ) : (
+          <p className="small">
+            Mật khẩu chính <strong>đã được đổi</strong>: kho trên máy này đã dùng mật khẩu mới. Đã mã hoá lại <strong>{result.backups_reencrypted}</strong> bản
+            sao lưu bằng mật khẩu mới.
+          </p>
+        )}
+        {result.policy_warning && (
+          <div className="warning small" role="alert">
+            Mật khẩu chính đang dùng <strong>không còn đạt yêu cầu tối thiểu</strong> của bản app này:{" "}
+            {result.policy_warning} Nên đổi sang một mật khẩu mạnh hơn khi có thể (bấm «Gợi ý» để lấy cụm từ ngẫu nhiên).
+          </div>
+        )}
         {result.unverified && (
           <div className="note-box">
             Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi (có thể chương trình đồng bộ hoặc diệt virus đang giữ file). App sẽ tự kiểm tra lại ở lần
@@ -253,8 +273,9 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
         {result.backups_failed.length > 0 && (
           <div className="warning small" role="alert">
             <p>
-              <strong>{result.backups_failed.length} bản sao lưu chưa mã hoá lại được</strong> (đĩa đầy, hoặc file đang bị chương trình đồng bộ / diệt virus giữ).
-              Chúng <strong>vẫn mở được bằng mật khẩu chính CŨ</strong>:
+              <strong>{result.backups_failed.length} bản sao lưu chưa mã hoá lại được</strong> (không đọc hoặc không ghi lại được — đĩa đầy, hoặc file đang bị
+              chương trình đồng bộ / diệt virus giữ).
+              Chúng <strong>có thể vẫn mở được bằng mật khẩu chính CŨ</strong>:
             </p>
             <ul className="name-list mono">
               {result.backups_failed.map((n) => (
@@ -270,6 +291,15 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
             khẩu chính cũ hơn nữa, kể cả các bản “ghi bằng mật khẩu cũ” app đã cất (những bản đó vẫn mở được bằng mật khẩu cũ ấy; app cố ý không mã hoá lại chúng vì không chắc chúng là của bạn).
           </p>
         )}
+        {kept ? (
+          <div className="warning small">
+            <p>
+              Những bản sao đã rời khỏi máy này (lịch sử phiên bản và thùng rác của Google Drive / Dropbox / OneDrive, bản lưu ngoại tuyến trên điện thoại,
+              các máy tính khác chưa đồng bộ) vẫn dùng <strong>khoá cũ</strong> và chứa dữ liệu tại thời điểm đó.
+            </p>
+            <p>Các máy khác vẫn mở kho bằng đúng mật khẩu này như trước.</p>
+          </div>
+        ) : (
         <div className="warning small">
           <p>
             <strong>Những bản sao đã rời khỏi máy này vẫn mở được bằng mật khẩu CŨ</strong> và chứa dữ liệu tại thời điểm đó: lịch sử phiên bản
@@ -284,6 +314,7 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
             mới ở lần mở tới.
           </p>
         </div>
+        )}
         <button className="btn" onClick={() => setResult(null)}>
           Đã hiểu
         </button>
@@ -298,7 +329,13 @@ function ChangeMaster({ onChanged }: { onChanged: () => void }) {
         <span>Mật khẩu chính hiện tại</span>
         <input type="password" value={cur} onChange={(e) => setCur(e.target.value)} autoComplete="off" spellCheck={false} data-secret />
       </label>
-      <MasterPasswordField label="Mật khẩu chính mới" value={next} onChange={setNext} mc={mc} />
+      <MasterPasswordField
+        label="Mật khẩu chính mới"
+        value={next}
+        onChange={setNext}
+        mc={mc}
+        note={cur && next === cur ? "Giữ nguyên mật khẩu — chỉ thay khoá mã hoá." : undefined}
+      />
       <label className="field">
         <span>Nhập lại mật khẩu chính mới</span>
         <input type="password" value={next2} onChange={(e) => setNext2(e.target.value)} autoComplete="off" spellCheck={false} data-secret />

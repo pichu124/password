@@ -41,12 +41,15 @@ export function MasterPasswordField({
   onChange,
   mc,
   autoFocus,
+  note,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   mc: ReturnType<typeof useMasterCheck>;
   autoFocus?: boolean;
+  /** Hiện thay cho kết quả chấm theo chính sách (ví dụ "giữ nguyên mật khẩu — chỉ thay khoá"). */
+  note?: string;
 }) {
   const [show, setShow] = useState(false);
   const [suggested, setSuggested] = useState(false);
@@ -102,7 +105,8 @@ export function MasterPasswordField({
           <small>Hãy chép cụm từ này ra giấy ngay (đúng từng chữ và dấu gạch), cất ở nơi an toàn, rồi nhập lại ở ô bên dưới.</small>
         </div>
       )}
-      {mc.check && (
+      {note && <small className="hint-ok">{note}</small>}
+      {!note && mc.check && (
         <small className={mc.check.ok ? "check-ok" : "error"}>
           {mc.check.ok
             ? "✓ Đạt yêu cầu tối thiểu. App không biết tên, ngày sinh, số điện thoại của bạn — đừng dùng chúng. An toàn nhất: bấm «Gợi ý» để lấy cụm từ ngẫu nhiên."

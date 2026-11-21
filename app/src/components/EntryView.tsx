@@ -64,10 +64,11 @@ export function EntryView({
 
   if (!e) return <div className="detail empty" />;
 
-  async function copy(field: CopyField, label: string) {
+  /** `shown`: dòng đang hiện (địa chỉ của `url:<i>`, `replaced_at` của `history:<i>`) — backend so lại trước khi chép. */
+  async function copy(field: CopyField, label: string, shown?: string) {
     try {
-      // Gửi kèm thời điểm sửa của mục đang hiện: mục vừa đổi thì backend từ chối thay vì chép nhầm (url:<i>, history:<i>).
-      const secs = await api.copyField(id, field, e?.updated_at);
+      // Gửi kèm thời điểm sửa của mục đang hiện và chính dòng đang hiện: mục vừa đổi thì backend từ chối thay vì chép nhầm.
+      const secs = await api.copyField(id, field, e?.updated_at, shown);
       toast(`Đã sao chép ${label} — tự xoá sau ${secs} giây`);
     } catch (err) {
       toast(errorText(err), "error");
@@ -208,7 +209,7 @@ export function EntryView({
             <label>Trang web</label>
             <div className="kv-value">
               <span className="selectable url">{u}</span>
-              <button className="icon-btn" onClick={() => copy(`url:${i}`, "địa chỉ")} title="Sao chép" aria-label="Sao chép địa chỉ">
+              <button className="icon-btn" onClick={() => copy(`url:${i}`, "địa chỉ", u)} title="Sao chép" aria-label="Sao chép địa chỉ">
                 <Icon name="copy" />
               </button>
             </div>
@@ -259,7 +260,7 @@ export function EntryView({
                     <li key={i}>
                       <span className="mono selectable grow">{h.password}</span>
                       <span className="muted small">đổi lúc {formatDate(h.replaced_at)}</span>
-                      <button className="icon-btn" onClick={() => copy(`history:${i}`, "mật khẩu cũ")} title="Sao chép" aria-label="Sao chép mật khẩu cũ">
+                      <button className="icon-btn" onClick={() => copy(`history:${i}`, "mật khẩu cũ", String(h.replaced_at))} title="Sao chép" aria-label="Sao chép mật khẩu cũ">
                         <Icon name="copy" />
                       </button>
                     </li>

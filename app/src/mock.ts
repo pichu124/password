@@ -46,6 +46,9 @@
 //   ?pwfailed               đổi mật khẩu chính: 2 bản sao lưu chưa mã hoá lại được (backups_failed)
 //   ?entrychanged           lần sao chép đầu tiên: mục vừa thay đổi (entry_changed) — giao diện tải lại mục
 //   ?oldformat              (đã có) — khôi phục với replaceNewer = true thì được
+//   ?samefolder             hộp "lưu file" trả về một file trong CHÍNH thư mục của file kho (lưu sang chỗ khác phải từ chối)
+//   ?oldlocal               sau khi mở khoá / khôi phục: 1 bản lưu riêng ghi bằng mật khẩu cũ đã được cất (old_local_archived)
+//   (đổi mật khẩu chính: nhập lại đúng mật khẩu đang dùng — kho giả dùng mật khẩu không đạt chính sách — ⇒ được, kèm policy_warning)
 //   ?badheader              mở khoá luôn báo sai mật khẩu (header hỏng), nhưng khôi phục từ sao lưu bằng mật khẩu đúng thì được
 //   Điện thoại: ?readfail (mở khoá: không đọc được file), ?cache (dùng bản đã lưu),
 //               ?pwchanged (mật khẩu chính đã đổi trên máy tính),
@@ -77,6 +80,8 @@ interface MockEntry {
 }
 
 const now = Date.now();
+/** Mã mục đã dùng (xem mockId). */
+const usedIds = new Set<string>();
 const day = 86_400_000;
 let unlocked = flag("unlocked") && !IS_PHONE;
 let vaultConfigured = !flag("setup");
@@ -148,9 +153,18 @@ const trashed2 = mk("Lazada", "toi@yahoo.com", "lzd-2019", [], [], false, null, 
 trashed2.trashed_at = now - 12 * day;
 entries.push(trashed2);
 
+/** Mã mục suy ra từ tiêu đề (ổn định qua các lần nạp lại trang, để bản nháp của một mục có sẵn khôi phục đúng vào mục đó). */
+function mockId(title: string): string {
+  const base = "m-" + (title.normalize("NFD").replace(/[^\w]+/g, "-").toLowerCase() || "muc");
+  let id = base;
+  for (let n = 2; usedIds.has(id); n++) id = `${base}-${n}`;
+  usedIds.add(id);
+  return id;
+}
+
 function mk(title: string, username: string, password: string, urls: string[], tags: string[], favorite: boolean, totp: string | null, ageDays: number): MockEntry {
   return {
-    id: crypto.randomUUID(), title, username, password, urls, tags, favorite, totp,
+    id: mockId(title), title, username, password, urls, tags, favorite, totp,
     notes: title === "Vietcombank" ? "Số tài khoản: 0123456789\nCâu hỏi bảo mật: tên trường cấp 1 → Lê Lợi" : title === "Zalo" ? "otpauth gốc: khong-phai-base32!" : "",
     history: title === "Gmail" ? [{ password: "old-gmail-pass", replaced_at: now - 40 * day }, { password: "older-gmail-2019", replaced_at: flag("imported") ? 1 : now - 400 * day }] : [],
     created_at: now - ageDays * day, updated_at: now - ageDays * day, trashed_at: null,
@@ -172,6 +186,12 @@ function loadStash(): MockStash {
   } catch {
     return { draft: null, generated: [] };
   }
+}
+/** Như backend: lưu mục thành công ⇒ bản nháp bị xoá trong CÙNG lệnh. */
+function clearMockDraft() {
+  const st = loadStash();
+  st.draft = null;
+  saveStash(st);
 }
 function saveStash(st: MockStash) {
   st.generated = st.generated.filter((g) => g.at > Date.now() - 30 * day).sort((a, b) => b.at - a.at).slice(0, 20);
@@ -315,7 +335,8 @@ function emit(name: string, payload: unknown) {
 
 export async function mockPickFile(opts: { save?: boolean; defaultPath?: string; filters: { extensions: string[] }[] }): Promise<string | null> {
   await sleep(50);
-  if (opts.save) return opts.defaultPath ?? "D:\\Dropbox\\Passwords\\vault.pwv";
+  if (opts.save && flag("samefolder")) return "G:\\My Drive\\Passwords\\ban-sao.pwv";
+  if (opts.save) return opts.defaultPath && /[\\/]/.test(opts.defaultPath) ? opts.defaultPath : `C:\\Users\\toi\\Documents\\${opts.defaultPath ?? "vault.pwv"}`;
   if (opts.filters.some((f) => f.extensions.includes("csv"))) return "C:\\Users\\toi\\Downloads\\Chrome Passwords.csv";
   if (IS_PHONE) return "content://com.google.android.apps.docs.storage/document/acc%3D1%3Bdoc%3Dencoded%3Dvault.pwv";
   if (flag("conflictpick")) return "G:\\My Drive\\Passwords\\vault (1).pwv";
@@ -364,6 +385,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
         draft: loadStash().draft,
         local_restored: flag("localrestored") ? { added: 1, updated: 2, deleted: 0 } : null,
         old_version_wrote: flag("oldversion"),
+        old_local_archived: flag("oldlocal") ? 1 : 0,
       };
     }
     case "recover_vault": {
@@ -382,7 +404,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
         throw err("older_password", "mật khẩu này chỉ mở được các bản sao lưu tạo TRƯỚC lần đổi mật khẩu chính gần nhất — hãy nhập mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)");
       unlocked = true; lockNote = null; vaultExists = true;
       setUrlFlag("unlocked", true); setUrlFlag("damaged", false); setUrlFlag("missing", false); setUrlFlag("recover", false); setUrlFlag("oldformat", false); setUrlFlag("badheader", false);
-      return { entries: live().length, files_used: mode === "local" ? 1 : 3, newest_backup_at: now - 3 * 3_600_000, archived: "G:\\My Drive\\Passwords\\vault.pwv.backups\\vault.damaged-20261120.pwv", rescue_kept: flag("rescuekept") ? 1 : 0, from_local_copy: mode === "local" };
+      return { entries: live().length, files_used: mode === "local" ? 1 : 3, newest_backup_at: now - 3 * 3_600_000, archived: "G:\\My Drive\\Passwords\\vault.pwv.backups\\vault.damaged-20261120.pwv", rescue_kept: flag("rescuekept") ? 1 : 0, from_local_copy: mode === "local", old_local_archived: flag("oldlocal") ? 1 : 0 };
     }
     case "accept_rollback": needUnlocked(); setUrlFlag("rollback", false); return null;
     case "create_vault": {
@@ -422,7 +444,12 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       const e = find(a.id);
       const f = String(a.field);
       if (entryChangedOnce) { entryChangedOnce = false; e.updated_at = Date.now(); }
-      if (a.updatedAt != null && a.updatedAt !== e.updated_at) throw err("entry_changed", "Mục này vừa thay đổi (có thể do đồng bộ từ máy khác) nên đã được tải lại — hãy bấm sao chép lại.");
+      const changedErr = () => err("entry_changed", "Mục này vừa thay đổi (có thể do đồng bộ từ máy khác) nên đã được tải lại — hãy bấm sao chép lại.");
+      if (a.updatedAt != null && a.updatedAt !== e.updated_at) throw changedErr();
+      if (a.shown != null) {
+        const actual = f.startsWith("url:") ? e.urls[Number(f.slice(4))] : f.startsWith("history:") ? String(e.history[Number(f.slice(8))]?.replaced_at) : a.shown;
+        if (actual !== a.shown) throw changedErr();
+      }
       const v = f === "password" ? e.password : f === "username" ? e.username : f === "notes" ? e.notes : f === "url" ? e.urls[0] : f === "totp" ? e.totp : f.startsWith("history:") ? e.history[Number(f.slice(8))]?.password : f.startsWith("url:") ? e.urls[Number(f.slice(4))] : undefined;
       if (v === undefined && !["password", "username", "notes", "url", "totp"].includes(f) && !f.startsWith("history:") && !f.startsWith("url:")) throw err("error", `Trường không hợp lệ: ${f}`);
       if (!v) throw err("error", "Trường này đang trống");
@@ -490,11 +517,13 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
         if (i.totp != null) e.totp = i.totp.trim() || null;
         e.updated_at = Date.now();
         console.info("[mock] save_entry gửi các trường:", Object.keys(i).filter((k) => k !== "id").join(", ") || "(không có)");
+        clearMockDraft();
         return [e.id, writeResult()];
       }
       const e = mk(title!, i.username ?? "", i.password ?? "", clean(i.urls ?? []), clean(i.tags ?? []), !!i.favorite, i.totp?.trim() || null, 0);
       e.notes = i.notes ?? "";
       entries.push(e);
+      clearMockDraft();
       return [e.id, writeResult()];
     }
     case "delete_entry": { needUnlocked(); const e = find(a.id); mutated(); e.trashed_at = Date.now(); return writeResult(); }
@@ -563,10 +592,16 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       needUnlocked();
       await sleep(500);
       const c = masterCheck(a.new);
-      if (!c.ok) throw err("weak_password", `Mật khẩu chính chưa đủ mạnh. ${c.message}`);
+      const same = a.new === a.current;
+      // Như backend: giữ nguyên mật khẩu (chỉ thay khoá) không bị chặn bởi chính sách, chỉ cảnh báo.
+      if (!c.ok && !same) throw err("weak_password", `Mật khẩu chính chưa đủ mạnh. ${c.message}`);
       if (a.current !== MASTER) throw err("wrong_password", "Mật khẩu chính hiện tại không đúng");
       rekeyAdvised = false; setUrlFlag("rekey", false);
-      return { backups_reencrypted: 9, backups_skipped: 1, unverified: flag("unverified"), backups_failed: flag("pwfailed") ? ["vault-1795100000000.pwv", "merged-1795000000000-vault (1).pwv"] : [] };
+      return {
+        backups_reencrypted: 9, backups_skipped: 1, unverified: flag("unverified"),
+        backups_failed: flag("pwfailed") ? ["vault-1795100000000.pwv", "merged-1795000000000-vault (1).pwv"] : [],
+        policy_warning: same && !c.ok ? `Mật khẩu chính chưa đủ mạnh. ${c.message}` : null,
+      };
     }
     case "health_report": {
       needUnlocked();
@@ -594,6 +629,9 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       if (typeof a.copyOnly !== "boolean") throw err("error", "mock: move_vault thiếu copyOnly");
       if (flag("movefail")) throw err("move_failed", `Chưa ghi được sang vị trí mới: không tìm thấy ổ đĩa (${a.path}). Kho vẫn ở vị trí cũ.`);
       {
+        const dir = (x: string | null) => (x ?? "").replace(/[\\/][^\\/]*$/, "").toLowerCase();
+        if (a.copyOnly && dir(a.path) === dir(vaultPath))
+          throw err("move_failed", "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ thư mục Tài liệu / Documents): file mới đặt cạnh file kho cũ sẽ bị coi là bản xung đột của nó.");
         const rescued = a.copyOnly || diskProblem !== null;
         const old = vaultPath;
         diskProblem = null; vaultPath = a.path; vaultExists = true; setUrlFlag("problem", false);

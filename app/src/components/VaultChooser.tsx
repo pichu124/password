@@ -44,7 +44,7 @@ export function useVaultChooser(onChosen: (path: string) => Promise<void> | void
         </h1>
         <p className="small">
           Bạn vừa chọn <strong>«{hint.h.picked_name}»</strong> — có vẻ là <strong>BẢN XUNG ĐỘT</strong> do dịch vụ đồng bộ tạo ra của{" "}
-          <strong>«{hint.h.original_name}»</strong> (cùng một kho). Nên dùng file gốc; app sẽ tự gộp bản còn lại.
+          <strong>«{hint.h.original_name}»</strong> (cùng một kho). Nên dùng file gốc nếu nó còn mở được; app sẽ tự gộp bản còn lại.
         </p>
         <div className="choice-col">
           <button className="btn primary wide wrap" onClick={() => finish(hint.h.original_path)}>
