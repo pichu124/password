@@ -94,6 +94,10 @@ Xem mục *Phát hành* để tạo khoá ký cố định.
   vậy khi bạn biết chắc những thay đổi đó là của mình**, vì ai biết mật khẩu cũ cũng làm ra được một
   bản như thế. Nếu chính file kho bị một thiết bị chưa nhận mật khẩu mới ghi đè, mật khẩu HIỆN TẠI vẫn
   mở được kho (từ bản sao lưu mới nhất); file bị ghi đè được cất như trên.
+- **Các bản sao lưu có từ trước lần đổi** được mã hoá lại bằng khoá mới (mật khẩu cũ không đọc được
+  chúng nữa) và từ đó cũng mang nhãn "ghi bằng mật khẩu cũ": bạn vẫn xem và khôi phục từng mục từ
+  chúng được, nhưng app không bao giờ tự dùng chúng — trước lần đổi, người biết mật khẩu cũ có thể đã
+  sửa hoặc cài bản sao lưu.
 - Hệ quả: những gì bạn sửa trên một thiết bị **chưa nhận mật khẩu mới** phải được lấy lại bằng tay từ
   bản "ghi bằng mật khẩu cũ" đó. Cách dễ nhất để tránh: trước khi đổi, mở và đồng bộ kho trên mọi
   thiết bị; ngay sau khi đổi, mở kho bằng mật khẩu mới trên từng thiết bị.
@@ -143,6 +147,7 @@ dùng lần trước" — xem bảng bên dưới.)
 | Tìm thấy bản của kho được ghi bằng mật khẩu chính CŨ | Sau lần đổi master password, một thiết bị chưa nhận mật khẩu mới vẫn ghi, hoặc dịch vụ đồng bộ đặt lại bản cũ — hiếm hơn, người biết mật khẩu cũ. App **không gộp** bản đó | Bấm *Mở Sao lưu & khôi phục*, chọn bản có nhãn "ghi bằng mật khẩu cũ", xem khác biệt. Chỉ khôi phục mục nào bạn chắc chắn là thay đổi của mình. Mở kho bằng mật khẩu MỚI trên thiết bị kia |
 | Bản này được ghi bằng một mật khẩu chính khác (mới hơn) | Một bản cạnh file kho dùng mật khẩu mà máy này không có — thường là bạn vừa đổi master password ở máy khác | Khoá app rồi mở lại bằng mật khẩu MỚI. Nếu bạn không hề đổi mật khẩu: xoá file được nêu tên (app không đụng tới nó, việc đồng bộ vẫn chạy bình thường) |
 | Mật khẩu này có vẻ là một mật khẩu chính cũ (khi khôi phục) | Bạn vừa gõ một master password CŨ; khôi phục bằng nó sẽ đưa kho về mật khẩu đó và mất mọi thay đổi sau lần đổi. (Hiếm hơn: trong thư mục sao lưu có file lạ tự nhận là "mới hơn") | Gõ master password HIỆN TẠI (mật khẩu đặt gần nhất) rồi khôi phục lại. Chỉ chọn *Vẫn khôi phục bằng mật khẩu này* khi bạn thật sự không còn mật khẩu mới hơn, hoặc chắc chắn đây chính là mật khẩu hiện tại |
+| Chỉ còn các bản sao lưu có từ trước lần đổi mật khẩu (khi khôi phục) | Mật khẩu đúng, nhưng mọi bản sao lưu ghi sau lần đổi master password đã mất | Thử tìm bản mới hơn trước (lịch sử phiên bản / thùng rác của dịch vụ đồng bộ, thiết bị khác). Nếu không có: bấm *Vẫn khôi phục từ các bản cũ này*, rồi kiểm tra lại địa chỉ trang web và mật khẩu của các tài khoản quan trọng |
 | Không có bản sao lưu nào dùng được (khi khôi phục) | Thư mục sao lưu trống / hỏng / không có bản nào mở được bằng mật khẩu này | Tìm bản khác: lịch sử phiên bản / thùng rác trên trang web của Drive-Dropbox-OneDrive, một máy khác, bản xem ngoại tuyến trên điện thoại, hoặc *Cứu hộ dữ liệu không cần app* bên dưới. Đừng tạo kho mới đè lên |
 | Kho vừa mở KHÔNG phải là phần tiếp nối của kho máy này dùng lần trước | Bạn vừa mở bằng một master password CŨ, hoặc file kho đã bị thay bằng file do người biết mật khẩu cũ làm ra | Bấm *Khoá lại* và mở bằng master password HIỆN TẠI. Đừng tin địa chỉ trang web / mật khẩu đang hiện cho tới khi kiểm tra xong. Chỉ bấm *Đã hiểu, vẫn dùng kho này* nếu bạn biết rõ vì sao (ví dụ chính bạn vừa khôi phục kho từ một bản cũ) |
 | Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi | File đã được ghi, nhưng lúc đọc lại để kiểm tra thì bị chương trình đồng bộ / diệt virus giữ | Không cần làm gì: thay đổi vẫn còn trong app, lần đồng bộ tới app tự kiểm tra và ghi lại nếu cần. Nếu lần nào cũng báo, hãy cho thư mục kho vào danh sách loại trừ của phần mềm diệt virus |

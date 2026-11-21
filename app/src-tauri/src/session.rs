@@ -81,6 +81,7 @@ impl From<VaultError> for AppError {
             // Khôi phục từ sao lưu: mật khẩu vừa nhập là mật khẩu chính CŨ ⇒ giao diện giải thích và
             // chỉ khôi phục từ các bản cũ khi chủ kho chọn rõ ràng.
             VaultError::OlderPasswordBackups => "older_password",
+            VaultError::OnlyPreChangeBackups => "old_backups_only",
             VaultError::NoUsableBackup => "no_backup",
             VaultError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => "file_missing",
             _ => "error",
@@ -2384,10 +2385,24 @@ mod tests {
             .find(|b| b.name == "v-1700000000000.pwv")
             .unwrap();
         assert!(b.retired_key && b.kind == "auto" && b.entries == Some(1));
-        assert!(list
+        // Các bản ghi SAU lần đổi mật khẩu là bản đáng tin (kể cả bản của chính lần ghi đổi mật
+        // khẩu); mọi bản có từ TRƯỚC lần đổi (đã được mã hoá lại và đánh dấu) cũng mang nhãn này —
+        // app không bao giờ tự dùng chúng.
+        let others: Vec<_> = list
             .iter()
             .filter(|b| b.name != "v-1700000000000.pwv")
+            .collect();
+        assert!(others
+            .iter()
+            .filter(|b| b.entries == Some(2))
             .all(|b| !b.retired_key));
+        assert!(others
+            .iter()
+            .any(|b| !b.retired_key && b.entries == Some(2)));
+        assert!(others.iter().any(|b| b.retired_key && b.entries == Some(1)));
+        assert!(others
+            .iter()
+            .any(|b| !b.retired_key && b.entries == Some(1)));
     }
 
     /// Khôi phục bằng mật khẩu chính CŨ bị từ chối (mã riêng), trừ khi chủ kho chọn rõ ràng;

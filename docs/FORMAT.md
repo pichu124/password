@@ -61,12 +61,23 @@ vault_key  = XChaCha20-Poly1305-Decrypt(key = KEK, nonce = key_nonce,
   phần đã mã hoá (mục 4) để chủ kho còn ĐỌC được các bản sao lưu cũ. (Bản ≤ 0.1.2 chỉ gói lại cùng
   một khoá.) Chính xác thì người biết mật khẩu CŨ và giữ một bản sao CŨ của file:
   - **không đọc được** những gì một máy đã biết lần đổi ghi ra sau đó (file kho, bản sao lưu); các bản
-    sao lưu có từ trước, ghi bằng khoá vừa bị thay, được mã hoá lại khi đổi;
+    sao lưu có từ trước, ghi bằng khoá vừa bị thay, được mã hoá lại khi đổi (và mang dấu `pre_change`,
+    xem dưới);
   - **vẫn đọc được**: bản sao đó và mọi bản cũ khác nằm ngoài tầm với của app (lịch sử phiên bản /
     thùng rác của dịch vụ đồng bộ, điện thoại hay máy chưa đồng bộ), và những gì một máy CHƯA biết
     lần đổi tiếp tục ghi bằng khoá cũ (file kho, bản sao lưu của chính nó) cho tới khi nó mở khoá
     bằng mật khẩu mới — kể cả khi app đã cất chúng thành `oldkey-…` (bản cất giữ nguyên văn, mục 6.3);
-  - **không ghi được vào kho**: file chỉ mở được bằng khoá đã nghỉ không bao giờ được tự gộp (mục 6.3).
+  - **không ghi được vào kho**: file chỉ mở được bằng khoá đã nghỉ không bao giờ được tự gộp (mục 6.3),
+    và mọi thứ có từ TRƯỚC lần đổi cũng vậy (dấu `pre_change`).
+- **`pre_change`** (trường tuỳ chọn của header, kiểu bool; vắng mặt = `false`): `true` nghĩa là file này
+  là một bản sao lưu có từ trước lần đổi master password gần nhất, đã được mã hoá lại bằng khoá mới.
+  Trước lần đổi, người biết mật khẩu (sắp thành) cũ có đủ khoá để đặt vào thư mục sao lưu một file tự
+  làm; nếu lần đổi mật khẩu biến nó thành một bản sao lưu bình thường thì nó được hưởng sự tin cậy của
+  khoá mới. Vì vậy **một file chỉ được coi là đáng tin khi nó giải mã được bằng khoá hiện tại VÀ không
+  mang dấu này**. Dấu nằm trong header nên được phần thân xác thực — đổi tên hay chuyển chỗ file không
+  gỡ được nó. File mang dấu: không mở làm file kho (báo như file hỏng), không tự gộp, không dùng để tự
+  dựng lại kho; chủ kho vẫn xem và khôi phục từng mục từ nó được. File kho do app ghi ra không bao giờ
+  mang dấu này.
 - Giới hạn được kiểm tra TRƯỚC khi chạy Argon2, cả khi tạo lẫn khi mở: `64 MiB ≤ m_kib ≤ 1 GiB`,
   `2 ≤ t ≤ 16`, `1 ≤ p ≤ 16` (chống file bị sửa để làm treo máy hoặc hạ độ khó). Mặc định 256 MiB / 3 / 4.
 - Test vector: `password = "correct horse battery staple"`, `salt = 0x42 × 16`, `m=64, t=2, p=1`
@@ -184,9 +195,9 @@ khẩu thua vẫn nằm trong lịch sử.
    - **Khoá hiện tại mở được** ⇒ được gộp. Nếu header của file có `key_changed_at` mới hơn ⇒ bản app
      ≤ 0.1.2 ở máy khác đã đổi mật khẩu theo kiểu cũ (cùng khoá) ⇒ nhận header đó (nó đã được xác thực:
      header nằm trong AAD của phần thân).
-   - **Chỉ một khoá đã nghỉ mở được** ("bản khoá cũ") ⇒ **KHÔNG BAO GIỜ tự gộp** — một máy chưa biết lần
-     đổi mật khẩu ghi ra được file như vậy, nhưng người biết mật khẩu cũ và giữ một bản sao cũ cũng làm
-     được. File được cất **nguyên văn** (đúng từng byte) vào thư mục sao lưu dưới tên
+   - **Chỉ một khoá đã nghỉ mở được**, hoặc khoá hiện tại mở được nhưng header mang dấu `pre_change`
+     (mục 3) ("bản khoá cũ") ⇒ **KHÔNG BAO GIỜ tự gộp** — một máy chưa biết lần đổi mật khẩu ghi ra
+     được file như vậy, nhưng người biết mật khẩu cũ và giữ một bản sao cũ cũng làm được. File được cất **nguyên văn** (đúng từng byte) vào thư mục sao lưu dưới tên
      `oldkey-<ms>-<tên gốc>`; chủ kho xem lại và lấy từng mục ra bằng chức năng khôi phục từ bản sao
      lưu. KHÔNG được mã hoá lại nó bằng khoá hiện tại: khi đó chỉ còn TÊN FILE phân biệt nó với một bản
      đáng tin, mà ai có quyền ghi vào thư mục cũng đổi tên / chuyển chỗ file được (chuyển ra cạnh file
@@ -264,24 +275,29 @@ khẩu thua vẫn nằm trong lịch sử.
   CÓ bản sao lưu; xoá phần còn lại. `merged-`, `damaged-`, `oldkey-`: mỗi loại giữ 20 bản mới nhất.
   Chỉ xoá file có đúng `vault_id` của kho.
 - Khi đổi master password, các file trong thư mục này mở được bằng **khoá vừa bị thay** (khoá hiện tại
-  cho tới lúc đổi) được mã hoá lại tại chỗ bằng khoá mới. File chỉ mở được bằng một khoá đã nghỉ từ
+  cho tới lúc đổi) được mã hoá lại tại chỗ bằng khoá mới **và gắn dấu `pre_change`** (mục 3): từ đó
+  chúng là "lịch sử để xem", không bao giờ được tự dùng. File chỉ mở được bằng một khoá đã nghỉ từ
   TRƯỚC đó thì để nguyên và không bao giờ được mã hoá lại ở bất cứ đâu: thư mục sao lưu nằm trong thư
   mục đồng bộ, nên người biết một mật khẩu cũ có thể đặt vào đó file do họ tự mã hoá bằng khoá cũ; mã
   hoá lại file ấy bằng khoá hiện tại là biến nó thành "bản sao lưu đáng tin". Hệ quả: nếu lần đổi mật
   khẩu bị ngắt trước khi mã hoá lại xong, các bản sao lưu còn dở vẫn mở được bằng mật khẩu cũ (chúng
   chỉ chứa dữ liệu từ trước lần đổi); chủ kho vẫn xem / khôi phục từng mục từ chúng được.
-- Bản sao lưu chỉ mở được bằng khoá đã nghỉ (dù tên thuộc loại nào) được app đánh dấu "ghi bằng mật khẩu
-  cũ" trong danh sách khôi phục (`Vault::read_backup_checked`), vì nó có thể không phải do chủ kho ghi.
+- Bản sao lưu chỉ mở được bằng khoá đã nghỉ, hoặc mang dấu `pre_change` (dù tên thuộc loại nào), được
+  app đánh dấu "ghi bằng mật khẩu cũ" trong danh sách khôi phục (`Vault::read_backup_checked`), vì nó
+  có thể không phải do chủ kho ghi. Hệ quả: sau một lần đổi master password, MỌI bản sao lưu có từ
+  trước lần đổi đều mang nhãn này.
 - **Khôi phục khi file kho chính hỏng/mất**: các bản sao lưu (trừ `damaged-` và `oldkey-`) được nhóm
   theo **gói khoá** (`vault_id` + tham số KDF + muối + khoá đã gói; `key_changed_at` KHÔNG thuộc gói
   khoá và chưa được xác thực — ai cũng chép được một header thật rồi sửa con số đó). Thử mật khẩu trên
   từng gói (mỗi gói một lượt Argon2) — gói cùng `vault_id` với file kho chính (nếu header của nó còn
   đọc được) trước, rồi `key_changed_at` tự khai mới nhất trước — tối đa 5 gói. **Gốc** là bản mới nhất
-  của gói đầu tiên mở được mà PHẦN THÂN giải mã được bằng khoá vừa mở: phần thân nhận header làm dữ
-  liệu xác thực, nên header của kho dựng lại (kể cả `key_changed_at`) là header thật. Sau đó chỉ gộp
-  các bản giải mã được bằng ĐÚNG khoá của gốc (tối đa 40 bản gộp được, xét tối đa 500 file — file rác
-  không giải mã được không chiếm chỗ của bản thật). Bản chỉ mở được bằng khoá khác (khoá đã nghỉ)
-  không bao giờ được gộp. Nếu có bản của cùng kho, dùng gói khoá KHÁC, tự khai `key_changed_at` mới hơn
+  của gói đầu tiên mở được mà PHẦN THÂN giải mã được bằng khoá vừa mở và KHÔNG mang dấu `pre_change`:
+  phần thân nhận header làm dữ liệu xác thực, nên header của kho dựng lại (kể cả `key_changed_at`) là
+  header thật. Sau đó chỉ gộp các bản giải mã được bằng ĐÚNG khoá của gốc và không mang dấu (tối đa 40
+  bản gộp được, xét tối đa 500 file — file rác không giải mã được không chiếm chỗ của bản thật). Bản
+  chỉ mở được bằng khoá khác (khoá đã nghỉ) không bao giờ được gộp. Nếu gói khoá mở được mà chỉ còn
+  các bản mang dấu `pre_change` (mọi bản ghi sau lần đổi mật khẩu đã mất) ⇒ lỗi riêng; chỉ khi chủ kho
+  chọn rõ ràng thì mới dựng lại từ các bản đó (kho ghi ra là file kho bình thường, không mang dấu). Nếu có bản của cùng kho, dùng gói khoá KHÁC, tự khai `key_changed_at` mới hơn
   gốc (rất có thể mật khẩu vừa nhập là mật khẩu CŨ; con số này không xác thực được nên đây chỉ là lý
   do để dừng và hỏi lại) ⇒ từ chối, trừ khi chủ kho chọn rõ "khôi phục từ các bản cũ" (khi đó kho
   quay về mật khẩu đó và chỉ có dữ liệu của các bản đó). App còn so kho vừa dựng với mốc "đã thấy" của

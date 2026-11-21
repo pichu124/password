@@ -21,6 +21,8 @@ export type ErrorCode =
   | "read_failed"
   /** Khôi phục: mật khẩu vừa nhập chỉ mở được các bản sao lưu từ TRƯỚC lần đổi mật khẩu chính gần nhất. */
   | "older_password"
+  /** Khôi phục: mật khẩu đúng, nhưng chỉ còn các bản sao lưu có từ TRƯỚC lần đổi mật khẩu chính gần nhất. */
+  | "old_backups_only"
   /** Khôi phục: thư mục sao lưu không có bản nào dùng được. */
   | "no_backup";
 

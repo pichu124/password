@@ -49,6 +49,18 @@ pub struct Header {
     pub wrapped_key: Vec<u8>,
     /// Lần đổi master password cuối (ms). Khi đồng bộ, header mới hơn được giữ lại.
     pub key_changed_at: i64,
+    /// `true` = đây là một BẢN SAO LƯU có từ TRƯỚC lần đổi master password gần nhất, được mã hoá lại
+    /// bằng khoá mới lúc đổi (để mật khẩu cũ không còn đọc được nó). Nội dung của nó có thể đã do
+    /// người biết mật khẩu cũ ghi ra trước lần đổi, nên file mang dấu này KHÔNG BAO GIỜ được coi là
+    /// đáng tin: không tự gộp, không dùng để tự dựng lại kho, không mở làm file kho. Dấu nằm trong
+    /// header ⇒ được phần thân xác thực (AAD): đổi tên / chuyển chỗ file không gỡ được nó.
+    /// Vắng mặt = `false` (mọi file kho bình thường).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pre_change: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Header {
@@ -95,6 +107,7 @@ impl Header {
             key_nonce,
             wrapped_key,
             key_changed_at,
+            pre_change: false,
         })
     }
 

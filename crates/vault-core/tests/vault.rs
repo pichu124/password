@@ -307,15 +307,19 @@ fn changing_master_password_rotates_the_vault_key() {
     v.transact(|v| Ok(v.add(login("Sau khi đổi", "bank", "POST-CHANGE-SECRET"))))
         .unwrap();
 
-    // Mật khẩu cũ không còn mở được file kho lẫn bất kỳ bản sao lưu nào.
+    // Mật khẩu cũ không còn mở được file kho lẫn bất kỳ bản sao lưu nào; mật khẩu mới giải mã được
+    // tất cả (kể cả các bản có từ trước lần đổi — chúng được mã hoá lại và mang dấu `pre_change`).
     assert!(matches!(open(&p, PW), Err(Error::Decrypt)));
     for b in list_backups(&p) {
+        let bytes = fs::read(&b.path).unwrap();
+        let raw = format::parse(&bytes).unwrap();
         assert!(
-            open(&b.path, PW).is_err(),
+            raw.header.unwrap_key(PW, true).is_err(),
             "{:?} còn mở được bằng mật khẩu cũ",
             b.path
         );
-        assert!(open(&b.path, b"mat khau moi").is_ok());
+        let k = raw.header.unwrap_key(b"mat khau moi", true).unwrap();
+        assert!(raw.decrypt_body(&k).is_ok());
     }
     // Bản đã bị chép trộm vẫn mở được bằng mật khẩu cũ (không thể thu hồi), nhưng khoá lấy từ nó
     // KHÔNG giải mã được file kho hiện tại: máy "kẻ tấn công" thấy file mới là thứ không đọc nổi.
@@ -1244,7 +1248,9 @@ fn planted_old_key_backup_is_never_laundered_into_a_trusted_backup() {
         r.backups_skipped, 1,
         "bản ghi bằng khoá cũ hơn được để nguyên"
     );
-    assert!(open(&genuine.path, NEWER).is_ok() && open(&genuine.path, NEW).is_err());
+    let g = fs::read(&genuine.path).unwrap();
+    let g = format::parse(&g).unwrap();
+    assert!(g.header.unwrap_key(NEWER, true).is_ok() && g.header.unwrap_key(NEW, true).is_err());
     assert_eq!(fs::read(&planted).unwrap(), forged, "không bị đụng tới");
     assert!(v.read_backup_checked(&planted).unwrap().1);
 
@@ -1255,6 +1261,106 @@ fn planted_old_key_backup_is_never_laundered_into_a_trusted_backup() {
     assert_eq!(titles(&r), ["Bank", "Sau khi đổi"]);
     r.force_write().unwrap();
     assert_eq!(titles(&open(&p, NEWER).unwrap()), ["Bank", "Sau khi đổi"]);
+}
+
+/// Kẽ hở cùng loại với "bản cách ly bị đổi tên": TRƯỚC khi chủ kho đổi mật khẩu, người biết mật khẩu
+/// (sắp thành) cũ có đủ khoá để đặt vào thư mục sao lưu một file tự làm. Lần đổi mật khẩu mã hoá lại
+/// mọi bản sao lưu — nếu kết quả là những bản sao lưu bình thường thì file cài cắm được "rửa" thành
+/// bản đáng tin và lần khôi phục sau gộp nó vào kho. Giờ mọi bản có từ trước lần đổi mang một dấu
+/// được xác thực (`pre_change`): mật khẩu cũ không đọc được chúng nữa, chủ kho vẫn xem được, nhưng
+/// app không bao giờ tự dùng chúng — dù file bị đổi tên hay chuyển đi đâu.
+#[test]
+fn backups_from_before_a_password_change_are_never_trusted_after_it() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    let bank = v.add(bank_login());
+    v.save().unwrap();
+    let current = fs::read(&p).unwrap();
+    // Cài cắm TRƯỚC lần đổi: file hợp lệ dưới khoá đang dùng, tên như một bản sao lưu tự động.
+    let bomb = forge_with_old_key(&current, OLD, |data| {
+        for e in data.entries.iter_mut() {
+            e.urls = vec!["https://phish.example".into()];
+            e.field_times.urls = i64::MAX / 4;
+        }
+    });
+    let planted = backup_dir(&p).join("vault-9999999999999.pwv");
+    fs::write(&planted, &bomb).unwrap();
+
+    v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    v.transact(|v| Ok(v.add(login("Sau khi đổi", "b", "b"))))
+        .unwrap();
+    let genuine = |v: &Vault| {
+        assert_eq!(v.get(&bank).unwrap().urls, ["https://bank.example.vn"]);
+        assert_eq!(titles(v), ["Bank", "Sau khi đổi"]);
+    };
+
+    // Bản cài cắm đã được mã hoá lại: mật khẩu cũ không đọc được, chủ kho xem được, và nó bị đánh dấu.
+    let raw_bytes = fs::read(&planted).unwrap();
+    let raw = format::parse(&raw_bytes).unwrap();
+    assert!(raw.header.pre_change);
+    assert!(raw.header.unwrap_key(OLD, true).is_err());
+    let (seen, untrusted) = v.read_backup_checked(&planted).unwrap();
+    assert!(untrusted);
+    assert_eq!(seen.get(&bank).unwrap().urls, ["https://phish.example"]);
+    // Không mở nó làm file kho được.
+    assert!(matches!(open(&planted, NEW), Err(Error::VaultFileDamaged)));
+
+    // (1) Chuyển nó ra cạnh file kho: không được gộp, bị cất lại.
+    let sibling = d.path().join("vault (1).pwv");
+    fs::copy(&planted, &sibling).unwrap();
+    let r = v.sync().unwrap();
+    assert!(matches!(r.conflicts[0].result, Err(Error::RetiredKeyCopy)));
+    assert!(!r.wrote && !sibling.exists());
+    genuine(&v);
+
+    // (2) Chép nó đè lên file kho chính: không được gộp; file kho được ghi lại từ bản đang mở.
+    fs::copy(&planted, &p).unwrap();
+    let r = v.sync().unwrap();
+    assert!(r.wrote && r.old_key_archived == 1 && r.merged_remote.is_none());
+    genuine(&v);
+    genuine(&open(&p, NEW).unwrap());
+
+    // (3) File kho chính bị thay bằng nó khi app đang đóng: mở khoá báo file hỏng (không mở kho từ
+    //     nó), khôi phục dựng lại từ các bản đáng tin.
+    drop(v);
+    fs::copy(&planted, &p).unwrap();
+    assert!(matches!(open(&p, NEW), Err(Error::VaultFileDamaged)));
+    let (mut r, _, _) = Vault::recover_from_backups(&p, NEW, kdf_opts()).unwrap();
+    genuine(&r);
+    r.force_write().unwrap();
+    genuine(&open(&p, NEW).unwrap());
+}
+
+/// Sau lần đổi mật khẩu mà mọi bản sao lưu ghi SAU đó đều mất: app không tự dựng lại kho từ các bản
+/// có từ trước lần đổi; chủ kho phải chọn rõ ràng. Khi đã chọn thì dữ liệu về đủ và file kho ghi ra
+/// là một file kho bình thường (không mang dấu).
+#[test]
+fn recovery_uses_pre_change_backups_only_on_explicit_request() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    drop(v);
+    // Mất file kho và mọi bản sao lưu ghi sau lần đổi (chỉ còn các bản mang dấu).
+    fs::remove_file(&p).unwrap();
+    for b in list_backups(&p) {
+        let bytes = fs::read(&b.path).unwrap();
+        if !format::parse(&bytes).unwrap().header.pre_change {
+            fs::remove_file(&b.path).unwrap();
+        }
+    }
+    assert!(!list_backups(&p).is_empty());
+    assert!(matches!(
+        Vault::recover_from_backups(&p, NEW, kdf_opts()),
+        Err(Error::OnlyPreChangeBackups)
+    ));
+    let (mut r, used, _) = Vault::recover_from_backups_opts(&p, NEW, kdf_opts(), true).unwrap();
+    assert!(used >= 1);
+    assert_eq!(titles(&r), ["Bank"]);
+    r.force_write().unwrap();
+    let bytes = fs::read(&p).unwrap();
+    assert!(!format::parse(&bytes).unwrap().header.pre_change);
+    assert_eq!(titles(&open(&p, NEW).unwrap()), ["Bank"]);
 }
 
 /// Vài chục file rác mang tên "bản sao lưu mới nhất" (cùng vault_id, thân không giải mã được)

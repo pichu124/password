@@ -19,6 +19,7 @@
 //                           đổi mật khẩu chính cũng trả unverified = true
 //   ?recover=older          khôi phục từ sao lưu: lỗi older_password, trừ khi gọi lại với allowOlder = true
 //   ?recover=nobackup       khôi phục từ sao lưu: lỗi no_backup
+//   ?recover=prechange      khôi phục từ sao lưu: lỗi old_backups_only, trừ khi gọi lại với allowOlder = true
 //   ?imported               mật khẩu cũ thứ hai của Gmail mang thời điểm 1 ms (giá trị nhập từ CSV) ⇒ phải hiện "—"
 //   ?trashrace              "dọn sạch thùng rác": trong lúc xác nhận, "máy khác" chuyển thêm một mục vào thùng rác
 //                           (mục đó không bị xoá ⇒ remaining = 1)
@@ -304,6 +305,8 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       if (mode === "nobackup")
         throw err("no_backup", "không có bản sao lưu nào dùng được trong thư mục sao lưu của kho — hãy thử lịch sử phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc một thiết bị khác còn giữ file kho");
       if (a.password !== MASTER) throw err("wrong_password", "Sai mật khẩu chính");
+      if (mode === "prechange" && !a.allowOlder)
+        throw err("old_backups_only", "chỉ còn các bản sao lưu có từ TRƯỚC lần đổi mật khẩu chính gần nhất — app không tự dùng chúng để dựng lại kho (nếu bạn đổi mật khẩu vì nghi bị lộ, nội dung các bản đó có thể đã bị người khác sửa trước khi bạn đổi)");
       if (mode === "older" && !a.allowOlder)
         throw err("older_password", "mật khẩu này chỉ mở được các bản sao lưu tạo TRƯỚC lần đổi mật khẩu chính gần nhất — hãy nhập mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)");
       unlocked = true; lockNote = null; vaultExists = true;

@@ -36,7 +36,7 @@ export function UnlockScreen({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ code: string; text: string } | null>(null);
-  const [recovered, setRecovered] = useState<{ info: RecoverInfo; older: boolean } | null>(null);
+  const [recovered, setRecovered] = useState<{ info: RecoverInfo; older: OlderChoice } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => inputRef.current?.focus(), []);
@@ -75,11 +75,14 @@ export function UnlockScreen({
     try {
       const r = await api.recoverVault(status.vault_path, password, older);
       setPassword("");
-      setRecovered({ info: r, older });
+      setRecovered({ info: r, older: older ? (error?.code === "old_backups_only" ? "backups" : "password") : false });
     } catch (err) {
       const code = errorCode(err);
       // Mật khẩu cũ: giữ nguyên ô mật khẩu để nút "vẫn khôi phục từ các bản cũ" dùng được ngay.
-      setError({ code, text: code === "older_password" || code === "no_backup" ? errorText(err) : `Không khôi phục được: ${errorText(err)}` });
+      setError({
+        code,
+        text: code === "older_password" || code === "old_backups_only" || code === "no_backup" ? errorText(err) : `Không khôi phục được: ${errorText(err)}`,
+      });
     } finally {
       setBusy(false);
     }
@@ -139,6 +142,7 @@ function UnlockError({
   onRecoverOlder: () => void;
 }) {
   if (code === "older_password") return <OlderPasswordBox busy={busy} canRecover={canRecover} onRecoverOlder={onRecoverOlder} />;
+  if (code === "old_backups_only") return <OldBackupsOnlyBox busy={busy} canRecover={canRecover} onRecoverOlder={onRecoverOlder} />;
   if (code === "no_backup") return <NoBackupBox text={text} />;
   if (code === "file_damaged") {
     return (
@@ -201,6 +205,35 @@ function OlderPasswordBox({ busy, canRecover, onRecoverOlder }: { busy: boolean;
   );
 }
 
+/**
+ * Mật khẩu ĐÚNG, nhưng mọi bản sao lưu ghi sau lần đổi mật khẩu chính đã mất: chỉ còn các bản có từ
+ * trước lần đổi. App không tự dùng chúng (trước lần đổi, người biết mật khẩu cũ có thể đã sửa hoặc
+ * cài bản sao lưu) ⇒ chủ kho phải chọn rõ ràng, và được nhắc kiểm tra lại sau khi khôi phục.
+ */
+function OldBackupsOnlyBox({ busy, canRecover, onRecoverOlder }: { busy: boolean; canRecover: boolean; onRecoverOlder: () => void }) {
+  return (
+    <div className="problem-box" role="alert">
+      <p>
+        <strong>Chỉ còn các bản sao lưu có từ trước lần đổi mật khẩu chính gần nhất.</strong>
+      </p>
+      <p className="small">
+        Mật khẩu bạn nhập là đúng, nhưng những bản sao lưu ghi <strong>sau</strong> lần đổi mật khẩu đều đã mất. App không tự dùng các bản cũ hơn:
+        nếu bạn đã đổi mật khẩu vì nghi bị lộ, nội dung của chúng có thể đã bị người khác sửa trước khi bạn đổi.
+      </p>
+      <p className="small">
+        Trước khi bấm, hãy thử tìm bản mới hơn: lịch sử phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc một thiết bị khác còn mở
+        được kho.
+      </p>
+      <button type="button" className="btn subtle wrap" disabled={busy || !canRecover} onClick={onRecoverOlder}>
+        {busy ? "Đang khôi phục…" : "Vẫn khôi phục từ các bản cũ này"}
+      </button>
+      <p className="small muted">
+        Sau khi khôi phục, hãy kiểm tra lại địa chỉ trang web và mật khẩu của các tài khoản quan trọng (ngân hàng, email) trước khi dùng.
+      </p>
+    </div>
+  );
+}
+
 /** Thư mục sao lưu không có bản nào dùng được: chỉ ra những nơi khác còn có thể giữ bản sao. */
 function NoBackupBox({ text }: { text: string }) {
   return (
@@ -252,7 +285,10 @@ function UpdateLink() {
   );
 }
 
-function RecoveredCard({ info, older, onContinue }: { info: RecoverInfo; older: boolean; onContinue: () => void }) {
+/** Chủ kho đã chọn rõ ràng khôi phục bằng một mật khẩu cũ ("password"), hay từ các bản có từ trước lần đổi mật khẩu ("backups"). */
+type OlderChoice = false | "password" | "backups";
+
+function RecoveredCard({ info, older, onContinue }: { info: RecoverInfo; older: OlderChoice; onContinue: () => void }) {
   return (
     <div className="lock-screen">
       <div className="lock-card wide-card">
@@ -269,11 +305,17 @@ function RecoveredCard({ info, older, onContinue }: { info: RecoverInfo; older: 
           )}
           {info.rescue_kept > 0 && <li>{info.rescue_kept} bản cứu hộ chưa gộp được, vẫn được giữ lại (app thử lại ở lần mở khoá sau).</li>}
         </ul>
-        {older && (
+        {older === "password" && (
           <div className="warning small">
             Kho đã quay về <strong>mật khẩu chính cũ</strong> (mật khẩu bạn vừa nhập) và chỉ có dữ liệu của các bản sao lưu cũ. Những gì thêm hoặc sửa sau
             lần đổi mật khẩu không có trong kho. Các bản sao lưu ghi bằng mật khẩu mới hơn vẫn còn trong thư mục sao lưu một thời gian — nếu nhớ ra mật
             khẩu đó, có thể mở chúng bằng công cụ cứu dữ liệu (xem README). Trên các thiết bị khác, hãy mở kho bằng mật khẩu bạn vừa nhập.
+          </div>
+        )}
+        {older === "backups" && (
+          <div className="warning small">
+            Kho được dựng lại từ các bản sao lưu có từ <strong>trước lần đổi mật khẩu chính gần nhất</strong>; những gì thêm hoặc sửa sau lần đổi không có
+            trong kho. Trước khi dùng, hãy kiểm tra lại <strong>địa chỉ trang web và mật khẩu</strong> của các tài khoản quan trọng (ngân hàng, email).
           </div>
         )}
         <p className="small muted">
@@ -298,7 +340,7 @@ export function NotFoundScreen({ status, note, onRetry, onRecovered }: { status:
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ code: string; text: string } | null>(null);
-  const [recovered, setRecovered] = useState<{ info: RecoverInfo; older: boolean } | null>(null);
+  const [recovered, setRecovered] = useState<{ info: RecoverInfo; older: OlderChoice } | null>(null);
 
   async function choose() {
     setError(null);
@@ -316,12 +358,12 @@ export function NotFoundScreen({ status, note, onRetry, onRecovered }: { status:
     try {
       const r = await api.recoverVault(status.vault_path, pw, older);
       setPw("");
-      setRecovered({ info: r, older });
+      setRecovered({ info: r, older: older ? (error?.code === "old_backups_only" ? "backups" : "password") : false });
     } catch (err) {
       const code = errorCode(err);
       setError({ code, text: errorText(err) });
       // Mật khẩu cũ: giữ lại để nút "vẫn khôi phục từ các bản cũ" dùng được ngay.
-      if (code !== "older_password") setPw("");
+      if (code !== "older_password" && code !== "old_backups_only") setPw("");
     } finally {
       setBusy(false);
     }
@@ -354,6 +396,8 @@ export function NotFoundScreen({ status, note, onRetry, onRecovered }: { status:
         <p className="small muted">Dữ liệu của bạn KHÔNG mất chỉ vì file tạm thời không có ở đây. Đừng tạo kho mới nếu bạn đã có kho.</p>
         {error?.code === "older_password" ? (
           <OlderPasswordBox busy={busy} canRecover={!!pw} onRecoverOlder={() => runRecover(true)} />
+        ) : error?.code === "old_backups_only" ? (
+          <OldBackupsOnlyBox busy={busy} canRecover={!!pw} onRecoverOlder={() => runRecover(true)} />
         ) : error?.code === "no_backup" ? (
           <NoBackupBox text={error.text} />
         ) : (

@@ -58,6 +58,14 @@ pub enum Error {
          mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)"
     )]
     OlderPasswordBackups,
+    /// Khôi phục từ sao lưu: mật khẩu đúng, nhưng chỉ còn các bản sao lưu có từ TRƯỚC lần đổi mật
+    /// khẩu chính gần nhất (mọi bản ghi sau lần đổi đã mất). App không tự dùng chúng.
+    #[error(
+        "chỉ còn các bản sao lưu có từ TRƯỚC lần đổi mật khẩu chính gần nhất — app không tự dùng chúng \
+         để dựng lại kho (nếu bạn đổi mật khẩu vì nghi bị lộ, nội dung các bản đó có thể đã bị người \
+         khác sửa trước khi bạn đổi)"
+    )]
+    OnlyPreChangeBackups,
     /// Khôi phục từ sao lưu: thư mục sao lưu không có bản nào dùng được.
     #[error(
         "không có bản sao lưu nào dùng được trong thư mục sao lưu của kho — hãy thử lịch sử phiên bản \

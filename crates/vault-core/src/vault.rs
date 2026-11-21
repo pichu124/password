@@ -234,6 +234,11 @@ struct Unlocked {
 /// Mở một file kho bằng master password.
 fn unlock_bytes(bytes: &[u8], password: &[u8], allow_weak_kdf: bool) -> Result<Unlocked> {
     let raw = format::parse(bytes)?;
+    // Bản sao lưu có từ trước lần đổi mật khẩu (xem `Header::pre_change`) không phải là file kho:
+    // không bao giờ mở kho từ nó. Báo như file hỏng để chủ kho được mời "khôi phục từ bản sao lưu".
+    if raw.header.pre_change {
+        return Err(Error::VaultFileDamaged);
+    }
     let key = raw.header.unwrap_key(password, allow_weak_kdf)?;
     // Mật khẩu đã đúng (gói khoá mở được) mà phần thân không giải mã được ⇒ file hỏng, không phải sai mật khẩu.
     let data = raw.decrypt_body(&key).map_err(|e| match e {
@@ -247,12 +252,13 @@ fn unlock_bytes(bytes: &[u8], password: &[u8], allow_weak_kdf: bool) -> Result<U
     })
 }
 
-/// Khoá đã giải mã được một file.
+/// Một file đã giải mã được thuộc loại nào.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyUsed {
-    /// Khoá kho hiện tại.
+    /// Khoá kho hiện tại, và file không mang dấu "bản từ trước lần đổi mật khẩu".
     Current,
-    /// Một khoá cũ trong `old_keys` (khoá của một mật khẩu chính đã đổi).
+    /// Một khoá cũ trong `old_keys` (khoá của một mật khẩu chính đã đổi), HOẶC khoá hiện tại nhưng
+    /// file mang dấu `Header::pre_change`. Cả hai đều là nội dung từ thời mật khẩu cũ: không đáng tin.
     Retired,
 }
 
@@ -264,6 +270,8 @@ fn decrypt_with_keys(
     old: &VaultData,
 ) -> Result<(VaultData, KeyUsed)> {
     match raw.decrypt_body(current) {
+        // (Phần thân giải mã được ⇒ header, kể cả dấu `pre_change`, là thật.)
+        Ok(d) if raw.header.pre_change => return Ok((d, KeyUsed::Retired)),
         Ok(d) => return Ok((d, KeyUsed::Current)),
         Err(Error::Decrypt) => {}
         Err(e) => return Err(e),
@@ -550,6 +558,9 @@ impl Vault {
             let Ok(raw) = format::parse(&bytes) else {
                 continue;
             };
+            if raw.header.pre_change {
+                continue; // bản từ trước lần đổi mật khẩu: không bao giờ mở kho từ nó
+            }
             let known = tried.iter().position(|(h, _)| h.same_wrap(&raw.header));
             let key = match known {
                 Some(i) => tried[i].1.clone(),
@@ -665,6 +676,8 @@ impl Vault {
         // thân nhận header làm dữ liệu xác thực (AAD), nên header của gốc — kể cả `key_changed_at`
         // — là header thật, không phải một bản chép bị sửa.
         let mut base: Option<(Header, Key, VaultData)> = None;
+        // Gốc chỉ còn là bản có từ trước lần đổi mật khẩu (xem `Header::pre_change`).
+        let mut base_is_pre_change = false;
         for w in wraps.into_iter().take(MAX_PASSWORD_ATTEMPTS) {
             let key = match w.unwrap_key(password, opts.allow_weak_kdf) {
                 Ok(k) => k,
@@ -673,18 +686,36 @@ impl Vault {
                     continue;
                 }
             };
-            let found = candidates
+            // (header đã xác thực, dữ liệu) của các bản trong nhóm giải mã được, mới nhất trước.
+            let mut readable = candidates
                 .iter()
                 .filter(|(_, h)| h.same_wrap(w))
                 .take(MAX_FILES_EXAMINED)
-                .find_map(|(b, _)| {
+                .filter_map(|(b, _)| {
                     let bytes = fsutil::read_retry(&b.path).ok()?;
                     let raw = format::parse(&bytes).ok()?;
                     let data = raw.decrypt_body(&key).ok()?;
                     Some((raw.header.clone(), data))
                 });
-            if let Some((header, data)) = found {
+            let mut first_pre_change = None;
+            let trusted = readable.find(|(h, _)| {
+                if h.pre_change && first_pre_change.is_none() {
+                    first_pre_change = Some(h.clone());
+                }
+                !h.pre_change
+            });
+            if let Some((header, data)) = trusted {
                 base = Some((header, key, data));
+                break;
+            }
+            if let Some(mut header) = first_pre_change {
+                // Mật khẩu đúng nhưng chỉ còn các bản có từ trước lần đổi mật khẩu: không tự dùng.
+                if !allow_older {
+                    return Err(Error::OnlyPreChangeBackups);
+                }
+                header.pre_change = false;
+                base = Some((header, key, VaultData::default()));
+                base_is_pre_change = true;
                 break;
             }
             // Mở được gói khoá mà không bản nào giải mã được: nhóm này chỉ còn file hỏng.
@@ -721,12 +752,23 @@ impl Vault {
             let Ok(bytes) = fsutil::read_retry(&b.path) else {
                 continue;
             };
-            let Ok(d) = format::parse(&bytes).and_then(|raw| raw.decrypt_body(&key)) else {
+            let Ok(raw) = format::parse(&bytes) else {
+                continue;
+            };
+            // Bản có từ trước lần đổi mật khẩu chỉ được dùng khi chính gốc cũng là bản như vậy (chủ
+            // kho đã chọn rõ ràng); còn bản đáng tin nào thì không bao giờ trộn chúng vào.
+            if raw.header.pre_change && !base_is_pre_change {
+                continue;
+            }
+            let Ok(d) = raw.decrypt_body(&key) else {
                 continue;
             };
             data.merge_from(&d);
             used += 1;
             newest = newest.max(b.timestamp);
+        }
+        if used == 0 {
+            return Err(Error::NoUsableBackup);
         }
         let v = Vault::assemble(path, header, key, data, None, true, opts.allow_weak_kdf);
         Ok((v, used, newest))
@@ -1442,7 +1484,13 @@ impl Vault {
 
     /// Ngay sau khi đổi master password: mã hoá lại các file trong thư mục sao lưu bằng khoá + mật
     /// khẩu hiện tại — CHỈ những file mở được bằng `retiring` (khoá vừa bị thay ở chính lần đổi này)
-    /// hoặc bằng khoá hiện tại.
+    /// hoặc bằng khoá hiện tại — và gắn cho chúng dấu `Header::pre_change`.
+    ///
+    /// Vì sao phải gắn dấu: trước lần đổi, người biết mật khẩu (sắp thành) cũ có đủ khoá để đặt vào
+    /// thư mục sao lưu một file do họ tự làm. Mã hoá lại file ấy thành một bản sao lưu bình thường là
+    /// trao cho nó sự tin cậy của khoá mới — lần khôi phục sau sẽ gộp nó vào kho. Có dấu thì mọi thứ
+    /// có từ trước lần đổi vĩnh viễn là "lịch sử để xem": mật khẩu cũ không đọc được nó nữa, chủ kho
+    /// vẫn xem và khôi phục từng mục được, nhưng app không bao giờ tự dùng nó.
     ///
     /// File chỉ mở được bằng một khoá cũ HƠN nữa thì để nguyên (tính vào `backups_skipped`). Thư mục
     /// sao lưu nằm trong thư mục đồng bộ, nên người biết một mật khẩu chính CŨ có thể đặt vào đó
@@ -1465,13 +1513,21 @@ impl Vault {
                 report.backups_skipped += unreadable;
                 continue;
             };
-            if raw.header.vault_id != self.header.vault_id || raw.header == self.header {
-                continue; // file của kho khác, hoặc đã dùng khoá hiện tại
+            // File của kho khác, hoặc đã dùng header hiện tại (bản sao lưu của chính lần ghi đổi mật
+            // khẩu, hay bản đã được đánh dấu ở một lần chạy trước).
+            let current = raw.header.same_wrap(&self.header)
+                && raw.header.key_changed_at == self.header.key_changed_at;
+            if raw.header.vault_id != self.header.vault_id || current {
+                continue;
             }
+            let marked = Header {
+                pre_change: true,
+                ..self.header.clone()
+            };
             let done = raw
                 .decrypt_body(&self.vault_key)
                 .or_else(|_| raw.decrypt_body(retiring))
-                .and_then(|data| format::serialize(&self.header, &data, &self.vault_key))
+                .and_then(|data| format::serialize(&marked, &data, &self.vault_key))
                 .and_then(|out| fsutil::atomic_write(&b.path, &out));
             match done {
                 Ok(()) => report.backups_reencrypted += 1,
