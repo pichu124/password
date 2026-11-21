@@ -78,6 +78,13 @@ jobs:
           mv "$MAIN.new" "$MAIN"
           grep -q 'FLAG_SECURE' "$MAIN"
           grep -q 'IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS' "$MAIN"
+          # Bộ chọn file kho giữ quyền đọc lâu dài: cùng gói với MainActivity; lib.rs nạp nó theo tên
+          # gói vn.pwv.vault, nên gói khác tên là build đỏ (chứ không phải app lặng lẽ mất tính năng).
+          test "$PKG" = "package vn.pwv.vault"
+          PICKER="$(dirname "$MAIN")/VaultPickerPlugin.kt"
+          { echo "$PKG"; echo; cat android-overrides/VaultPickerPlugin.kt; } > "$PICKER"
+          grep -q 'takePersistableUriPermission' "$PICKER"
+          grep -q 'ACTION_OPEN_DOCUMENT' "$PICKER"
 
           mkdir -p "$GEN/res/xml"
           cp android-overrides/data_extraction_rules.xml "$GEN/res/xml/"
@@ -86,6 +93,7 @@ jobs:
           grep -q 'android:allowBackup="false"' "$MAN"
           grep -q 'android:dataExtractionRules="@xml/data_extraction_rules"' "$MAN"
           echo "----- MainActivity.kt"; cat "$MAIN"
+          echo "----- VaultPickerPlugin.kt"; cat "$PICKER"
           echo "----- AndroidManifest.xml"; cat "$MAN"
 
       - name: Build APK (arm64)

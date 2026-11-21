@@ -678,6 +678,9 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       if (f === "error") throw err("file_damaged", "File kho vừa tải về bị hỏng hoặc chưa tải xong");
       return false;
     }
+    case "pick_vault_file":
+      // Không có Android: giao diện lùi về bộ chọn file thường (mock).
+      throw err("error", "Chỉ dùng trên Android");
     case "repick_readonly": needUnlocked(); await sleep(400); vaultPath = a.location; modifiedAt = Date.now() - 60_000; return true;
     case "check_update": await sleep(300); return { current: "0.2.0", latest: "0.2.1", available: true, page_url: "https://github.com/example/pwv/releases/tag/v0.2.1", notes: "- Sửa lỗi đồng bộ\n- Thùng rác", published_at: "2026-11-19T10:00:00Z" };
     case "open_release_page":

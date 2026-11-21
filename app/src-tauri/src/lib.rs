@@ -540,9 +540,19 @@ fn read_location(app: &tauri::AppHandle, location: &str) -> AppResult<Vec<u8>> {
     let fp: tauri_plugin_fs::FilePath = location
         .parse()
         .map_err(|_| AppError::new("read_failed", "Đường dẫn kho không hợp lệ"))?;
-    app.fs()
-        .read(fp)
-        .map_err(|e| AppError::new("read_failed", format!("Không đọc được file kho: {e}")))
+    app.fs().read(fp).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("Permission Denial") || msg.contains("SecurityException") {
+            // Quyền đọc tạm thời của bộ chọn file cũ (trước 0.2.1) đã hết khi app bị đóng.
+            AppError::new(
+                "read_failed",
+                "Android không còn cho app đọc file kho (quyền đọc đã hết hạn). Vào Cài đặt → chọn \
+                 lại file kho: từ bản này quyền đọc được giữ lâu dài, chỉ cần làm một lần.",
+            )
+        } else {
+            AppError::new("read_failed", format!("Không đọc được file kho: {msg}"))
+        }
+    })
 }
 
 /// FNV-1a 64 bit — chỉ để đặt tên file bản lưu theo vị trí kho (không dùng cho mục đích bảo mật).
@@ -686,6 +696,61 @@ async fn open_readonly(app: tauri::AppHandle, password: String) -> AppResult<Rea
         outcome
     })
     .await
+}
+
+/// Kết quả bộ chọn file kho của Android (`VaultPickerPlugin.kt`).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PickedVault {
+    /// `None` = người dùng huỷ.
+    #[serde(default)]
+    uri: Option<String>,
+    /// Android cho giữ quyền đọc lâu dài (còn sau khi app bị đóng).
+    #[serde(default)]
+    persisted: bool,
+}
+
+#[cfg(target_os = "android")]
+struct VaultPicker(tauri::plugin::PluginHandle<tauri::Wry>);
+
+/// Plugin nhỏ nạp bộ chọn file kho viết bằng Kotlin. Nạp không được (gói Android khác tên) thì app
+/// vẫn chạy: giao diện lùi về bộ chọn file của plugin dialog.
+#[cfg(target_os = "android")]
+fn vault_picker_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::<tauri::Wry, ()>::new("vaultpicker")
+        .setup(|app, api| {
+            match api.register_android_plugin("vn.pwv.vault", "VaultPickerPlugin") {
+                Ok(h) => {
+                    app.manage(VaultPicker(h));
+                }
+                Err(e) => eprintln!("không nạp được bộ chọn file kho: {e}"),
+            }
+            Ok(())
+        })
+        .build()
+}
+
+/// Android: chọn file kho bằng ACTION_OPEN_DOCUMENT và giữ quyền đọc lâu dài (xem
+/// `android-overrides/VaultPickerPlugin.kt`). Nơi khác: lỗi (giao diện dùng bộ chọn thường).
+#[tauri::command]
+async fn pick_vault_file(app: tauri::AppHandle) -> AppResult<PickedVault> {
+    #[cfg(target_os = "android")]
+    {
+        blocking(move || {
+            let picker = app
+                .try_state::<VaultPicker>()
+                .ok_or_else(|| AppError::new("error", "Bộ chọn file kho chưa sẵn sàng"))?;
+            picker
+                .0
+                .run_mobile_plugin::<PickedVault>("pickVault", ())
+                .map_err(|e| AppError::new("error", format!("Không mở được bộ chọn file: {e}")))
+        })
+        .await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(AppError::new("error", "Chỉ dùng trên Android"))
+    }
 }
 
 /// Đọc lại file kho từ Drive/Dropbox/OneDrive. Trả về true nếu có dữ liệu mới.
@@ -928,6 +993,8 @@ pub fn run() {
             let _ = w.set_focus();
         }
     }));
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(vault_picker_plugin());
     let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -1052,6 +1119,7 @@ pub fn run() {
             check_vault_choice,
             prepare_copy_folder,
             discard_copy_folder,
+            pick_vault_file,
         ])
         .build(tauri::generate_context!())
         .expect("không khởi động được ứng dụng");

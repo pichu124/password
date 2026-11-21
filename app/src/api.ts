@@ -52,7 +52,7 @@ const SESSION_LOST = new Set(["locked", "password_changed"]);
 /** Mã lỗi nghĩa là file kho trên đĩa đang có vấn đề (backend ghi nhận vào `disk_problem`). */
 const DISK_PROBLEM = new Set(["file_damaged", "file_missing", "different_vault", "unsupported_version"]);
 /** Các lệnh tự xử lý lỗi của mình (màn hình khoá / mở khoá) — không kích hoạt xử lý chung. */
-const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path", "restore_local_copy", "check_vault_choice", "prepare_copy_folder", "discard_copy_folder", "set_draft", "record_generated", "check_rekey"]);
+const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path", "restore_local_copy", "check_vault_choice", "prepare_copy_folder", "discard_copy_folder", "pick_vault_file", "set_draft", "record_generated", "check_rekey"]);
 
 let sessionLostHandler: ((e: AppError) => void) | null = null;
 let diskProblemHandler: ((e: AppError) => void) | null = null;
@@ -178,6 +178,8 @@ export const api = {
   openReadonly: (password: string) => call<ReadOnlyOpen>("open_readonly", { password }),
   reloadReadonly: () => call<boolean>("reload_readonly"),
   repickReadonly: (location: string) => call<boolean>("repick_readonly", { location }),
+  /** Android: bộ chọn file kho giữ quyền đọc lâu dài. */
+  pickVaultFile: () => call<{ uri?: string | null; persisted: boolean }>("pick_vault_file"),
   checkUpdate: () => call<UpdateInfo | null>("check_update"),
   /** Mở trang tải của một phiên bản (truyền số phiên bản, ví dụ `update.latest`, không phải địa chỉ). */
   openReleasePage: (version: string) => call<void>("open_release_page", { version }),

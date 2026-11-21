@@ -19,8 +19,15 @@ let pageLoaded: Promise<void> | null = null;
 const pageLoadedOnce = () => (pageLoaded ??= api.pageLoaded().catch(() => {}));
 
 async function chooseVaultFile(): Promise<string | null> {
-  // Không lọc theo đuôi file: trên Android bộ lọc theo đuôi .pwv thường làm ẩn mất file.
-  return pickFile({ title: "Chọn file vault.pwv", filters: [] });
+  // Bộ chọn riêng giữ quyền đọc file LÂU DÀI (bộ chọn thường chỉ cho quyền tạm thời, mất khi Android
+  // đóng app ⇒ lần sau phải dùng bản đã lưu). Không có thì lùi về bộ chọn thường.
+  try {
+    const r = await api.pickVaultFile();
+    return r.uri ?? null;
+  } catch {
+    // Không lọc theo đuôi file: trên Android bộ lọc theo đuôi .pwv thường làm ẩn mất file.
+    return pickFile({ title: "Chọn file vault.pwv", filters: [] });
+  }
 }
 
 export default function MobileApp() {
