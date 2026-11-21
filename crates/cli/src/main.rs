@@ -5,7 +5,7 @@
 //! - Bí mật (mật khẩu, secret 2FA, ghi chú) KHÔNG BAO GIỜ nhận qua tham số dòng lệnh, vì tham số
 //!   bị lưu vào lịch sử lệnh của PowerShell/bash — luôn hỏi sau khi lệnh đã chạy.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -56,13 +56,15 @@ enum Cmd {
         url: Vec<String>,
         #[arg(long)]
         tag: Vec<String>,
-        /// Nhập ghi chú (nhiều dòng) sau khi chạy lệnh; kết thúc bằng một dòng trống.
+        /// Nhập ghi chú (nhiều dòng, được có dòng trống) sau khi chạy lệnh — hỏi SAU mật khẩu;
+        /// kết thúc bằng một dòng chỉ có dấu chấm `.` (hoặc Ctrl+Z rồi Enter trên Windows).
         #[arg(long)]
         notes: bool,
         /// Nhập secret 2FA (otpauth://... hoặc base32) sau khi chạy lệnh — được hỏi ẩn.
         #[arg(long)]
         totp: bool,
-        /// Tự tạo mật khẩu thay vì nhập.
+        /// Tự tạo mật khẩu ngẫu nhiên thay vì nhập (để trống khi được hỏi mật khẩu cũng được:
+        /// pwv sẽ hỏi lại cho chắc).
         #[arg(short, long)]
         generate: bool,
         #[command(flatten)]
@@ -98,8 +100,8 @@ enum Cmd {
         /// Thay toàn bộ danh sách URL.
         #[arg(long)]
         url: Vec<String>,
-        /// Nhập lại ghi chú (nhiều dòng) sau khi chạy lệnh; kết thúc bằng một dòng trống.
-        /// Dòng trống ngay từ đầu = xoá ghi chú.
+        /// Nhập lại ghi chú (nhiều dòng, được có dòng trống) sau khi chạy lệnh; kết thúc bằng một
+        /// dòng chỉ có dấu chấm `.`. Gõ `.` ngay dòng đầu = xoá ghi chú (pwv hỏi lại trước khi xoá).
         #[arg(long)]
         notes: bool,
         /// Đặt secret 2FA mới (otpauth://... hoặc base32) — được hỏi ẩn sau khi chạy lệnh.
@@ -220,7 +222,8 @@ struct GenArgs {
     /// Số từ cho passphrase.
     #[arg(short, long, default_value_t = 6)]
     words: usize,
-    /// Sao chép kết quả vào clipboard (lệnh `gen`).
+    /// Sao chép vào clipboard, tự xoá sau vài giây: `gen` — mật khẩu vừa tạo; `add`/`edit` — mật
+    /// khẩu mới của mục, sau khi đã lưu xong.
     #[arg(short, long)]
     copy: bool,
 }
@@ -271,11 +274,36 @@ fn run(cli: Cli) -> Result<()> {
         cmd => {
             let path = vault_path(cli.vault)?;
             let mut v = unlock(&path, !matches!(cmd, Cmd::Sync))?;
-            warn_if_rollback(&v);
+            if !rollback_gate(&v, is_mutating(&cmd))? {
+                return Ok(());
+            }
             vault_cmd(&mut v, cmd)?;
             remember_seen(&v);
             Ok(())
         }
+    }
+}
+
+/// Lệnh này có ghi vào kho không (thêm/sửa/xoá, đồng bộ, đổi mật khẩu, chuyển kho...).
+fn is_mutating(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::List { .. }
+        | Cmd::Show { .. }
+        | Cmd::Copy { .. }
+        | Cmd::Totp { .. }
+        | Cmd::Health { .. }
+        | Cmd::Backups => false,
+        Cmd::Trash { action } => !matches!(action, None | Some(TrashCmd::List)),
+        Cmd::Add { .. }
+        | Cmd::Edit { .. }
+        | Cmd::Delete { .. }
+        | Cmd::Passwd
+        | Cmd::Import { .. }
+        | Cmd::Sync
+        | Cmd::Move { .. }
+        | Cmd::Restore { .. } => true,
+        // Không mở kho qua `run` (tự xử lý riêng).
+        Cmd::Init { .. } | Cmd::Gen(_) | Cmd::Config { .. } | Cmd::Recover { .. } => false,
     }
 }
 
@@ -305,7 +333,10 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Show { target, reveal } => {
-            let e = resolve(v, &target)?;
+            let (e, m) = resolve(v, &target)?;
+            if m == Match::Partial {
+                eprintln!("(\"{target}\" khớp một phần với mục dưới đây.)");
+            }
             println!("ID:        {}", e.id);
             println!("Tiêu đề:   {}", e.title);
             println!("Username:  {}", e.username);
@@ -341,13 +372,21 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Copy { target, username } => {
-            let e = resolve(v, &target)?;
+            let (e, m) = resolve(v, &target)?;
             let value = Zeroizing::new(if username {
                 e.username.clone()
             } else {
                 e.password.clone()
             });
-            eprintln!("Đã chọn: {}", e.title);
+            eprintln!(
+                "Đã chọn: {}{}",
+                entry_label(e),
+                if m == Match::Partial {
+                    format!(" — \"{target}\" chỉ khớp một phần, hãy chắc đây đúng là mục bạn cần")
+                } else {
+                    String::new()
+                }
+            );
             copy_to_clipboard(&value)
         }
         Cmd::Add {
@@ -360,22 +399,23 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             generate,
             gen,
         } => {
+            // Thứ tự: các lời nhắc ẩn trước, ghi chú nhiều dòng SAU CÙNG — một lần dán ghi chú có
+            // gì sai cũng không còn lời nhắc mật khẩu nào phía sau để "ăn" phần thừa.
+            let (password, generated) = if generate {
+                let (pw, bits) = gen.generate()?;
+                eprintln!("{}", generated_line(bits));
+                (pw, true)
+            } else {
+                prompt_account_password(&gen)?
+            };
             let totp = if totp { prompt_totp()? } else { None };
             let notes = if notes {
                 prompt_notes()?
             } else {
                 Zeroizing::new(String::new())
             };
-            let password = if generate {
-                let (pw, bits) = gen.generate()?;
-                eprintln!("Đã tạo mật khẩu ngẫu nhiên (≈ {bits:.0} bit).");
-                pw
-            } else {
-                prompt_new_secret("Mật khẩu của tài khoản (để trống = tự tạo): ")?
-                    .map(Ok)
-                    .unwrap_or_else(|| gen.generate().map(|(p, _)| p))?
-            };
-            let mut e = Entry::new(title);
+            let to_copy = gen.copy.then(|| password.clone());
+            let mut e = Entry::new(title.clone());
             e.username = username;
             e.password = password.to_string();
             e.urls = url;
@@ -383,7 +423,14 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             e.notes = notes.to_string();
             e.totp = totp.map(|t| t.to_string());
             let id = commit(v, move |v| Ok(v.add(e)))?;
-            println!("Đã thêm {}", &id[..8.min(id.len())]);
+            let short = &id[..8.min(id.len())];
+            println!("Đã thêm \"{title}\" ({short}).");
+            if generated && to_copy.is_none() {
+                println!("Mật khẩu là mật khẩu ngẫu nhiên vừa tạo — sao chép: `pwv copy {short}`.");
+            }
+            if let Some(pw) = to_copy {
+                copy_to_clipboard(&pw)?;
+            }
             Ok(())
         }
         Cmd::Edit {
@@ -398,7 +445,28 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             generate,
             gen,
         } => {
-            let id = resolve(v, &target)?.id.clone();
+            let (e, m) = resolve(v, &target)?;
+            let (id, label, had_notes) = (e.id.clone(), entry_label(e), !e.notes.is_empty());
+            // Luôn cho thấy mục nào sắp bị sửa TRƯỚC khi hỏi hay đổi gì.
+            eprintln!("Đang sửa: {label}");
+            if !confirm_pick(&target, e, m, true, "Sửa mục này?")? {
+                eprintln!("Chưa thay đổi gì.");
+                return Ok(());
+            }
+            // Các lời nhắc ẩn trước, ghi chú nhiều dòng sau cùng (xem `add`).
+            let new_pw = if generate {
+                let (pw, bits) = gen.generate()?;
+                eprintln!("{}", generated_line(bits));
+                Some(pw)
+            } else if password {
+                let p = prompt_new_secret("Mật khẩu mới: ")?;
+                if p.is_none() {
+                    eprintln!("Không nhập mật khẩu — giữ nguyên mật khẩu cũ.");
+                }
+                p
+            } else {
+                None
+            };
             let totp: Option<Option<Zeroizing<String>>> = if no_totp {
                 Some(None)
             } else if totp {
@@ -412,11 +480,27 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             } else {
                 None
             };
-            let notes = if notes { Some(prompt_notes()?) } else { None };
-            let new_pw = if generate {
-                Some(gen.generate()?.0)
-            } else if password {
-                prompt_new_secret("Mật khẩu mới: ")?
+            let notes = if notes {
+                let n = prompt_notes()?;
+                if n.is_empty()
+                    && had_notes
+                    && !confirm("Ghi chú mới để trống — XOÁ ghi chú hiện có của mục này?")?
+                {
+                    eprintln!("Giữ nguyên ghi chú cũ.");
+                    None
+                } else {
+                    Some(n)
+                }
+            } else {
+                None
+            };
+            let to_copy = if gen.copy {
+                if new_pw.is_none() {
+                    eprintln!(
+                        "(-c chỉ sao chép mật khẩu MỚI; lần sửa này không đổi mật khẩu nên không sao chép gì.)"
+                    );
+                }
+                new_pw.clone()
             } else {
                 None
             };
@@ -444,20 +528,27 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
                 })?;
                 Ok(v.get(&id) != before.as_ref())
             })?;
-            println!(
-                "{}",
-                if changed {
-                    "Đã cập nhật."
-                } else {
-                    "Không có gì thay đổi."
-                }
-            );
+            if changed {
+                println!("Đã cập nhật {label}.");
+            } else {
+                println!("Không có gì thay đổi ở {label}.");
+            }
+            if let Some(pw) = to_copy {
+                copy_to_clipboard(&pw)?;
+            }
             Ok(())
         }
         Cmd::Delete { target, yes } => {
-            let e = resolve(v, &target)?;
+            let (e, m) = resolve(v, &target)?;
             let (id, title) = (e.id.clone(), e.title.clone());
-            if !yes && !confirm(&format!("Chuyển \"{title}\" vào thùng rác?"))? {
+            eprintln!("Mục: {}", entry_label(e));
+            if !confirm_pick(
+                &target,
+                e,
+                m,
+                yes,
+                &format!("Chuyển \"{title}\" vào thùng rác?"),
+            )? {
                 return Ok(());
             }
             let del = id.clone();
@@ -467,6 +558,14 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
         }
         Cmd::Trash { action } => trash_cmd(v, action.unwrap_or(TrashCmd::List)),
         Cmd::Passwd => {
+            let bdir = backup_dir(v.path());
+            // Đồng bộ TRƯỚC khi hỏi mật khẩu mới (lõi cũng làm vậy bên trong `change_password`,
+            // nhưng không trả kết quả): bản xung đột ghi bằng khoá hiện tại phải được gộp ngay bây
+            // giờ, và chủ kho cần thấy kết quả.
+            let pre = v.sync().map_err(core_err)?;
+            for line in sync_report_lines(&pre, &bdir, false) {
+                eprintln!("{line}");
+            }
             let new = prompt_new_master("Master password MỚI: ")?;
             eprintln!(
                 "Đang thay khoá kho và mã hoá lại kho + các bản sao lưu (Argon2id, có thể mất vài giây)..."
@@ -474,17 +573,37 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             let r = v
                 .change_password(new.as_bytes(), KdfParams::DEFAULT)
                 .map_err(core_err)?;
-            for line in save_report_lines(&r.save, &backup_dir(v.path())) {
+            for line in save_report_lines(&r.save, &bdir) {
                 eprintln!("{line}");
             }
-            for line in passwd_report_lines(&r, &backup_dir(v.path())) {
+            // Bản xung đột còn nằm cạnh kho lúc này (vừa xuất hiện, hoặc chưa cất được) vẫn mở bằng
+            // mật khẩu CŨ: đồng bộ thêm một lần để cất chúng (đã mã hoá lại bằng mật khẩu mới).
+            let archived_after = match v.sync() {
+                Ok(post) => {
+                    if post.unverified {
+                        eprintln!("{}", unverified_line());
+                    }
+                    if post.backup_failed {
+                        eprintln!("{}", backup_failed_line(&bdir));
+                    }
+                    post.conflicts.iter().filter(|c| c.archived).count()
+                }
+                Err(e) => {
+                    eprintln!(
+                        "(Không đồng bộ lại được sau khi đổi mật khẩu: {e} — hãy chạy `pwv sync`.)"
+                    );
+                    0
+                }
+            };
+            let leftovers = v.conflict_copies();
+            for line in passwd_report_lines(&r, archived_after, &leftovers, &bdir) {
                 println!("{line}");
             }
             Ok(())
         }
         Cmd::Sync => {
             let r = v.sync().map_err(core_err)?;
-            for line in sync_report_lines(&r, &backup_dir(v.path())) {
+            for line in sync_report_lines(&r, &backup_dir(v.path()), true) {
                 println!("{line}");
             }
             println!(
@@ -495,7 +614,10 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Totp { target, copy } => {
-            let e = resolve(v, &target)?;
+            let (e, m) = resolve(v, &target)?;
+            if m == Match::Partial {
+                eprintln!("(\"{target}\" khớp một phần với {}.)", entry_label(e));
+            }
             let t = Totp::parse(
                 e.totp
                     .as_deref()
@@ -503,7 +625,7 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             )?;
             let (code, left) = t.now();
             println!("{code}");
-            eprintln!("{} — còn hiệu lực {left} giây", e.title);
+            eprintln!("{} — còn hiệu lực {left} giây", entry_label(e));
             if copy {
                 copy_to_clipboard(&code)?;
             }
@@ -604,7 +726,7 @@ fn trash_cmd(v: &mut Vault, action: TrashCmd) -> Result<()> {
                     short_id(e),
                     truncate(&e.title, 28),
                     truncate(&e.username, 28),
-                    format_utc(e.trashed_at())
+                    format_time(e.trashed_at())
                 );
             }
             println!();
@@ -612,20 +734,29 @@ fn trash_cmd(v: &mut Vault, action: TrashCmd) -> Result<()> {
             Ok(())
         }
         TrashCmd::Restore { target } => {
-            let e = resolve_trash(v, &target)?;
+            let (e, m) = resolve_trash(v, &target)?;
             let (id, title) = (e.id.clone(), e.title.clone());
+            eprintln!("Mục trong thùng rác: {}", entry_label(e));
+            if !confirm_pick(&target, e, m, true, "Lấy mục này ra khỏi thùng rác?")? {
+                return Ok(());
+            }
             commit(v, move |v| v.restore(&id))?;
             println!("Đã lấy \"{title}\" ra khỏi thùng rác.");
             Ok(())
         }
         TrashCmd::Purge { target, yes } => {
-            let e = resolve_trash(v, &target)?;
+            let (e, m) = resolve_trash(v, &target)?;
             let (id, title) = (e.id.clone(), e.title.clone());
-            if !yes
-                && !confirm(&format!(
+            eprintln!("Mục trong thùng rác: {}", entry_label(e));
+            if !confirm_pick(
+                &target,
+                e,
+                m,
+                yes,
+                &format!(
                     "Xoá VĨNH VIỄN \"{title}\"? Mục sẽ bị xoá trên MỌI thiết bị khi đồng bộ và không lấy lại được (trừ khi một bản sao lưu cũ còn giữ nó)."
-                ))?
-            {
+                ),
+            )? {
                 return Ok(());
             }
             commit(v, move |v| v.purge(&id))?;
@@ -633,23 +764,48 @@ fn trash_cmd(v: &mut Vault, action: TrashCmd) -> Result<()> {
             Ok(())
         }
         TrashCmd::Empty { yes } => {
-            let n = v.trash().len();
+            // Chỉ xoá ĐÚNG những mục chủ kho thấy lúc xác nhận: trong lúc chờ trả lời, máy khác có
+            // thể chuyển thêm mục vào thùng rác (lần ghi sẽ gộp chúng vào trước khi xoá).
+            let confirmed: Vec<String> = v.trash().iter().map(|e| e.id.clone()).collect();
+            let n = confirmed.len();
             if n == 0 {
                 println!("Thùng rác trống.");
                 return Ok(());
             }
+            for e in v.trash() {
+                eprintln!("  {}  {}", short_id(e), truncate(&e.title, 40));
+            }
             if !yes
                 && !confirm(&format!(
-                    "Xoá VĨNH VIỄN {n} mục trong thùng rác? Các mục sẽ bị xoá trên MỌI thiết bị khi đồng bộ và không lấy lại được."
+                    "Xoá VĨNH VIỄN {n} mục trên? Các mục sẽ bị xoá trên MỌI thiết bị khi đồng bộ và không lấy lại được."
                 ))?
             {
                 return Ok(());
             }
-            let removed = commit(v, |v| Ok(v.empty_trash()))?;
-            println!("Đã xoá vĩnh viễn {removed} mục.");
+            let removed = commit(v, move |v| Ok(v.purge_trashed(&confirmed)))?;
+            for line in trash_empty_lines(n, removed, v.trash().len()) {
+                println!("{line}");
+            }
             Ok(())
         }
     }
+}
+
+fn trash_empty_lines(confirmed: usize, removed: usize, left: usize) -> Vec<String> {
+    let mut out = vec![format!("Đã xoá vĩnh viễn {removed} mục.")];
+    if removed < confirmed {
+        out.push(format!(
+            "{} mục trong danh sách đã không còn trong thùng rác (máy khác vừa lấy ra hoặc đã xoá) — không đụng tới.",
+            confirmed - removed
+        ));
+    }
+    if left > 0 {
+        out.push(format!(
+            "Thùng rác vẫn còn {left} mục KHÔNG có trong danh sách bạn vừa xác nhận (có thể máy khác vừa \
+             chuyển vào) — chúng KHÔNG bị xoá. Xem: `pwv trash`."
+        ));
+    }
+    out
 }
 
 fn backups_cmd(v: &Vault) -> Result<()> {
@@ -662,17 +818,55 @@ fn backups_cmd(v: &Vault) -> Result<()> {
         return Ok(());
     }
     println!("Thư mục sao lưu: {}", backup_dir(v.path()).display());
+    let mut any_old = false;
     for (i, b) in list.iter().enumerate() {
         let count = v
-            .read_backup(&b.path)
-            .map(|d| (d.entries.len(), d.trash.len()))
+            .read_backup_checked(&b.path)
+            .map(|(d, retired)| BackupCount {
+                entries: d.entries.len(),
+                trash: d.trash.len(),
+                retired,
+            })
             .map_err(|e| e.to_string());
+        any_old |= count
+            .as_ref()
+            .is_ok_and(|c| backup_from_old_password(b.kind, c.retired));
         println!("{}", backup_line(i + 1, b, &count));
     }
     println!();
+    if any_old {
+        println!("{}", OLD_PASSWORD_BACKUP_NOTE);
+        println!();
+    }
     println!("Lấy lại: `pwv restore --from <số> <ID|tên>` hoặc `pwv restore --from <số> --all`.");
     Ok(())
 }
+
+/// Nội dung một bản sao lưu (để liệt kê).
+struct BackupCount {
+    entries: usize,
+    trash: usize,
+    /// Chỉ mở được bằng khoá của một master password CŨ.
+    retired: bool,
+}
+
+/// Nội dung của bản sao lưu đến từ một bản ghi bằng master password CŨ: hoặc file chỉ mở được bằng
+/// khoá cũ, hoặc bản `oldkey-…` (đã được mã hoá lại bằng khoá hiện tại khi cất, nhưng nội dung vẫn
+/// là của bản ghi bằng khoá cũ — có thể do người biết mật khẩu cũ làm ra).
+fn backup_from_old_password(kind: BackupKind, retired: bool) -> bool {
+    retired || kind == BackupKind::OldKey
+}
+
+const OLD_PASSWORD_BACKUP_NOTE: &str =
+    "⚠  Bản có dấu ⚠: nội dung của nó được ghi bằng một master password CŨ. Có thể đó là bản thật \
+     từ trước lần đổi mật khẩu, hoặc do một máy chưa biết mật khẩu mới ghi ra — nhưng cũng có thể \
+     do người biết mật khẩu cũ đặt vào. pwv không bao giờ tự gộp những bản này. Trước khi lấy lại \
+     mục nào từ đó, hãy kiểm tra kỹ (nhất là địa chỉ trang web và số tài khoản).";
+
+const OLD_PASSWORD_RESTORE_WARNING: &str = "⚠  CẢNH BÁO: bản sao lưu này được ghi bằng một master password CŨ. Có thể đó là bản thật \
+     của bạn từ trước lần đổi mật khẩu — nhưng ai biết mật khẩu cũ cũng làm ra được một bản như \
+     vậy và đặt nó vào thư mục sao lưu (ví dụ để thay địa chỉ trang web ngân hàng bằng trang giả).\n   \
+     Chỉ tiếp tục nếu bạn nhận ra các mục và địa chỉ trang web ở trên.";
 
 fn restore_cmd(
     v: &mut Vault,
@@ -683,7 +877,9 @@ fn restore_cmd(
 ) -> Result<()> {
     let list = v.backups();
     let b = pick_backup(&list, from)?.clone();
-    let data = v.read_backup(&b.path).map_err(core_err)?;
+    let (data, retired) = v.read_backup_checked(&b.path).map_err(core_err)?;
+    let from_old_password = backup_from_old_password(b.kind, retired);
+    let mut partial = false;
     let olds: Vec<Entry> = if all {
         data.entries
             .iter()
@@ -693,10 +889,16 @@ fn restore_cmd(
     } else {
         let t = target.unwrap_or_default();
         let old = match find_target(&data.entries, t) {
-            Found::One(e) => e,
+            Found::One(e, m) => {
+                if m == Match::Partial {
+                    eprintln!("{}", partial_match_note(t, e));
+                    partial = true;
+                }
+                e
+            }
             Found::None => bail!(
                 "bản sao lưu lúc {} không có mục \"{t}\"",
-                format_utc(b.timestamp)
+                format_time(b.timestamp)
             ),
             Found::Many(m) => {
                 print_ambiguous(&m);
@@ -718,7 +920,7 @@ fn restore_cmd(
     }
     println!(
         "Từ bản sao lưu lúc {} sẽ lấy lại {} mục:",
-        format_utc(b.timestamp),
+        format_time(b.timestamp),
         olds.len()
     );
     for o in &olds {
@@ -730,11 +932,30 @@ fn restore_cmd(
             "đã bị xoá vĩnh viễn — thêm lại thành mục mới"
         };
         println!("  {}  {:<28} {state}", short_id(o), truncate(&o.title, 28));
+        if from_old_password {
+            // Bản này có thể do người khác làm ra: cho thấy địa chỉ trang web sẽ được đưa vào kho.
+            for u in &o.urls {
+                println!("            trang web: {u}");
+            }
+        }
     }
     if all {
         println!("(Các mục được thêm sau thời điểm đó không bị ảnh hưởng.)");
     }
-    if !yes && !confirm("Tiếp tục?")? {
+    let go = if from_old_password {
+        eprintln!("{}", OLD_PASSWORD_RESTORE_WARNING);
+        // Không bỏ qua được bằng -y.
+        confirm_required(
+            "Vẫn lấy lại các mục trên từ bản này?",
+            "bản sao lưu này được ghi bằng một master password CŨ nên cần bạn xác nhận trực tiếp ở \
+             cửa sổ dòng lệnh (không dùng được -y). Chưa thay đổi gì.",
+        )?
+    } else if partial {
+        confirm_required("Tiếp tục?", &partial_refusal(target.unwrap_or_default()))?
+    } else {
+        yes || confirm("Tiếp tục?")?
+    };
+    if !go {
         return Ok(());
     }
     let changed = commit(v, move |v| {
@@ -785,19 +1006,30 @@ fn backup_kind_label(k: BackupKind) -> &'static str {
         BackupKind::Auto => "tự động",
         BackupKind::Merged => "bản xung đột đã gộp",
         BackupKind::Damaged => "file hỏng đã cất",
-        BackupKind::OldKey => "ghi bằng mật khẩu chính cũ (chưa gộp)",
+        BackupKind::OldKey => "ghi bằng master password cũ (chưa gộp)",
     }
 }
 
-fn backup_line(index: usize, b: &BackupFile, count: &Result<(usize, usize), String>) -> String {
+fn backup_line(index: usize, b: &BackupFile, count: &Result<BackupCount, String>) -> String {
     let content = match count {
-        Ok((n, 0)) => format!("{n} mục"),
-        Ok((n, t)) => format!("{n} mục (+{t} trong thùng rác)"),
+        Ok(c) => {
+            let mut s = if c.trash == 0 {
+                format!("{} mục", c.entries)
+            } else {
+                format!("{} mục (+{} trong thùng rác)", c.entries, c.trash)
+            };
+            if c.retired {
+                s.push_str("  ⚠ chỉ mở được bằng master password CŨ");
+            } else if b.kind == BackupKind::OldKey {
+                s.push_str("  ⚠ nội dung từ bản ghi bằng master password CŨ");
+            }
+            s
+        }
         Err(e) => format!("không đọc được: {e}"),
     };
     format!(
         "{index:>3}  {}  {:<20} {content}  [{}]",
-        format_utc(b.timestamp),
+        format_time(b.timestamp),
         backup_kind_label(b.kind),
         b.path
             .file_name()
@@ -986,7 +1218,7 @@ fn unlock(path: &Path, warn_conflicts: bool) -> Result<Vault> {
             path.display().to_string(),
         )));
     }
-    let pw = Zeroizing::new(rpassword::prompt_password("Master password: ")?);
+    let pw = prompt_hidden("Master password: ")?;
     let v = Vault::open(path, pw.as_bytes()).map_err(core_err)?;
     let conflicts = v.conflict_copies();
     if warn_conflicts && !conflicts.is_empty() {
@@ -1003,28 +1235,63 @@ fn unlock(path: &Path, warn_conflicts: bool) -> Result<Vault> {
     Ok(v)
 }
 
-fn warn_if_rollback(v: &Vault) {
-    if let Some(r) = v.rollback_against(&Config::load()) {
-        eprintln!("{}", rollback_warning(&r));
+/// Cảnh báo khi kho vừa mở cũ hơn / không nối tiếp kho máy này từng thấy.
+///
+/// Lệnh chỉ đọc: in cảnh báo rồi chạy tiếp. Lệnh ghi: DỪNG và hỏi (mặc định: không). Trước đây cảnh
+/// báo chỉ in một lần rồi lệnh ghi chạy luôn; lần ghi đó đẩy mốc "đã thấy" lên, nên từ lần sau
+/// không lệnh nào cảnh báo nữa và các mục bị thiếu chỉ còn nằm trong bản sao lưu.
+/// Đồng ý ⇒ lấy trạng thái hiện tại làm mốc mới (`accept_as_seen`). Không có người để hỏi ⇒ từ chối.
+/// Trả về false nếu chủ kho không đồng ý (không làm gì thêm).
+fn rollback_gate(v: &Vault, mutating: bool) -> Result<bool> {
+    let mut c = Config::load();
+    let Some(r) = v.rollback_against(&c) else {
+        return Ok(true);
+    };
+    eprintln!("{}", rollback_warning(&r));
+    if !mutating {
+        return Ok(true);
     }
+    eprintln!();
+    if !confirm_required(ROLLBACK_QUESTION, ROLLBACK_REFUSAL)? {
+        eprintln!("Đã dừng — chưa thay đổi gì.");
+        return Ok(false);
+    }
+    v.accept_as_seen(&mut c);
+    if let Err(e) = c.save() {
+        eprintln!("(Không ghi được file cấu hình: {e} — lần sau máy này sẽ cảnh báo lại.)");
+    }
+    Ok(true)
 }
+
+const ROLLBACK_QUESTION: &str = "Lệnh này sẽ GHI vào kho. Bạn đã kiểm tra và vẫn muốn tiếp tục với kho \
+     này? (y = chấp nhận kho như hiện tại; máy này sẽ thôi cảnh báo về nó)";
+
+const ROLLBACK_REFUSAL: &str = "kho có cảnh báo ở trên nên lệnh ghi vào kho cần bạn xác nhận trực \
+     tiếp — hãy chạy lại lệnh trong cửa sổ dòng lệnh (PowerShell). Chưa thay đổi gì.\n   Để xem và \
+     lấy lại các mục có thể bị thiếu: `pwv backups` rồi `pwv restore --from <số> --all`.";
 
 fn rollback_warning(r: &Rollback) -> String {
     let mut s = String::new();
-    if r.file_modified_at < r.seen_modified_at || r.older_password {
+    if r.file_modified_at < r.seen_modified_at {
         s.push_str(&format!(
             "⚠  CẢNH BÁO: file kho này CŨ HƠN bản mà máy này đã từng thấy (máy này đã thấy nội dung \
              sửa lúc {}, còn file hiện tại chỉ tới {}).\n   Có thể dịch vụ đồng bộ \
              (Drive/Dropbox/OneDrive) đã khôi phục một bản cũ, hoặc ai đó đã chép đè file cũ lên — \
              các mục thêm/sửa gần đây có thể bị THIẾU.",
-            format_utc(r.seen_modified_at),
-            format_utc(r.file_modified_at)
+            format_time(r.seen_modified_at),
+            format_time(r.file_modified_at)
         ));
         if r.older_password {
             s.push_str(
                 "\n   File này còn dùng master password CŨ hơn lần đổi mật khẩu gần nhất mà máy này biết.",
             );
         }
+    } else if r.older_password {
+        s.push_str(
+            "⚠  CẢNH BÁO: file kho này dùng master password CŨ hơn lần đổi mật khẩu gần nhất mà máy này \
+             biết.\n   Có thể đây là một bản từ TRƯỚC lần đổi đó (dịch vụ đồng bộ khôi phục nhầm, hoặc \
+             ai đó chép đè file cũ lên) — những gì thêm/sửa sau lần đổi mật khẩu có thể bị THIẾU.",
+        );
     }
     if r.unknown_key {
         if !s.is_empty() {
@@ -1056,7 +1323,7 @@ fn remember_seen(v: &Vault) {
 }
 
 fn recover(path: &Path, yes: bool) -> Result<()> {
-    let pw = Zeroizing::new(rpassword::prompt_password("Master password: ")?);
+    let pw = prompt_hidden("Master password: ")?;
     if path.exists() {
         if let Ok(v) = Vault::open(path, pw.as_bytes()) {
             println!(
@@ -1072,16 +1339,38 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
         "Đang tìm trong {} (mỗi bản thử mất khoảng 1 giây)...",
         backup_dir(path).display()
     );
-    let (mut v, used, newest) =
-        Vault::recover_from_backups(path, pw.as_bytes(), OpenOptions::default())
-            .map_err(core_err)?;
+    let (mut v, used, newest, older) = match Vault::recover_from_backups(
+        path,
+        pw.as_bytes(),
+        OpenOptions::default(),
+    ) {
+        Ok((v, used, newest)) => (v, used, newest, false),
+        Err(CoreError::OlderPasswordBackups) => {
+            eprintln!("{OLDER_PASSWORD_RECOVERY_WARNING}");
+            // Không bỏ qua được bằng -y: chỉ người ngồi trước máy mới quyết được việc này.
+            if !confirm_required(
+                    "Vẫn dựng lại kho từ các bản sao lưu CŨ này (quay về master password cũ)?",
+                    "mật khẩu vừa nhập chỉ mở được các bản sao lưu từ TRƯỚC lần đổi master password \
+                     gần nhất — dựng lại từ chúng cần bạn xác nhận trực tiếp ở cửa sổ dòng lệnh. Chưa \
+                     thay đổi gì. Tốt nhất: chạy lại `pwv recover` với master password HIỆN TẠI.",
+                )? {
+                    eprintln!("Chưa thay đổi gì. Hãy chạy lại `pwv recover` và nhập master password HIỆN TẠI.");
+                    return Ok(());
+                }
+            let (v, used, newest) =
+                Vault::recover_from_backups_opts(path, pw.as_bytes(), OpenOptions::default(), true)
+                    .map_err(core_err)?;
+            (v, used, newest, true)
+        }
+        Err(e) => return Err(core_err(e)),
+    };
     println!(
         "Tìm thấy {} mục (+{} trong thùng rác), gộp từ {used} file sao lưu; bản sao lưu mới nhất \
          dùng được tạo lúc {}, nội dung sửa lần cuối lúc {}.",
         v.entries().len(),
         v.trash().len(),
-        format_utc(newest),
-        format_utc(v.modified_at())
+        format_time(newest),
+        format_time(v.modified_at())
     );
     println!(
         "Lưu ý: nếu lần ghi cuối cùng vào kho là của bản app cũ (≤ 0.1.2) thì thay đổi cuối cùng \
@@ -1106,7 +1395,12 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
     // Người dùng đã chủ động dựng lại kho: lấy trạng thái này làm mốc mới (không cảnh báo
     // "file kho CŨ HƠN" ở mỗi lệnh sau đó nữa).
     let mut c = Config::load();
-    if v.rollback_against(&c).is_some() {
+    if older {
+        eprintln!(
+            "⚠  Kho dựng lại dùng master password CŨ mà bạn vừa nhập, và chỉ có dữ liệu tới lần đổi \
+             mật khẩu đó. Hãy kiểm tra các mục quan trọng, rồi nên đổi master password (`pwv passwd`)."
+        );
+    } else if v.rollback_against(&c).is_some() {
         eprintln!(
             "(Kho dựng lại cũ hơn bản máy này từng thấy — hãy kiểm tra xem có mục nào bị thiếu.)"
         );
@@ -1117,6 +1411,13 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
     }
     Ok(())
 }
+
+const OLDER_PASSWORD_RECOVERY_WARNING: &str = "⚠  Mật khẩu bạn vừa nhập là một master password CŨ: nó chỉ mở được các bản sao lưu tạo \
+     TRƯỚC lần đổi master password gần nhất.\n   Nếu dựng lại kho từ các bản đó: kho quay về mật khẩu \
+     cũ này, và MỌI thứ đã thêm/sửa sau lần đổi mật khẩu sẽ KHÔNG có trong kho dựng lại.\n   Nên làm: \
+     trả lời N, rồi chạy lại `pwv recover` với master password HIỆN TẠI (mật khẩu đặt gần đây nhất). \
+     Nếu một máy tính / điện thoại khác vẫn mở được kho, hãy dùng máy đó.\n   Chỉ trả lời y nếu bạn \
+     chắc chắn không còn cách nào mở bằng mật khẩu hiện tại.";
 
 // ---------------------------------------------------------------------------
 // Ghi + thông báo
@@ -1148,8 +1449,19 @@ fn save_report_lines(r: &SaveReport, backups: &Path) -> Vec<String> {
     if r.adopted_remote_password {
         out.push(adopted_password_line());
     }
+    if r.old_key_archived {
+        out.push(
+            "⚠  File kho trên đĩa được ghi bằng một master password CŨ nên KHÔNG được gộp vào thay đổi \
+             vừa rồi: nó đã được cất vào thư mục sao lưu, rồi file kho được ghi lại từ bản bạn đang mở."
+                .to_string(),
+        );
+        out.push(old_key_explanation());
+    }
     if r.backup_failed {
         out.push(backup_failed_line(backups));
+    }
+    if r.unverified {
+        out.push(unverified_line());
     }
     out
 }
@@ -1166,15 +1478,39 @@ fn backup_failed_line(backups: &Path) -> String {
     )
 }
 
-fn sync_report_lines(r: &SyncReport, backups: &Path) -> Vec<String> {
+/// Ý nghĩa của "bản ghi bằng master password cũ" và cách xem lại nó.
+fn old_key_explanation() -> String {
+    "   Nghĩa là: một máy chưa biết lần đổi master password gần nhất đã ghi bản đó — HOẶC ai đó biết \
+     mật khẩu cũ đã đặt nó vào. Vì vậy pwv không tự gộp nó; nội dung của nó được giữ trong thư mục sao \
+     lưu (đã mã hoá lại bằng mật khẩu hiện tại), có ghi chú \"ghi bằng master password cũ\".\n   \
+     Nếu trên máy kia bạn đã thêm/sửa gì cần giữ: xem `pwv backups`, rồi lấy từng mục bằng \
+     `pwv restore --from <số> <mục>` (kiểm tra kỹ địa chỉ trang web). Trên máy kia, hãy mở khoá bằng \
+     master password MỚI."
+        .to_string()
+}
+
+fn unverified_line() -> String {
+    "⚠  Đã ghi file kho nhưng đọc lại không kiểm tra được (thường do phần mềm diệt virus hoặc dịch \
+     vụ đồng bộ đang giữ file). Thay đổi KHÔNG bị huỷ — nó đã được ghi ra file kho và (nếu chép được) \
+     vào thư mục sao lưu. Lát nữa hãy chạy `pwv sync` để kiểm tra lại; nếu thông báo này cứ lặp lại, \
+     có phần mềm nào đó đang giữ file kho."
+        .to_string()
+}
+
+/// `verbose = false`: chỉ những gì đáng báo (dùng trước khi đổi mật khẩu).
+fn sync_report_lines(r: &SyncReport, backups: &Path, verbose: bool) -> Vec<String> {
     let mut out = Vec::new();
     match &r.merged_remote {
         Some(s) => out.push(format!(
             "Đã nạp thay đổi từ máy khác: {}.",
             merge_stats_text(s)
         )),
-        None => out.push("File kho trên đĩa không có thay đổi mới từ máy khác.".to_string()),
+        None if verbose => {
+            out.push("File kho trên đĩa không có thay đổi mới từ máy khác.".to_string())
+        }
+        None => {}
     }
+    let mut retired_archived = 0;
     for c in &r.conflicts {
         let name = c.path.display();
         match &c.result {
@@ -1186,12 +1522,36 @@ fn sync_report_lines(r: &SyncReport, backups: &Path) -> Vec<String> {
                 "Đã gộp bản xung đột {name}: {} — nhưng chưa cất được, vẫn để nguyên tại chỗ (có thể tự xoá).",
                 merge_stats_text(s)
             )),
-            // (Chỉ có ở bản ghi bằng mật khẩu chính cũ: lời nhắn của lỗi đã nói là đã cất đi.)
-            Err(e) if c.archived => out.push(format!("⚠  Không gộp {name}: {e}.")),
+            // Không in lời nhắn của lỗi: nó nói "đã cất vào thư mục sao lưu", sai khi chưa cất được.
+            Err(CoreError::RetiredKeyCopy) if c.archived => {
+                retired_archived += 1;
+                out.push(format!(
+                    "⚠  {name}: được ghi bằng master password CŨ nên KHÔNG được gộp — đã cất vào thư \
+                     mục sao lưu (ghi chú \"ghi bằng master password cũ\") và gỡ khỏi chỗ cũ."
+                ));
+            }
+            Err(CoreError::RetiredKeyCopy) => out.push(format!(
+                "⚠  {name}: được ghi bằng master password CŨ nên KHÔNG được gộp, và chưa cất được vào \
+                 thư mục sao lưu — vẫn để nguyên tại chỗ; lần đồng bộ sau sẽ thử lại."
+            )),
+            Err(e) if c.archived => out.push(format!(
+                "⚠  Không gộp {name}: {e} — đã cất vào thư mục sao lưu."
+            )),
             Err(e) => out.push(format!(
                 "⚠  Không gộp được {name}: {e} — để nguyên tại chỗ."
             )),
         }
+    }
+    // Số bản khoá cũ được cất = file kho chính (nếu có) + các bản xung đột ở trên.
+    if r.old_key_archived > retired_archived {
+        out.push(
+            "⚠  File kho trên đĩa được ghi bằng master password CŨ nên KHÔNG được gộp: nó đã được cất \
+             vào thư mục sao lưu, rồi file kho được ghi lại từ bản bạn đang mở."
+                .to_string(),
+        );
+    }
+    if r.old_key_archived > 0 {
+        out.push(old_key_explanation());
     }
     if r.adopted_remote_password {
         out.push(adopted_password_line());
@@ -1199,29 +1559,75 @@ fn sync_report_lines(r: &SyncReport, backups: &Path) -> Vec<String> {
     if r.backup_failed {
         out.push(backup_failed_line(backups));
     }
-    out.push(if r.wrote {
-        "Đã ghi lại file kho.".to_string()
-    } else {
-        "File kho đã đầy đủ — không cần ghi lại.".to_string()
-    });
+    if r.unverified {
+        out.push(unverified_line());
+    }
+    if verbose {
+        out.push(if r.wrote && r.unverified {
+            "Đã ghi lại file kho (chưa kiểm tra lại được — xem cảnh báo ở trên).".to_string()
+        } else if r.wrote {
+            "Đã ghi lại file kho.".to_string()
+        } else {
+            "File kho đã đầy đủ — không cần ghi lại.".to_string()
+        });
+    }
     out
 }
 
-fn passwd_report_lines(r: &PasswordChangeReport, backups: &Path) -> Vec<String> {
+/// `archived_after`: số bản xung đột (ghi bằng khoá vừa bị thay) được cất ngay sau khi đổi, đã mã
+/// hoá lại bằng mật khẩu mới. `leftovers`: các bản cùng kho vẫn còn nằm cạnh file kho.
+fn passwd_report_lines(
+    r: &PasswordChangeReport,
+    archived_after: usize,
+    leftovers: &[PathBuf],
+    backups: &Path,
+) -> Vec<String> {
     let mut out = vec!["Đã đổi master password và thay khoá mã hoá của kho.".to_string()];
+    if r.save.unverified {
+        out.push(
+            "⚠  File kho với mật khẩu mới đã được ghi nhưng CHƯA đọc lại kiểm tra được. Hãy chạy \
+             `pwv sync` ngay, mở khoá bằng mật khẩu MỚI. Nếu mật khẩu mới bị báo sai, thử mật khẩu cũ \
+             (có thể máy khác vừa ghi đè) rồi đổi lại."
+                .to_string(),
+        );
+    }
     let mut b = format!(
-        "Bản sao lưu trên máy này: đã mã hoá lại {} bản bằng khoá mới",
+        "Bản sao lưu trên máy này: đã mã hoá lại {} bản bằng mật khẩu mới",
         r.backups_reencrypted
     );
     if r.backups_skipped > 0 {
         b.push_str(&format!(
-            "; {} bản KHÔNG mã hoá lại được — nếu đọc được, chúng vẫn mở bằng mật khẩu CŨ (xem trong {})",
+            "; {} bản để nguyên: không đọc được, hoặc chỉ mở được bằng một master password CŨ HƠN nữa \
+             (từ trước lần đổi trước, hoặc do người khác đặt vào) — những bản đó vẫn mở được bằng \
+             mật khẩu cũ tương ứng, nhưng không bao giờ được tự gộp vào kho (xem `pwv backups`, trong {})",
             r.backups_skipped,
             backups.display()
         ));
     }
     b.push('.');
     out.push(b);
+    if archived_after > 0 {
+        out.push(format!(
+            "{archived_after} bản xung đột ghi bằng mật khẩu cũ đã được cất vào thư mục sao lưu (đã mã \
+             hoá lại bằng mật khẩu mới)."
+        ));
+    }
+    if !leftovers.is_empty() {
+        let names: Vec<String> = leftovers
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        out.push(format!(
+            "⚠  Cạnh file kho vẫn còn {} bản của kho này chưa cất được: {}. Bản nào được ghi trước lần \
+             đổi này vẫn mở được bằng mật khẩu CŨ — chạy `pwv sync` để thử cất lại, hoặc tự xoá chúng.",
+            leftovers.len(),
+            names.join(", ")
+        ));
+    }
     out.push(String::new());
     out.push(
         "⚠  Lưu ý: những bản sao ĐÃ RỜI KHỎI máy này vẫn mở được bằng mật khẩu CŨ và chứa dữ liệu tại thời điểm đó:"
@@ -1237,7 +1643,11 @@ fn passwd_report_lines(r: &PasswordChangeReport, backups: &Path) -> Vec<String> 
         "   Nếu mật khẩu cũ có thể đã bị lộ, hãy đổi mật khẩu của các tài khoản quan trọng (ngân hàng, email)."
             .to_string(),
     );
-    out.push("Các thiết bị khác sẽ hỏi mật khẩu mới ở lần mở khoá tới.".to_string());
+    out.push(
+        "Các thiết bị khác sẽ hỏi mật khẩu mới ở lần mở khoá tới. Một máy chưa biết lần đổi này mà ghi \
+         vào kho thì bản nó ghi KHÔNG được gộp, mà được cất vào thư mục sao lưu (xem `pwv backups`)."
+            .to_string(),
+    );
     out
 }
 
@@ -1250,9 +1660,18 @@ fn deleted_message(title: &str, id: &str) -> String {
 
 fn import_summary_lines(res: &ImportResult, imported: usize) -> Vec<String> {
     let mut out = vec![format!(
-        "Định dạng: {}. Đã nhập {imported} mục, bỏ qua {} dòng trùng khớp hoàn toàn, {} dòng trống.",
+        "Định dạng: {}. Đã nhập {imported} mục, bỏ qua {} dòng trùng khớp hoàn toàn (với mục đã có \
+         hoặc với dòng khác trong file), {} dòng trống.",
         res.detected, res.duplicates, res.skipped
     )];
+    if imported > 0 {
+        out.push(
+            "Mục nhập từ file được coi là \"chưa sửa lần nào\": nhập cùng file này trên máy khác không \
+             sinh mục trùng khi đồng bộ, và không đè lên những gì bạn đã sửa ở bất kỳ máy nào. (Nhập \
+             lại trên CHÍNH máy này một mục bạn đã sửa sẽ thêm một bản nữa — hãy rà lại.)"
+                .to_string(),
+        );
+    }
     if !res.similar.is_empty() {
         out.push(format!(
             "{} mục được nhập, có vẻ trùng — hãy rà lại:",
@@ -1299,8 +1718,23 @@ fn advice(e: &CoreError) -> Option<&'static str> {
         CoreError::Decrypt => {
             "Nếu master password vừa được đổi trên thiết bị khác, hãy dùng mật khẩu mới."
         }
+        // Chỉ còn đến từ việc tạo lại file kho đã biến mất (`pwv recover`): KHÔNG có gì bị hoàn tác.
         CoreError::WriteVerifyFailed => {
-            "Thay đổi đã được hoàn tác trong bộ nhớ. Chạy `pwv sync` để kiểm tra file kho rồi thử lại."
+            "File kho vừa được tạo lại nhưng đọc lại không khớp (thường do phần mềm diệt virus hoặc dịch \
+             vụ đồng bộ đang giữ file). Không có gì bị huỷ hay xoá: trước khi ghi, bản dựng lại đã được \
+             chép vào thư mục sao lưu (nếu chép được). Đợi một lát rồi chạy lại `pwv recover`: nếu file \
+             kho mở được bình thường thì đã xong; nếu không, pwv sẽ dựng lại lần nữa."
+        }
+        CoreError::NoUsableBackup => {
+            "Không có gì bị ghi hay xoá. Cách lấy lại:\n   • Trang web Google Drive / Dropbox / OneDrive: \
+             mở file kho → Lịch sử phiên bản (Manage versions) → tải một bản cũ hơn về máy, rồi chạy \
+             `pwv config <file-vừa-tải>`.\n   • Thùng rác của dịch vụ đồng bộ (nếu file bị xoá).\n   \
+             • Một máy tính / điện thoại khác còn mở được kho.\n   • Nếu thư mục sao lưu chưa đồng bộ \
+             xong về máy này, đợi rồi chạy lại `pwv recover`."
+        }
+        CoreError::OlderPasswordBackups => {
+            "Dựng lại từ các bản đó sẽ đưa kho về master password CŨ và mất mọi thay đổi sau lần đổi \
+             mật khẩu. Hãy chạy lại `pwv recover` với master password HIỆN TẠI."
         }
         _ => return None,
     })
@@ -1316,8 +1750,20 @@ fn core_err(e: CoreError) -> anyhow::Error {
 // ---------------------------------------------------------------------------
 // Tìm mục
 
+/// Mục được tìm thấy bằng cách nào.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Match {
+    /// Tiền tố ID (≥ 4 ký tự), đúng một mục.
+    Id,
+    /// Tiêu đề trùng khớp (không phân biệt hoa thường).
+    Title,
+    /// Chỉ khớp MỘT PHẦN (một đoạn của tiêu đề, username, URL hay tag): dễ trúng nhầm mục khác,
+    /// ví dụ `pwv edit vcb -g` trúng một mục có "vcb" trong username.
+    Partial,
+}
+
 enum Found<'a> {
-    One(&'a Entry),
+    One(&'a Entry, Match),
     None,
     Many(Vec<&'a Entry>),
 }
@@ -1331,7 +1777,7 @@ fn find_target<'a>(entries: &'a [Entry], target: &str) -> Found<'a> {
             .filter(|e| e.id.starts_with(target))
             .collect();
         if by_id.len() == 1 {
-            return Found::One(by_id[0]);
+            return Found::One(by_id[0], Match::Id);
         }
     }
     let mut found: Vec<&Entry> = entries.iter().filter(|e| e.matches(target)).collect();
@@ -1346,13 +1792,49 @@ fn find_target<'a>(entries: &'a [Entry], target: &str) -> Found<'a> {
         .filter(|e| e.title.to_lowercase() == target.to_lowercase())
         .collect();
     if exact.len() == 1 {
-        return Found::One(exact[0]);
+        return Found::One(exact[0], Match::Title);
     }
     match found.len() {
         0 => Found::None,
-        1 => Found::One(found[0]),
+        1 => Found::One(found[0], Match::Partial),
         _ => Found::Many(found),
     }
+}
+
+/// "Gmail công việc (bbbb2222)".
+fn entry_label(e: &Entry) -> String {
+    format!("{} ({})", e.title, short_id(e))
+}
+
+fn partial_match_note(target: &str, e: &Entry) -> String {
+    format!(
+        "Lưu ý: \"{target}\" không phải ID hay tên đầy đủ — nó chỉ khớp MỘT PHẦN với \"{}\" (username: \
+         {}, trang web: {}).",
+        e.title,
+        if e.username.is_empty() { "—" } else { &e.username },
+        e.urls.first().map(String::as_str).unwrap_or("—")
+    )
+}
+
+fn partial_refusal(target: &str) -> String {
+    format!(
+        "\"{target}\" chỉ khớp một phần với tên mục nên cần bạn xác nhận trực tiếp ở cửa sổ dòng \
+         lệnh — hoặc dùng ID (xem `pwv list`) hay tên đầy đủ của mục. Chưa thay đổi gì."
+    )
+}
+
+/// Xác nhận một thao tác sửa trên mục `e` (đã in tên mục ở trên). `yes` (cờ `-y`, hoặc lệnh không
+/// có câu hỏi riêng) bỏ qua câu hỏi — TRỪ KHI mục chỉ khớp một phần: khi đó luôn phải hỏi trực
+/// tiếp người dùng.
+fn confirm_pick(target: &str, e: &Entry, m: Match, yes: bool, question: &str) -> Result<bool> {
+    if m == Match::Partial {
+        eprintln!("{}", partial_match_note(target, e));
+        return confirm_required(question, &partial_refusal(target));
+    }
+    if yes {
+        return Ok(true);
+    }
+    confirm(question)
 }
 
 fn print_ambiguous(found: &[&Entry]) {
@@ -1363,9 +1845,9 @@ fn print_ambiguous(found: &[&Entry]) {
 }
 
 /// Tìm trong các mục đang dùng.
-fn resolve<'a>(v: &'a Vault, target: &str) -> Result<&'a Entry> {
+fn resolve<'a>(v: &'a Vault, target: &str) -> Result<(&'a Entry, Match)> {
     match find_target(v.entries(), target) {
-        Found::One(e) => Ok(e),
+        Found::One(e, m) => Ok((e, m)),
         Found::Many(m) => {
             print_ambiguous(&m);
             bail!("hãy chỉ rõ bằng ID")
@@ -1381,9 +1863,9 @@ fn resolve<'a>(v: &'a Vault, target: &str) -> Result<&'a Entry> {
 }
 
 /// Tìm trong thùng rác.
-fn resolve_trash<'a>(v: &'a Vault, target: &str) -> Result<&'a Entry> {
+fn resolve_trash<'a>(v: &'a Vault, target: &str) -> Result<(&'a Entry, Match)> {
     match find_target(v.trash(), target) {
-        Found::One(e) => Ok(e),
+        Found::One(e, m) => Ok((e, m)),
         Found::Many(m) => {
             print_ambiguous(&m);
             bail!("hãy chỉ rõ bằng ID")
@@ -1413,6 +1895,16 @@ fn format_utc(ms: i64) -> String {
     )
 }
 
+/// Như [`format_utc`], nhưng mốc ≤ 1000 ms (0 = "chưa biết", 1 = mục nhập từ CSV — xem
+/// `IMPORTED_AT` của lõi) hiện là "—" thay vì một ngày năm 1970 vô nghĩa.
+fn format_time(ms: i64) -> String {
+    if ms <= 1000 {
+        "—".to_string()
+    } else {
+        format_utc(ms)
+    }
+}
+
 /// Số ngày kể từ 1970-01-01 → (năm, tháng, ngày) theo lịch Gregory (thuật toán của H. Hinnant).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -1431,6 +1923,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 // Nhập liệu
 
 fn prompt_line(msg: &str) -> Result<String> {
+    // Chữ còn sót trong bộ đệm bàn phím (ví dụ phần thừa của một lần dán) không được tự trả lời
+    // câu hỏi này.
+    discard_pending_input();
     eprint!("{msg}");
     io::stderr().flush()?;
     let mut s = String::new();
@@ -1443,6 +1938,31 @@ fn confirm(msg: &str) -> Result<bool> {
     Ok(is_yes(&a))
 }
 
+/// Câu hỏi có/không mà CHỈ người ngồi trước bàn phím được trả lời (không nhận câu trả lời qua
+/// đường ống / file, không bỏ qua được bằng `-y`). Không có cửa sổ dòng lệnh ⇒ dừng với `refusal`.
+fn confirm_required(question: &str, refusal: &str) -> Result<bool> {
+    let interactive = io::stdin().is_terminal();
+    if interactive {
+        discard_pending_input();
+        eprint!("{question} [y/N] ");
+        io::stderr().flush()?;
+    }
+    match ask_yes_no_from(&mut io::stdin().lock(), interactive)? {
+        Some(yes) => Ok(yes),
+        None => bail!("{refusal}"),
+    }
+}
+
+/// Đọc một câu trả lời có/không (mặc định: KHÔNG). `None` = không có người để hỏi.
+fn ask_yes_no_from(r: &mut impl BufRead, interactive: bool) -> io::Result<Option<bool>> {
+    if !interactive {
+        return Ok(None);
+    }
+    let mut a = String::new();
+    r.read_line(&mut a)?;
+    Ok(Some(is_yes(&a)))
+}
+
 fn is_yes(a: &str) -> bool {
     matches!(
         a.trim().to_lowercase().as_str(),
@@ -1450,37 +1970,156 @@ fn is_yes(a: &str) -> bool {
     )
 }
 
-/// Đọc ghi chú nhiều dòng cho tới một dòng trống hoặc hết dữ liệu (EOF).
-fn read_notes_from(r: &mut impl BufRead) -> io::Result<Zeroizing<String>> {
+/// Ghi chú kết thúc thế nào.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesEnd {
+    /// Một dòng chỉ có dấu chấm `.`.
+    Dot,
+    /// Hết dữ liệu (Ctrl+Z rồi Enter trên Windows, Ctrl+D trên máy khác, hoặc hết file).
+    Eof,
+}
+
+/// Đọc ghi chú nhiều dòng cho tới một dòng chỉ có `.` hoặc hết dữ liệu (EOF).
+///
+/// Dòng trống là MỘT PHẦN của ghi chú. (Trước đây ghi chú dừng ở dòng trống đầu tiên: khi dán mã
+/// khôi phục chia thành nhiều đoạn, phần sau dòng trống nằm lại trong bộ đệm bàn phím, bị lời nhắc
+/// mật khẩu ẩn đọc làm mật khẩu, còn phần sót lại thì shell chạy như một lệnh và lưu vào lịch sử.)
+/// Các dòng trống ở cuối được bỏ đi.
+fn read_notes_from(r: &mut impl BufRead) -> io::Result<(Zeroizing<String>, NotesEnd)> {
     let mut out = Zeroizing::new(String::with_capacity(4096));
     let mut line = Zeroizing::new(String::with_capacity(1024));
-    loop {
+    let mut first = true;
+    let end = loop {
         line.clear();
         if r.read_line(&mut line)? == 0 {
-            break;
+            break NotesEnd::Eof;
         }
         let l = line.trim_end_matches(['\n', '\r']);
-        if l.trim().is_empty() {
-            break;
+        if l.trim() == "." {
+            break NotesEnd::Dot;
         }
-        if !out.is_empty() {
+        if !first {
             out.push('\n');
         }
+        first = false;
         out.push_str(l);
+    };
+    // Bỏ các dòng trống ở cuối (giữ nguyên dòng cuối có chữ, kể cả khoảng trắng của nó).
+    let (mut keep, mut pos) = (0, 0);
+    for l in out.split('\n') {
+        if !l.trim().is_empty() {
+            keep = pos + l.len();
+        }
+        pos += l.len() + 1;
     }
-    Ok(out)
+    out.truncate(keep);
+    Ok((out, end))
+}
+
+fn notes_prompt_text() -> String {
+    format!(
+        "Nhập ghi chú (nhiều dòng, được có dòng trống). Kết thúc bằng một dòng chỉ có dấu chấm `.` \
+         rồi Enter, hoặc {}:",
+        if cfg!(windows) {
+            "Ctrl+Z rồi Enter"
+        } else {
+            "Ctrl+D"
+        }
+    )
 }
 
 fn prompt_notes() -> Result<Zeroizing<String>> {
-    eprintln!(
-        "Nhập ghi chú (nhiều dòng). Kết thúc bằng một dòng trống{}:",
-        if cfg!(windows) {
-            " hoặc Ctrl+Z rồi Enter"
-        } else {
-            " hoặc Ctrl+D"
+    discard_pending_input();
+    eprintln!("{}", notes_prompt_text());
+    let (notes, _) = read_notes_from(&mut io::stdin().lock())?;
+    // Những gì còn sót sau dấu `.` (phần thừa của một lần dán) không được rơi vào shell khi pwv
+    // thoát — shell sẽ chạy chúng như lệnh và lưu vào lịch sử.
+    discard_pending_input();
+    Ok(notes)
+}
+
+/// Hỏi một bí mật, ẩn khi gõ. Trước đó xả bộ đệm bàn phím: chữ còn sót lại (phần thừa của một lần
+/// dán) không được thành mật khẩu.
+fn prompt_hidden(msg: &str) -> Result<Zeroizing<String>> {
+    discard_pending_input();
+    Ok(Zeroizing::new(rpassword::prompt_password(msg)?))
+}
+
+/// Xả những gì đang chờ trong bộ đệm bàn phím của cửa sổ dòng lệnh (chưa được chương trình đọc).
+fn discard_pending_input() {
+    term::flush_input();
+}
+
+/// Unix: `tcflush(TCIFLUSH)` trên `/dev/tty` — đúng thiết bị mà `rpassword` đọc mật khẩu.
+/// Khai báo trực tiếp hàm của thư viện C (đã được link sẵn) để không phải thêm crate `libc`.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+mod term {
+    use std::ffi::c_int;
+    use std::os::fd::AsRawFd;
+
+    extern "C" {
+        fn tcflush(fd: c_int, queue_selector: c_int) -> c_int;
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const TCIFLUSH: c_int = 0;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const TCIFLUSH: c_int = 1;
+
+    pub fn flush_input() {
+        // Không có terminal điều khiển (chạy từ script, dịch vụ) ⇒ không có gì để xả.
+        if let Ok(tty) = std::fs::File::open("/dev/tty") {
+            // SAFETY: fd hợp lệ trong suốt lời gọi (`tty` còn sống); tcflush không giữ con trỏ nào.
+            unsafe {
+                tcflush(tty.as_raw_fd(), TCIFLUSH);
+            }
         }
-    );
-    Ok(read_notes_from(&mut io::stdin().lock())?)
+    }
+}
+
+/// Windows: `FlushConsoleInputBuffer` trên `CONIN$` — bộ đệm bàn phím của cửa sổ console, nơi
+/// `rpassword` đọc mật khẩu (kể cả khi stdin bị chuyển hướng).
+#[cfg(windows)]
+mod term {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::System::Console::FlushConsoleInputBuffer;
+
+    pub fn flush_input() {
+        // Cần quyền ghi trên handle bộ đệm nhập của console.
+        if let Ok(con) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("CONIN$")
+        {
+            // SAFETY: handle hợp lệ trong suốt lời gọi (`con` còn sống).
+            unsafe {
+                FlushConsoleInputBuffer(con.as_raw_handle() as _);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)))]
+mod term {
+    pub fn flush_input() {}
 }
 
 fn notes_display(notes: &str, reveal: bool) -> String {
@@ -1495,9 +2134,8 @@ fn notes_display(notes: &str, reveal: bool) -> String {
 /// Hỏi secret 2FA (ẩn khi gõ) cho tới khi hợp lệ. Để trống = bỏ qua.
 fn prompt_totp() -> Result<Option<Zeroizing<String>>> {
     loop {
-        let s = Zeroizing::new(rpassword::prompt_password(
-            "Secret 2FA (otpauth://... hoặc base32, ẩn khi gõ; Enter để bỏ qua): ",
-        )?);
+        let s =
+            prompt_hidden("Secret 2FA (otpauth://... hoặc base32, ẩn khi gõ; Enter để bỏ qua): ")?;
         if s.trim().is_empty() {
             return Ok(None);
         }
@@ -1517,7 +2155,7 @@ fn prompt_totp() -> Result<Option<Zeroizing<String>>> {
 /// Hỏi master password mới 2 lần; bắt buộc đạt chính sách `check_master_password`.
 fn prompt_new_master(msg: &str) -> Result<Zeroizing<String>> {
     loop {
-        let a = Zeroizing::new(rpassword::prompt_password(msg)?);
+        let a = prompt_hidden(msg)?;
         if a.is_empty() {
             bail!("không được để trống");
         }
@@ -1529,7 +2167,7 @@ fn prompt_new_master(msg: &str) -> Result<Zeroizing<String>> {
             );
             continue;
         }
-        let b = Zeroizing::new(rpassword::prompt_password("Nhập lại: ")?);
+        let b = prompt_hidden("Nhập lại: ")?;
         if *a != *b {
             eprintln!("Hai lần nhập không khớp, thử lại.");
             continue;
@@ -1541,11 +2179,11 @@ fn prompt_new_master(msg: &str) -> Result<Zeroizing<String>> {
 /// Nhập mật khẩu tài khoản 2 lần (cảnh báo nếu yếu). Để trống = `None`.
 fn prompt_new_secret(msg: &str) -> Result<Option<Zeroizing<String>>> {
     loop {
-        let a = Zeroizing::new(rpassword::prompt_password(msg)?);
+        let a = prompt_hidden(msg)?;
         if a.is_empty() {
             return Ok(None);
         }
-        let b = Zeroizing::new(rpassword::prompt_password("Nhập lại: ")?);
+        let b = prompt_hidden("Nhập lại: ")?;
         if *a != *b {
             eprintln!("Hai lần nhập không khớp, thử lại.");
             continue;
@@ -1560,6 +2198,30 @@ fn prompt_new_secret(msg: &str) -> Result<Option<Zeroizing<String>>> {
         }
         return Ok(Some(a));
     }
+}
+
+/// Mật khẩu cho mục mới: nhập (2 lần), hoặc — chỉ khi chủ kho trả lời rõ "có" — tạo ngẫu nhiên.
+/// Trả về (mật khẩu, có phải vừa tự tạo không).
+fn prompt_account_password(gen: &GenArgs) -> Result<(Zeroizing<String>, bool)> {
+    loop {
+        if let Some(p) = prompt_new_secret("Mật khẩu của tài khoản (ẩn khi gõ): ")? {
+            return Ok((p, false));
+        }
+        // Trước đây để trống = lặng lẽ tạo mật khẩu ngẫu nhiên: một dòng trống còn sót lại từ lần
+        // dán ghi chú là đủ để mật khẩu thật bị thay bằng một mật khẩu không ai biết.
+        if confirm("Để trống. Tạo mật khẩu ngẫu nhiên?")? {
+            let (pw, bits) = gen.generate()?;
+            eprintln!("{}", generated_line(bits));
+            return Ok((pw, true));
+        }
+        eprintln!(
+            "Hãy nhập mật khẩu của tài khoản (hoặc để trống rồi trả lời y để tạo ngẫu nhiên)."
+        );
+    }
+}
+
+fn generated_line(bits: f64) -> String {
+    format!("Đã tạo mật khẩu ngẫu nhiên (≈ {bits:.0} bit) — đây là mật khẩu sẽ được lưu.")
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1724,7 +2386,7 @@ mod tests {
 
     fn one<'a>(f: Found<'a>) -> &'a Entry {
         match f {
-            Found::One(e) => e,
+            Found::One(e, _) => e,
             Found::None => panic!("không thấy"),
             Found::Many(m) => panic!("nhiều mục: {}", m.len()),
         }
@@ -1768,27 +2430,164 @@ mod tests {
         assert_eq!(format_utc(4_102_444_800_000), "2100-01-01 00:00:00 UTC");
     }
 
+    fn notes(input: &str) -> (String, NotesEnd, String) {
+        let mut r = io::Cursor::new(input.to_string());
+        let (n, end) = read_notes_from(&mut r).unwrap();
+        let mut rest = String::new();
+        io::Read::read_to_string(&mut r, &mut rest).unwrap();
+        (n.to_string(), end, rest)
+    }
+
     #[test]
-    fn notes_reader_stops_at_blank_line_or_eof() {
-        let mut r = io::Cursor::new("mã khôi phục: 1234\r\ndòng 2\n\nkhông đọc tới đây\n");
+    fn notes_reader_keeps_blank_lines_and_stops_only_at_dot_or_eof() {
+        // Đúng đoạn dán của reviewer: dòng trống là một phần của ghi chú.
+        let (n, end, rest) =
+            notes("Recovery codes:\n\ncode-1111\ncode-2222\n\ncode-3333\n.\nsau dấu chấm\n");
+        assert_eq!(n, "Recovery codes:\n\ncode-1111\ncode-2222\n\ncode-3333");
+        assert_eq!(end, NotesEnd::Dot);
+        assert_eq!(rest, "sau dấu chấm\n", "không đọc quá dòng `.`");
+        // Hết dữ liệu (Ctrl+D / Ctrl+Z) cũng kết thúc; CRLF của Windows được bỏ.
+        let (n, end, _) = notes("mã khôi phục: 1234\r\n\r\ndòng 3\r\n");
+        assert_eq!(n, "mã khôi phục: 1234\n\ndòng 3");
+        assert_eq!(end, NotesEnd::Eof);
+        let (n, end, _) = notes("chỉ một dòng, không xuống dòng");
         assert_eq!(
-            read_notes_from(&mut r).unwrap().as_str(),
-            "mã khôi phục: 1234\ndòng 2"
+            (n.as_str(), end),
+            ("chỉ một dòng, không xuống dòng", NotesEnd::Eof)
         );
-        let mut r = io::Cursor::new("chỉ một dòng, không xuống dòng");
+        // `.` ngay dòng đầu (kể cả có khoảng trắng / CRLF) = ghi chú rỗng.
+        assert_eq!(notes(" . \r\nkhông đọc\n").0, "");
+        assert_eq!(notes("").0, "");
+        assert_eq!(notes("\n\n\n").0, "");
+        // Dòng trống ở cuối bị bỏ; thụt lề và dòng trống ở giữa giữ nguyên; dòng có dấu chấm
+        // cùng chữ khác không phải dòng kết thúc.
+        let (n, _, _) = notes("  thụt lề\n   \n..\nhết.\n\n  \n.\n");
+        assert_eq!(n, "  thụt lề\n   \n..\nhết.");
+        // Khoảng trắng cuối dòng có chữ cuối cùng được giữ.
+        assert_eq!(notes("a  \n\n.\n").0, "a  ");
+    }
+
+    #[test]
+    fn notes_prompt_explains_how_to_finish() {
+        let t = notes_prompt_text();
+        assert!(t.contains("dòng trống") && t.contains("dấu chấm `.`"));
+        assert!(t.contains(if cfg!(windows) {
+            "Ctrl+Z rồi Enter"
+        } else {
+            "Ctrl+D"
+        }));
+    }
+
+    #[test]
+    fn yes_no_needs_a_person_and_defaults_to_no() {
+        let ask = |s: &str, i| ask_yes_no_from(&mut io::Cursor::new(s.to_string()), i).unwrap();
         assert_eq!(
-            read_notes_from(&mut r).unwrap().as_str(),
-            "chỉ một dòng, không xuống dòng"
+            ask("y\n", false),
+            None,
+            "không có cửa sổ dòng lệnh: không được tự trả lời"
         );
-        let mut r = io::Cursor::new("\nbị bỏ qua");
-        assert_eq!(read_notes_from(&mut r).unwrap().as_str(), "");
-        let mut r = io::Cursor::new("");
-        assert_eq!(read_notes_from(&mut r).unwrap().as_str(), "");
-        let mut r = io::Cursor::new("  thụt lề giữ nguyên\n   \nhết");
-        assert_eq!(
-            read_notes_from(&mut r).unwrap().as_str(),
-            "  thụt lề giữ nguyên"
+        assert_eq!(ask("y\n", true), Some(true));
+        assert_eq!(ask("có\r\n", true), Some(true));
+        assert_eq!(ask("\n", true), Some(false));
+        assert_eq!(ask("", true), Some(false), "hết dữ liệu = không");
+        assert_eq!(ask("n\n", true), Some(false));
+        assert_eq!(ask("yes please\n", true), Some(false));
+    }
+
+    #[test]
+    fn mutating_commands_are_classified() {
+        let m = |args: &[&str]| {
+            let cli =
+                Cli::try_parse_from(std::iter::once("pwv").chain(args.iter().copied())).unwrap();
+            is_mutating(&cli.cmd)
+        };
+        for ro in [
+            &["list"][..],
+            &["ls", "x"],
+            &["show", "x"],
+            &["copy", "x"],
+            &["totp", "x"],
+            &["health", "--offline"],
+            &["backups"],
+            &["trash"],
+            &["trash", "list"],
+        ] {
+            assert!(!m(ro), "{ro:?}");
+        }
+        for rw in [
+            &["add", "x"][..],
+            &["edit", "x", "-g"],
+            &["delete", "x"],
+            &["trash", "restore", "x"],
+            &["trash", "purge", "x"],
+            &["trash", "empty"],
+            &["passwd"],
+            &["import", "a.csv"],
+            &["sync"],
+            &["move", "b.pwv"],
+            &["restore", "--from", "1", "--all"],
+        ] {
+            assert!(m(rw), "{rw:?}");
+        }
+    }
+
+    #[test]
+    fn copy_flag_is_accepted_by_add_and_edit() {
+        let cli = Cli::try_parse_from(["pwv", "add", "Bank", "-g", "-c"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Add { generate: true, gen, .. } if gen.copy));
+        let cli = Cli::try_parse_from(["pwv", "edit", "bank", "-g", "--copy"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Edit { generate: true, gen, .. } if gen.copy));
+        assert!(generated_line(80.0).contains("≈ 80 bit"));
+    }
+
+    #[test]
+    fn match_kind_tells_partial_matches_apart() {
+        let mut vcb = entry("aaaa1111-x", "Vietcombank", "an");
+        vcb.urls = vec!["https://vcbdigibank.vietcombank.com.vn".into()];
+        let list = vec![vcb, entry("bbbb2222-x", "Gmail", "an.vcb@gmail.com")];
+        assert!(matches!(
+            find_target(&list, "aaaa"),
+            Found::One(_, Match::Id)
+        ));
+        assert!(matches!(
+            find_target(&list, "GMAIL"),
+            Found::One(_, Match::Title)
+        ));
+        // "digibank" chỉ khớp URL của một mục.
+        assert!(
+            matches!(find_target(&list, "digibank"), Found::One(e, Match::Partial) if e.title == "Vietcombank")
         );
+        assert!(matches!(find_target(&list, "vcb"), Found::Many(_)));
+        let note = partial_match_note("digibank", &list[0]);
+        assert!(
+            note.contains("MỘT PHẦN")
+                && note.contains("Vietcombank")
+                && note.contains("vcbdigibank")
+        );
+        assert!(partial_match_note("x", &entry("cccc3333", "X", ""))
+            .contains("username: —, trang web: —"));
+        assert!(partial_refusal("digibank").contains("pwv list"));
+        assert_eq!(entry_label(&list[1]), "Gmail (bbbb2222)");
+    }
+
+    #[test]
+    fn times_up_to_one_second_are_unknown() {
+        assert_eq!(format_time(0), "—");
+        assert_eq!(format_time(1), "—", "IMPORTED_AT của mục nhập từ CSV");
+        assert_eq!(format_time(1000), "—");
+        assert_eq!(format_time(-5), "—");
+        assert_eq!(format_time(1001), "1970-01-01 00:00:01 UTC");
+        assert_eq!(format_time(1_700_000_000_123), "2023-11-14 22:13:20 UTC");
+    }
+
+    #[test]
+    fn trash_empty_reports_items_not_confirmed() {
+        let l = trash_empty_lines(3, 3, 0);
+        assert_eq!(l, vec!["Đã xoá vĩnh viễn 3 mục.".to_string()]);
+        let l = trash_empty_lines(3, 2, 1).join("\n");
+        assert!(l.contains("Đã xoá vĩnh viễn 2 mục."));
+        assert!(l.contains("1 mục trong danh sách đã không còn"));
+        assert!(l.contains("vẫn còn 1 mục KHÔNG có trong danh sách") && l.contains("KHÔNG bị xoá"));
     }
 
     #[test]
@@ -1827,12 +2626,24 @@ mod tests {
         assert!(l[0].contains("+2 mới, 1 cập nhật, 0 xoá"));
         assert!(l[1].contains("mật khẩu mới"));
         assert!(l[2].contains("vault.pwv.backups"));
+        let r = SaveReport {
+            old_key_archived: true,
+            unverified: true,
+            ..Default::default()
+        };
+        let l = save_report_lines(&r, p).join("\n");
+        assert!(l.contains("master password CŨ") && l.contains("KHÔNG được gộp"));
+        assert!(l.contains("ai đó biết mật khẩu cũ") && l.contains("pwv backups"));
+        assert!(l.contains("pwv restore --from"));
+        assert!(
+            l.contains("Thay đổi KHÔNG bị huỷ") && l.contains("pwv sync") && l.contains("lặp lại")
+        );
     }
 
     #[test]
     fn sync_report_messages() {
         let p = Path::new("b");
-        let l = sync_report_lines(&SyncReport::default(), p);
+        let l = sync_report_lines(&SyncReport::default(), p, true);
         assert!(l.last().unwrap().contains("không cần ghi lại"));
         let r = SyncReport {
             merged_remote: None,
@@ -1858,11 +2669,75 @@ mod tests {
             backup_failed: false,
             ..Default::default()
         };
-        let l = sync_report_lines(&r, p).join("\n");
+        let l = sync_report_lines(&r, p, true).join("\n");
         assert!(l.contains("vault (1).pwv") && l.contains("đã cất vào thư mục sao lưu"));
         assert!(l.contains("vault (2).pwv: +0 mới, 0 cập nhật, 0 xoá — nhưng chưa cất được"));
         assert!(l.contains("Không gộp được vault (3).pwv") && l.contains("để nguyên tại chỗ"));
         assert!(l.contains("Đã ghi lại file kho."));
+        assert!(!l.contains("master password CŨ"));
+    }
+
+    #[test]
+    fn sync_report_words_old_password_copies_correctly() {
+        let p = Path::new("b");
+        let r = SyncReport {
+            conflicts: vec![
+                ConflictOutcome {
+                    path: PathBuf::from("vault (4).pwv"),
+                    result: Err(CoreError::RetiredKeyCopy),
+                    archived: true,
+                },
+                ConflictOutcome {
+                    path: PathBuf::from("vault (5).pwv"),
+                    result: Err(CoreError::RetiredKeyCopy),
+                    archived: false,
+                },
+                ConflictOutcome {
+                    path: PathBuf::from("vault (6).pwv"),
+                    result: Err(CoreError::CopyUsesOtherPassword),
+                    archived: false,
+                },
+            ],
+            // (4) + file kho chính
+            old_key_archived: 2,
+            wrote: true,
+            unverified: true,
+            ..Default::default()
+        };
+        let lines = sync_report_lines(&r, p, true);
+        let l = lines.join("\n");
+        let line_of = |name: &str| lines.iter().find(|x| x.contains(name)).unwrap().clone();
+        let l4 = line_of("vault (4).pwv");
+        assert!(l4.contains("master password CŨ") && l4.contains("đã cất vào thư mục sao lưu"));
+        assert!(
+            !l4.contains("để nguyên"),
+            "bản đã cất không được gọi là \"để nguyên tại chỗ\""
+        );
+        let l5 = line_of("vault (5).pwv");
+        assert!(l5.contains("chưa cất được") && l5.contains("để nguyên tại chỗ"));
+        assert!(!l5.contains("đã cất vào"), "{l5}");
+        let l6 = line_of("vault (6).pwv");
+        assert!(l6.contains("mật khẩu chính khác") && l6.contains("để nguyên tại chỗ"));
+        // File kho chính cũng là bản khoá cũ ⇒ có dòng riêng, và lời giải thích chỉ in một lần.
+        assert!(l.contains("File kho trên đĩa được ghi bằng master password CŨ"));
+        assert_eq!(l.matches("Nghĩa là:").count(), 1);
+        assert!(l.contains("pwv backups") && l.contains("pwv restore --from"));
+        assert!(l.contains("đọc lại không kiểm tra được") && l.contains("chưa kiểm tra lại được"));
+        // Chỉ bản xung đột là bản khoá cũ ⇒ không nói file kho chính là bản khoá cũ.
+        let r = SyncReport {
+            conflicts: vec![ConflictOutcome {
+                path: PathBuf::from("vault (4).pwv"),
+                result: Err(CoreError::RetiredKeyCopy),
+                archived: true,
+            }],
+            old_key_archived: 1,
+            ..Default::default()
+        };
+        let l = sync_report_lines(&r, p, true).join("\n");
+        assert!(!l.contains("File kho trên đĩa được ghi"));
+        assert!(l.contains("Nghĩa là:"));
+        // Không chi tiết: không có dòng "không có thay đổi" / "không cần ghi lại".
+        assert!(sync_report_lines(&SyncReport::default(), p, false).is_empty());
     }
 
     #[test]
@@ -1872,14 +2747,35 @@ mod tests {
             backups_skipped: 2,
             save: SaveReport::default(),
         };
-        let l = passwd_report_lines(&r, Path::new("x.backups")).join("\n");
+        let l = passwd_report_lines(&r, 0, &[], Path::new("x.backups")).join("\n");
         assert!(l.contains("đã mã hoá lại 7 bản"));
-        assert!(l.contains("2 bản KHÔNG mã hoá lại được"));
+        assert!(
+            l.contains("2 bản để nguyên")
+                && l.contains("CŨ HƠN nữa")
+                && l.contains("không bao giờ được tự gộp")
+        );
         assert!(l.contains("mật khẩu CŨ"));
         assert!(l.contains("điện thoại"));
         assert!(l.contains("ngân hàng, email"));
-        let l = passwd_report_lines(&PasswordChangeReport::default(), Path::new("x")).join("\n");
-        assert!(!l.contains("KHÔNG mã hoá lại được"));
+        assert!(!l.contains("CHƯA đọc lại") && !l.contains("Cạnh file kho"));
+        let l = passwd_report_lines(&PasswordChangeReport::default(), 0, &[], Path::new("x"))
+            .join("\n");
+        assert!(!l.contains("để nguyên"));
+        // Ghi chưa xác minh, bản xung đột vừa cất, bản còn sót cạnh kho.
+        let r = PasswordChangeReport {
+            save: SaveReport {
+                unverified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let left = [PathBuf::from("d/vault (1).pwv")];
+        let l = passwd_report_lines(&r, 2, &left, Path::new("x")).join("\n");
+        assert!(l.contains("CHƯA đọc lại kiểm tra được") && l.contains("pwv sync"));
+        assert!(l.contains("2 bản xung đột ghi bằng mật khẩu cũ đã được cất"));
+        assert!(
+            l.contains("vẫn còn 1 bản") && l.contains("vault (1).pwv") && l.contains("mật khẩu CŨ")
+        );
     }
 
     #[test]
@@ -1901,9 +2797,14 @@ mod tests {
             ..Default::default()
         };
         let l = import_summary_lines(&res, 5).join("\n");
-        assert!(l.contains("Đã nhập 5 mục, bỏ qua 3 dòng trùng khớp hoàn toàn, 1 dòng trống"));
+        assert!(l.contains("Đã nhập 5 mục, bỏ qua 3 dòng trùng khớp hoàn toàn (với mục đã có"));
+        assert!(l.contains(", 1 dòng trống."));
         assert!(l.contains("có vẻ trùng — hãy rà lại") && l.contains("• Gmail (2)"));
         assert!(l.contains("mã 2FA không đọc được, đã chép vào ghi chú") && l.contains("• Bank"));
+        assert!(l.contains("không đè lên những gì bạn đã sửa"));
+        assert!(!import_summary_lines(&res, 0)
+            .join("\n")
+            .contains("không đè lên"));
     }
 
     #[test]
@@ -1928,6 +2829,19 @@ mod tests {
         let msg = format!("{:#}", core_err(CoreError::VaultFileDamaged));
         assert!(msg.contains("pwv recover"));
         assert!(advice(&CoreError::SamePath).is_none());
+        // Không còn hứa "đã hoàn tác" — lần ghi đó (tạo lại file kho) không hoàn tác gì.
+        let w = advice(&CoreError::WriteVerifyFailed).unwrap();
+        assert!(
+            !w.contains("hoàn tác")
+                && w.contains("pwv recover")
+                && w.contains("Không có gì bị huỷ")
+        );
+        let n = advice(&CoreError::NoUsableBackup).unwrap();
+        assert!(n.contains("Lịch sử phiên bản") && n.contains("máy tính / điện thoại khác"));
+        assert!(advice(&CoreError::OlderPasswordBackups)
+            .unwrap()
+            .contains("HIỆN TẠI"));
+        assert!(OLDER_PASSWORD_RECOVERY_WARNING.contains("MỌI thứ đã thêm/sửa sau lần đổi"));
     }
 
     #[test]
@@ -1949,6 +2863,27 @@ mod tests {
             unknown_key: true,
         });
         assert!(!w.contains("CŨ HƠN") && w.contains("KHÔNG nối tiếp"));
+        // Chỉ mật khẩu cũ hơn (nội dung không cũ hơn): không được nói "file CŨ HƠN bản đã thấy" với
+        // hai mốc thời gian mâu thuẫn nhau.
+        let w = rollback_warning(&Rollback {
+            seen_modified_at: 1_700_000_000_000,
+            file_modified_at: 1_700_000_500_000,
+            older_password: true,
+            unknown_key: false,
+        });
+        assert!(!w.contains("CŨ HƠN bản") && w.contains("master password CŨ hơn lần đổi"));
+        assert!(w.contains("pwv backups"));
+        // Mốc 0 (chưa biết) không hiện thành năm 1970.
+        let w = rollback_warning(&Rollback {
+            seen_modified_at: 1_700_000_000_000,
+            file_modified_at: 0,
+            older_password: false,
+            unknown_key: false,
+        });
+        assert!(w.contains("chỉ tới —") && !w.contains("1970"));
+        assert!(
+            ROLLBACK_REFUSAL.contains("pwv backups") && ROLLBACK_REFUSAL.contains("pwv restore")
+        );
     }
 
     #[test]
@@ -1991,12 +2926,38 @@ mod tests {
         assert!(pick_backup(&list, "0").is_err());
         assert!(pick_backup(&list, "3").is_err());
         assert!(pick_backup(&list, "khong-co.pwv").is_err());
-        let line = backup_line(1, &list[1], &Ok((4, 1)));
+        let count = |retired| {
+            Ok(BackupCount {
+                entries: 4,
+                trash: 1,
+                retired,
+            })
+        };
+        let line = backup_line(1, &list[1], &count(false));
         assert!(
             line.contains("bản xung đột đã gộp") && line.contains("4 mục (+1 trong thùng rác)")
         );
-        assert!(line.contains("1970-01-01 00:00:00 UTC"));
+        assert!(
+            line.contains("  —  "),
+            "mốc 100 ms không được hiện thành năm 1970: {line}"
+        );
+        assert!(!line.contains('⚠'));
         assert!(backup_line(2, &list[0], &Err("hỏng".into())).contains("không đọc được: hỏng"));
+        // Bản chỉ mở được bằng khoá cũ, và bản `oldkey-…` (đã mã hoá lại nhưng nội dung từ khoá cũ).
+        assert!(backup_line(1, &list[0], &count(true))
+            .contains("⚠ chỉ mở được bằng master password CŨ"));
+        let oldkey = BackupFile {
+            path: PathBuf::from("d/oldkey-300-vault.pwv"),
+            kind: BackupKind::OldKey,
+            timestamp: 1_700_000_000_000,
+        };
+        let line = backup_line(3, &oldkey, &count(false));
+        assert!(line.contains("ghi bằng master password cũ (chưa gộp)") && line.contains('⚠'));
+        assert!(line.contains("2023-11-14"));
+        assert!(backup_from_old_password(BackupKind::OldKey, false));
+        assert!(backup_from_old_password(BackupKind::Auto, true));
+        assert!(!backup_from_old_password(BackupKind::Merged, false));
+        assert!(OLD_PASSWORD_RESTORE_WARNING.contains("master password CŨ"));
     }
 
     #[test]

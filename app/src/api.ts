@@ -5,6 +5,7 @@ import type {
   BackupEntryView,
   BackupView,
   CopyField,
+  EmptyTrashView,
   EntryDetail,
   EntryInput,
   EntrySummary,
@@ -53,6 +54,7 @@ const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recove
 
 let sessionLostHandler: ((e: AppError) => void) | null = null;
 let diskProblemHandler: ((e: AppError) => void) | null = null;
+let writeResultHandler: ((r: SyncResult) => void) | null = null;
 
 /** Đăng ký việc cần làm khi BẤT KỲ lệnh nào báo kho đã khoá / mật khẩu đã đổi ở máy khác. */
 export function onSessionLost(h: ((e: AppError) => void) | null) {
@@ -61,6 +63,18 @@ export function onSessionLost(h: ((e: AppError) => void) | null) {
 /** Đăng ký việc cần làm khi một lệnh báo file kho trên đĩa có vấn đề. */
 export function onDiskProblem(h: ((e: AppError) => void) | null) {
   diskProblemHandler = h;
+}
+/**
+ * Đăng ký việc cần làm với kết quả ghi của "lưu mục" / "xoá mục" (bản ghi bằng mật khẩu cũ vừa được
+ * cất, ghi chưa kiểm tra lại được…). Các lệnh ghi khác không trả kết quả này: backend giữ lại và trả
+ * về ở lần đồng bộ tới.
+ */
+export function onWriteResult(h: ((r: SyncResult) => void) | null) {
+  writeResultHandler = h;
+}
+function reportWrite<T>(r: T, sync: SyncResult): T {
+  writeResultHandler?.(sync);
+  return r;
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -85,7 +99,8 @@ export const api = {
   pageLoaded: () => call<void>("page_loaded"),
   createVault: (path: string, password: string) => call<void>("create_vault", { path, password }),
   unlock: (path: string, password: string) => call<UnlockInfo>("unlock", { path, password }),
-  recoverVault: (path: string, password: string) => call<RecoverInfo>("recover_vault", { path, password }),
+  /** `allowOlder`: chủ kho đã chọn rõ ràng khôi phục từ các bản sao lưu tạo trước lần đổi mật khẩu chính gần nhất. */
+  recoverVault: (path: string, password: string, allowOlder = false) => call<RecoverInfo>("recover_vault", { path, password, allowOlder }),
   acceptRollback: () => call<void>("accept_rollback"),
   lock: () => call<void>("lock"),
   setVaultPath: (path: string) => call<void>("set_vault_path", { path }),
@@ -98,14 +113,15 @@ export const api = {
   totp: (id: string) => call<TotpCode>("totp_code", { id }),
   copyField: (id: string, field: CopyField) => call<number>("copy_field", { id, field }),
   copyText: (text: string) => call<number>("copy_text", { text }),
-  save: (entry: EntryInput) => call<[string, SyncResult]>("save_entry", { entry }),
+  save: (entry: EntryInput) => call<[string, SyncResult]>("save_entry", { entry }).then((r) => reportWrite(r, r[1])),
   /** Chuyển vào thùng rác. */
-  remove: (id: string) => call<SyncResult>("delete_entry", { id }),
+  remove: (id: string) => call<SyncResult>("delete_entry", { id }).then((r) => reportWrite(r, r)),
   toggleFavorite: (id: string) => call<boolean>("toggle_favorite", { id }),
   listTrash: () => call<TrashItem[]>("list_trash"),
   restoreEntry: (id: string) => call<void>("restore_entry", { id }),
   purgeEntry: (id: string) => call<void>("purge_entry", { id }),
-  emptyTrash: () => call<number>("empty_trash"),
+  /** Xoá vĩnh viễn ĐÚNG các mục `ids` (những mục người dùng đã thấy khi xác nhận). */
+  emptyTrash: (ids: string[]) => call<EmptyTrashView>("empty_trash", { ids }),
   sync: () => call<SyncResult>("sync_now"),
   forceWrite: () => call<string | null>("force_write"),
   generate: (request: GenRequest) => call<Generated>("generate", { request }),

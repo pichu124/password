@@ -8,8 +8,20 @@
 //   ?note=…                 lý do khoá hiện ở màn hình mở khoá (status.lock_note)
 //   ?damaged                mở khoá báo file hỏng (khôi phục được từ bản sao lưu)
 //   ?oldformat              mở khoá báo định dạng mới hơn bản app
-//   ?rollback | ?rollback=pw   sau khi mở khoá: file kho cũ hơn bản từng thấy (=pw: kèm mật khẩu cũ)
+//   ?rollback | ?rollback=pw | ?rollback=key   sau khi mở khoá: file kho cũ hơn bản từng thấy (=pw: kèm mật khẩu
+//                           cũ; =key: kho KHÔNG nối tiếp từ kho máy này dùng lần trước — RollbackView.unknown_key)
 //   ?rescued                sau khi mở khoá: đã gộp lại thay đổi chưa lưu của phiên trước
+//   ?rescuekept             sau khi mở khoá: 1 bản cứu hộ chưa gộp được, vẫn được giữ lại (UnlockInfo.rescue_kept)
+//   ?oldkey                 lần đồng bộ đầu tiên (kể cả lúc mở khoá): đã cất 1 bản ghi bằng mật khẩu chính cũ
+//                           (SyncResult.old_key_archived + một dòng trong errors); danh sách sao lưu có thêm bản "oldkey"
+//   ?oldbackup              danh sách sao lưu có một bản tự động chỉ mở được bằng mật khẩu cũ (retired_key) và một bản "oldkey"
+//   ?unverified             lần lưu / xoá mục đầu tiên: đã ghi nhưng chưa kiểm tra lại được (SyncResult.unverified);
+//                           đổi mật khẩu chính cũng trả unverified = true
+//   ?recover=older          khôi phục từ sao lưu: lỗi older_password, trừ khi gọi lại với allowOlder = true
+//   ?recover=nobackup       khôi phục từ sao lưu: lỗi no_backup
+//   ?imported               mật khẩu cũ thứ hai của Gmail mang thời điểm 1 ms (giá trị nhập từ CSV) ⇒ phải hiện "—"
+//   ?trashrace              "dọn sạch thùng rác": trong lúc xác nhận, "máy khác" chuyển thêm một mục vào thùng rác
+//                           (mục đó không bị xoá ⇒ remaining = 1)
 //   ?problem=file_damaged|file_missing|different_vault|unsupported_version   vấn đề với file trên đĩa
 //   ?syncerr                đồng bộ trả về lỗi bản xung đột (lặp lại mỗi lần)
 //   ?backupfail             đồng bộ báo không tạo được bản sao lưu
@@ -57,6 +69,33 @@ let diskProblem: AppError | null = problemFromParam(params.get("problem"));
 let settings: Settings = { auto_lock_minutes: flag("autolock0") ? 0 : 5, clipboard_clear_secs: 20, check_updates: true };
 let modifiedAt = now - 2 * 3_600_000;
 let backupFailOnce = flag("backupfail");
+let oldKeyOnce = flag("oldkey") && params.get("oldkey") !== "done";
+let unverifiedOnce = flag("unverified");
+const OLDKEY_ERROR = "vault (1).pwv: bản này được ghi bằng mật khẩu chính CŨ nên không được tự gộp — đã cất vào thư mục sao lưu để bạn xem lại";
+/** Kết quả đồng bộ, kèm "bản ghi bằng mật khẩu cũ" ở lần đầu nếu có ?oldkey. */
+function syncResult(): SyncResult {
+  const r = noSync();
+  r.problem = diskProblem;
+  if (flag("syncerr")) r.errors = ["vault (conflicted copy 2026-11-19).pwv: sai mật khẩu chính hoặc file đã bị sửa đổi"];
+  if (oldKeyOnce) {
+    // Backend thật báo mỗi lần cất đúng một lần; ghi lên địa chỉ để lần nạp lại trang sau mở khoá không báo lại.
+    oldKeyOnce = false;
+    setUrlFlag("oldkey", true, "done");
+    r.old_key_archived = 1;
+    r.errors.push(OLDKEY_ERROR);
+    r.wrote = true;
+  }
+  return r;
+}
+/** Kết quả ghi của lưu / xoá mục, kèm "chưa kiểm tra lại được" ở lần đầu nếu có ?unverified. */
+function writeResult(): SyncResult {
+  const r = noSync();
+  if (unverifiedOnce) {
+    unverifiedOnce = false;
+    r.unverified = true;
+  }
+  return r;
+}
 let lastImport: string | null = null;
 
 function problemFromParam(p: string | null): AppError | null {
@@ -93,7 +132,7 @@ function mk(title: string, username: string, password: string, urls: string[], t
   return {
     id: crypto.randomUUID(), title, username, password, urls, tags, favorite, totp,
     notes: title === "Vietcombank" ? "Số tài khoản: 0123456789\nCâu hỏi bảo mật: tên trường cấp 1 → Lê Lợi" : title === "Zalo" ? "otpauth gốc: khong-phai-base32!" : "",
-    history: title === "Gmail" ? [{ password: "old-gmail-pass", replaced_at: now - 40 * day }, { password: "older-gmail-2019", replaced_at: now - 400 * day }] : [],
+    history: title === "Gmail" ? [{ password: "old-gmail-pass", replaced_at: now - 40 * day }, { password: "older-gmail-2019", replaced_at: flag("imported") ? 1 : now - 400 * day }] : [],
     created_at: now - ageDays * day, updated_at: now - ageDays * day, trashed_at: null,
   };
 }
@@ -145,7 +184,7 @@ function needUnlocked() {
   if (!unlocked) throw LOCKED;
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const noSync = (): SyncResult => ({ changed: false, added: 0, updated: 0, deleted: 0, conflicts_merged: 0, errors: [], password_changed_elsewhere: false, wrote: false, backup_failed: false, problem: null });
+const noSync = (): SyncResult => ({ changed: false, added: 0, updated: 0, deleted: 0, conflicts_merged: 0, errors: [], password_changed_elsewhere: false, wrote: false, backup_failed: false, old_key_archived: 0, unverified: false, problem: null });
 
 /** Ghi nhớ trạng thái mở/khoá lên địa chỉ để giữ được qua lần nạp lại trang. */
 function setUrlFlag(k: string, on: boolean, value = "") {
@@ -170,11 +209,16 @@ function lockMock(note: string | null = null) {
 }
 
 const backups: BackupView[] = [
-  { name: "vault-20261120-0915.pwv", kind: "auto", timestamp: now - 3 * 3_600_000, entries: 7 },
-  { name: "vault-20261118-2100.pwv", kind: "auto", timestamp: now - 2 * day, entries: 8 },
-  { name: "vault (conflicted copy).merged-20261110.pwv", kind: "merged", timestamp: now - 10 * day, entries: 9 },
-  { name: "vault.damaged-20261101.pwv", kind: "damaged", timestamp: now - 19 * day, entries: null },
+  { name: "vault-20261120-0915.pwv", kind: "auto", timestamp: now - 3 * 3_600_000, entries: 7, retired_key: false },
+  { name: "vault-20261118-2100.pwv", kind: "auto", timestamp: now - 2 * day, entries: 8, retired_key: false },
+  { name: "vault (conflicted copy).merged-20261110.pwv", kind: "merged", timestamp: now - 10 * day, entries: 9, retired_key: false },
+  { name: "vault.damaged-20261101.pwv", kind: "damaged", timestamp: now - 19 * day, entries: null, retired_key: false },
 ];
+// Bản "oldkey-…" do app cất (đã mã hoá lại bằng khoá hiện tại ⇒ retired_key = false, nhưng vẫn là nội dung ghi bằng mật khẩu cũ).
+if (flag("oldkey") || flag("oldbackup"))
+  backups.unshift({ name: `oldkey-${now - 60_000}-vault (1).pwv`, kind: "oldkey", timestamp: now - 60_000, entries: 7, retired_key: false });
+// Bản tự động chỉ mở được bằng khoá của mật khẩu chính cũ (ví dụ ai đó đặt vào thư mục sao lưu).
+if (flag("oldbackup")) backups.splice(2, 0, { name: "vault-20261119-0700.pwv", kind: "auto", timestamp: now - 1.5 * day, entries: 7, retired_key: true });
 
 function diff(name: string): BackupEntryView[] {
   if (name.includes("damaged")) throw err("file_damaged", "Bản sao lưu này bị hỏng, không đọc được");
@@ -242,17 +286,30 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       setUrlFlag("unlocked", true); setUrlFlag("note", false);
       const r = params.get("rollback");
       return {
-        rollback: r !== null ? { seen_modified_at: now - 1 * day, file_modified_at: now - 9 * day, older_password: r === "pw" } : null,
+        rollback:
+          r !== null
+            ? r === "key"
+              ? { seen_modified_at: now - 1 * day, file_modified_at: now - 1 * day + 60_000, older_password: false, unknown_key: true }
+              : { seen_modified_at: now - 1 * day, file_modified_at: now - 9 * day, older_password: r === "pw", unknown_key: false }
+            : null,
         rescued: flag("rescued") ? 2 : 0,
-        sync: { ...noSync(), problem: diskProblem, errors: flag("syncerr") ? ["vault (conflicted copy 2026-11-19).pwv: sai mật khẩu chính hoặc file đã bị sửa đổi"] : [] },
+        rescue_kept: flag("rescuekept") ? 1 : 0,
+        sync: syncResult(),
       };
     }
-    case "recover_vault":
+    case "recover_vault": {
       await sleep(900);
+      if (typeof a.allowOlder !== "boolean") throw err("error", "mock: recover_vault thiếu allowOlder");
+      const mode = params.get("recover");
+      if (mode === "nobackup")
+        throw err("no_backup", "không có bản sao lưu nào dùng được trong thư mục sao lưu của kho — hãy thử lịch sử phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc một thiết bị khác còn giữ file kho");
       if (a.password !== MASTER) throw err("wrong_password", "Sai mật khẩu chính");
+      if (mode === "older" && !a.allowOlder)
+        throw err("older_password", "mật khẩu này chỉ mở được các bản sao lưu tạo TRƯỚC lần đổi mật khẩu chính gần nhất — hãy nhập mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)");
       unlocked = true; lockNote = null; vaultExists = true;
-      setUrlFlag("unlocked", true); setUrlFlag("damaged", false); setUrlFlag("missing", false);
-      return { entries: live().length, files_used: 3, newest_backup_at: now - 3 * 3_600_000, archived: "G:\\My Drive\\Passwords\\vault.pwv.backups\\vault.damaged-20261120.pwv" };
+      setUrlFlag("unlocked", true); setUrlFlag("damaged", false); setUrlFlag("missing", false); setUrlFlag("recover", false);
+      return { entries: live().length, files_used: 3, newest_backup_at: now - 3 * 3_600_000, archived: "G:\\My Drive\\Passwords\\vault.pwv.backups\\vault.damaged-20261120.pwv", rescue_kept: flag("rescuekept") ? 1 : 0 };
+    }
     case "accept_rollback": needUnlocked(); setUrlFlag("rollback", false); return null;
     case "create_vault": {
       await sleep(700);
@@ -321,14 +378,14 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
         if (i.totp != null) e.totp = i.totp.trim() || null;
         e.updated_at = Date.now();
         console.info("[mock] save_entry gửi các trường:", Object.keys(i).filter((k) => k !== "id").join(", ") || "(không có)");
-        return [e.id, noSync()];
+        return [e.id, writeResult()];
       }
       const e = mk(title!, i.username ?? "", i.password ?? "", clean(i.urls ?? []), clean(i.tags ?? []), !!i.favorite, i.totp?.trim() || null, 0);
       e.notes = i.notes ?? "";
       entries.push(e);
-      return [e.id, noSync()];
+      return [e.id, writeResult()];
     }
-    case "delete_entry": { needUnlocked(); const e = find(a.id); mutated(); e.trashed_at = Date.now(); return noSync(); }
+    case "delete_entry": { needUnlocked(); const e = find(a.id); mutated(); e.trashed_at = Date.now(); return writeResult(); }
     case "toggle_favorite": { needUnlocked(); const e = find(a.id); mutated(); e.favorite = !e.favorite; return e.favorite; }
     case "list_trash":
       needUnlocked();
@@ -336,10 +393,24 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
     case "restore_entry": { needUnlocked(); const e = entries.find((x) => x.id === a.id); if (!e) throw err("not_found", "Không tìm thấy"); mutated(); e.trashed_at = null; return null; }
     case "purge_entry": { needUnlocked(); const i = entries.findIndex((x) => x.id === a.id && x.trashed_at !== null); if (i < 0) throw err("not_found", "Không tìm thấy"); mutated(); entries.splice(i, 1); return null; }
     case "empty_trash": {
-      needUnlocked(); mutated();
-      const n = entries.filter((e) => e.trashed_at !== null).length;
-      for (let i = entries.length - 1; i >= 0; i--) if (entries[i].trashed_at !== null) entries.splice(i, 1);
-      return n;
+      needUnlocked();
+      if (!Array.isArray(a.ids)) throw err("error", "mock: empty_trash thiếu ids");
+      mutated();
+      // Như backend: gộp thay đổi của máy khác trước (?trashrace: máy khác vừa chuyển thêm một mục vào thùng rác)…
+      if (flag("trashrace") && !entries.some((e) => e.title === "Momo (từ máy khác)")) {
+        const extra = mk("Momo (từ máy khác)", "0901234567", "momo-pass", [], [], false, null, 50);
+        extra.trashed_at = Date.now();
+        entries.push(extra);
+      }
+      // …rồi chỉ xoá ĐÚNG các mục người dùng đã thấy.
+      const ids = new Set(a.ids as string[]);
+      let purged = 0;
+      for (let i = entries.length - 1; i >= 0; i--)
+        if (entries[i].trashed_at !== null && ids.has(entries[i].id)) {
+          entries.splice(i, 1);
+          purged++;
+        }
+      return { purged, remaining: entries.filter((e) => e.trashed_at !== null).length };
     }
     case "sync_now": {
       needUnlocked();
@@ -348,9 +419,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       if (rej === "password_changed") { lockMock("Mật khẩu chính đã được đổi ở máy khác. Hãy mở khoá bằng mật khẩu MỚI."); setUrlFlag("syncreject", false); throw err("password_changed", "Mật khẩu chính đã được đổi ở máy khác"); }
       if (rej === "locked") { lockMock(null); setUrlFlag("syncreject", false); throw LOCKED; }
       if (rej === "error") throw err("error", "Không đọc được thư mục đồng bộ: thiết bị chưa sẵn sàng (mock)");
-      const r = noSync();
-      r.problem = diskProblem;
-      if (flag("syncerr")) r.errors = ["vault (conflicted copy 2026-11-19).pwv: sai mật khẩu chính hoặc file đã bị sửa đổi"];
+      const r = syncResult();
       if (backupFailOnce) { r.backup_failed = true; backupFailOnce = false; }
       return r;
     }
@@ -384,7 +453,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       const c = masterCheck(a.new);
       if (!c.ok) throw err("weak_password", `Mật khẩu chính chưa đủ mạnh. ${c.message}`);
       if (a.current !== MASTER) throw err("wrong_password", "Mật khẩu chính hiện tại không đúng");
-      return { backups_reencrypted: 9, backups_skipped: 1 };
+      return { backups_reencrypted: 9, backups_skipped: 1, unverified: flag("unverified") };
     }
     case "health_report": {
       needUnlocked();

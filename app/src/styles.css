@@ -1254,3 +1254,28 @@ fieldset.fields.plain {
   display: flex;
   width: 100%;
 }
+
+/* Bản sao lưu ghi bằng mật khẩu chính cũ: nhãn + cảnh báo trước khi khôi phục. */
+.badge.warn-badge {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  white-space: nowrap;
+}
+.old-pw-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.old-pw-warning .check {
+  align-items: flex-start;
+}
+/* Nút có nội dung dài (lựa chọn phụ, nói rõ hậu quả): được xuống dòng thay vì tràn ra ngoài khung. */
+.btn.wrap {
+  white-space: normal;
+  height: auto;
+  min-height: 34px;
+  line-height: 1.35;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  text-align: left;
+}

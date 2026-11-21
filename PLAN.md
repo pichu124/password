@@ -251,6 +251,51 @@ người rà soát thứ hai kiểm chứng độc lập (đa số bằng thử 
 - Các action của GitHub chưa được ghim theo mã commit.
 - Chưa có kiểm định của bên thứ ba.
 
+### 9.1. Lượt rà soát thứ hai (11/2026, trước khi phát hành 0.2.0)
+
+Lượt này nhắm vào những gì lượt đầu chưa đặt câu hỏi: **người biết một master password CŨ** (và có
+quyền ghi vào thư mục đồng bộ) làm được gì sau khi chủ kho đã đổi mật khẩu; máy sai giờ; ghi file bị
+phần mềm khác giữ; và các đường "cứu hộ" (khôi phục từ sao lưu, bản cứu hộ). Đặc tả mới nằm ở
+[docs/FORMAT.md](docs/FORMAT.md) mục 3, 5, 6, 7.
+
+| Nhóm | Vấn đề tìm thấy | Cách sửa |
+|---|---|---|
+| Lõi | Nội dung chỉ mở được bằng khoá CŨ (bản cạnh kho, file kho bị thay, bản sao lưu) vẫn được tự gộp ⇒ người biết mật khẩu cũ ghi được vào kho sau khi chủ kho đã đổi mật khẩu | Khoá cũ chỉ để ĐỌC: bản như vậy không bao giờ được tự gộp; nó được mã hoá lại bằng khoá hiện tại và cất vào thư mục sao lưu (`oldkey-…`) để chủ kho tự xem; app báo, đánh dấu "ghi bằng mật khẩu cũ" và đòi xác nhận trước khi khôi phục mục nào từ đó |
+| Lõi | Một bản cạnh kho ghi "đã đổi mật khẩu" (header chưa xác thực) làm app dừng đồng bộ / khoá chủ kho ra ngoài | Chỉ file kho CHÍNH mới khoá được app; bản cạnh kho không mở được chỉ bị báo ("dùng mật khẩu chính khác") và để nguyên |
+| Lõi | Hai máy cùng đổi sang một mật khẩu mới khi chưa đồng bộ ⇒ hai nhánh không bao giờ nối lại | Lúc mở khoá thử mật khẩu trên tối đa 2 bản cạnh kho mới hơn; hai khoá đều được mật khẩu xác thực ⇒ gộp. (Chỉ nối được theo một chiều — xem "còn để ngỏ") |
+| Lõi | Khôi phục từ sao lưu bằng mật khẩu CŨ âm thầm đưa kho về mật khẩu cũ và mất mọi thay đổi sau đó; vài chục file rác làm hỏng việc khôi phục; bản sao lưu cài sẵn bằng khoá cũ được mã hoá lại thành "bản tin cậy" | Mật khẩu cũ ⇒ lỗi riêng, chỉ khôi phục từ các bản cũ khi chủ kho chọn rõ ràng; giới hạn tính theo số bản GỘP ĐƯỢC; chỉ gộp bản dùng đúng khoá gốc; không bao giờ mã hoá lại bản chỉ mở được bằng khoá cũ hơn; "không có bản nào dùng được" là lỗi riêng kèm chỉ dẫn nơi khác để tìm |
+| Lõi | Ghi xong nhưng đọc lại lỗi (diệt virus / đồng bộ giữ file) ⇒ hoàn tác RAM; với đổi mật khẩu thì RAM ở khoá cũ còn đĩa ở khoá mới | "Đã ghi, chưa xác minh": giữ RAM, báo người dùng, lần đồng bộ sau đọc lại thật |
+| Lõi | Quy tắc giữ bản sao lưu theo đồng hồ của máy đang dọn ⇒ một máy sai giờ xoá lịch sử trên mọi máy | Chỉ dựa vào thời điểm trong tên file: 10 bản mới nhất + bản cuối của 30 ngày gần nhất CÓ sao lưu + bản cuối của 12 kỳ 30 ngày gần nhất CÓ sao lưu |
+| Lõi | Nhập lại cùng file CSV trên một máy chưa đồng bộ đè lên thay đổi thật của máy khác | Mục nhập mang thời điểm cố định 1 ms: luôn thua mọi lần sửa thật (giao diện hiện "—" cho thời điểm này) |
+| Lõi | Phép gộp mất tính kết hợp khi lịch sử mật khẩu chạm trần 20 dòng ⇒ các máy có thể ghi đè qua lại | Dạng chuẩn mới của lịch sử; property test ≥ 20 000 ca mỗi tính chất, lịch sử tới 26 dòng |
+| Lõi | Nhiều khoá dùng chung một trang RAM bị khoá ⇒ mở khoá trang khi giải phóng một khoá làm lộ khoá kia ra pagefile | Mỗi khoá một trang riêng |
+| Lõi | Chuyển kho / ghi đè file hỏng có thể xoá file cũ khi máy khác vừa ghi vào giữa chừng, hoặc ghi thẳng vào tên cuối | Chỉ xoá file cũ khi nó vẫn đúng là bản đã đồng bộ; chép bản trong RAM vào thư mục sao lưu trước khi tạo lại file; đọc lại kiểm tra |
+| Lõi | Gõ mật khẩu cũ trên một máy đã từng mở kho thật, khi file kho đã bị thay bằng file do người biết mật khẩu cũ làm ra ⇒ mở ra kho giả mà không cảnh báo | Mỗi máy nhớ một "dấu khoá" của khoá kho dùng lần trước; kho không biết khoá đó ⇒ cảnh báo mạnh ("không nối tiếp từ kho máy này dùng lần trước", nút chính là *Khoá lại*) |
+| App | Dọn thùng rác xoá cả mục mà máy khác vừa chuyển vào sau khi chủ kho xem danh sách | Gửi đúng danh sách đã thấy; chỉ xoá các mục đó; báo số mục còn lại |
+| App | Sau một lần đồng bộ sạch, MỌI bản cứu hộ bị xoá — kể cả bản không gộp được (bản duy nhất còn giữ dữ liệu chưa lưu) | Chỉ xoá bản đã gộp; bản còn lại được giữ, báo cho chủ kho và thử lại ở lần mở khoá sau |
+| App | App đang mở ghi đè thay đổi config.json do CLI làm (vị trí kho, cài đặt, mốc "đã thấy") | Mỗi lần ghi: đọc lại file → áp đúng một thay đổi → ghi; mốc "đã thấy" chỉ ghi khi thật sự đổi |
+| App | Bản phát hành `panic = "abort"`: một panic giết tiến trình trước khi kịp xoá clipboard | Panic hook cố xoá clipboard (chỉ khi nó vẫn giữ đúng bí mật app đã chép, không chờ khoá) rồi mới thoát |
+| App | Đổi master password không đồng bộ trước ⇒ bản xung đột còn dùng khoá hiện tại trở thành "bản khoá cũ" | Đồng bộ đầy đủ trước khi đổi; lỗi ⇒ chưa đổi gì, giao diện nói rõ "CHƯA được đổi" |
+| CLI | Ghi chú dán nhiều dòng bị cắt / lẫn vào lệnh sau; thao tác xoá vĩnh viễn, ghi đè, khôi phục từ bản cũ chưa hỏi xác nhận; cảnh báo "file cũ hơn" không có cách xác nhận; dọn thùng rác cùng lỗi như app | Sửa trong `crates/cli` song song với lượt này (xem commit tương ứng) |
+| Phát hành | Khoá ký APK dùng chung job với mã build; bản phát hành có thể ra từ commit chưa qua CI; công cụ cứu hộ ghi sai dấu tiếng Việt trên Windows khi chuyển hướng đầu ra | Ký trong job riêng không chạy mã build; Release từ chối nếu CI của commit chưa xanh; `pwv_recover.py -o FILE` ghi UTF-8 và CI chạy đúng lệnh trong README |
+
+**Vẫn chưa che được (đã ghi trong README, mục "Giới hạn", và FORMAT.md mục 7):**
+- Bản sao đã rời khỏi máy (lịch sử phiên bản / thùng rác của dịch vụ đồng bộ, điện thoại, máy chưa đồng
+  bộ) vẫn mở được bằng mật khẩu của thời điểm đó; đổi mật khẩu không thu hồi được chúng.
+- Thư mục sao lưu nằm trong thư mục đồng bộ: kẻ có quyền ghi xoá được các bản sao lưu, đặt được bản
+  "tương lai" để quy tắc giữ lại đẩy bản thật ra, hoặc đặt bản làm bằng khoá cũ (không bao giờ được tự
+  gộp nhưng vẫn hiện trong danh sách khôi phục, có nhãn). Tên và header của file sao lưu chưa được xác thực.
+- Hai lần đổi mật khẩu trên hai máy chưa đồng bộ chỉ nối lại được khi file kho chính là nhánh đổi
+  trước; đổi sang hai mật khẩu khác nhau thì không bao giờ tự nối.
+- Máy mới cài (và điện thoại — đường chỉ đọc không tính "dấu khoá") không phát hiện được kho giả làm
+  bằng mật khẩu cũ. Quy tắc cho chủ kho: sau khi đổi master password, không bao giờ gõ lại mật khẩu cũ.
+- Header của bản cạnh kho có thể làm mỗi lần mở khoá tốn thêm tối đa 2 lượt Argon2.
+- Panic hook không che được tiến trình chết ngoài panic của Rust (WebView sập, bị diệt, mất điện).
+- Ghi "chưa xác minh" mới chỉ được kiểm bằng test của lõi; chưa có test giả lập được tình huống này ở
+  tầng app.
+- Mọi điểm "còn để ngỏ" của lượt đầu (ký số, khoá khi khoá màn hình, ghim action theo commit, kiểm
+  định độc lập) vẫn còn nguyên.
+
 ## Nguồn tham khảo
 - Bitwarden Security Whitepaper — https://bitwarden.com/help/bitwarden-security-white-paper/
 - 1Password Security Design — https://agilebits.github.io/security-design/1Password_Security_Design.pdf

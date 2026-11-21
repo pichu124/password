@@ -55,11 +55,17 @@ Xem mục *Phát hành* để tạo khoá ký cố định.
 - **Bộ tạo mật khẩu / cụm từ**, thanh độ mạnh, **lịch sử mật khẩu** của từng mục (20 bản gần nhất).
 - **Mã 2FA (TOTP)** đếm ngược theo thời gian thực.
 - **Thùng rác:** xoá một mục là chuyển vào thùng rác; khôi phục được bất cứ lúc nào. *Xoá vĩnh viễn*
-  có hiệu lực trên mọi thiết bị.
-- **Sao lưu & khôi phục** (Cài đặt): app giữ 10 bản gần nhất + bản cuối của mỗi ngày trong 30 ngày +
-  mỗi tháng trong 12 tháng, ở thư mục `vault.pwv.backups` cạnh file kho. Chọn một bản, xem mục nào
-  khác hiện tại, khôi phục từng mục. Khôi phục là "một lần sửa mới": mật khẩu hiện tại được giữ
-  trong lịch sử của mục, và thay đổi lan sang mọi thiết bị.
+  có hiệu lực trên mọi thiết bị. *Dọn sạch thùng rác* chỉ xoá đúng những mục bạn đang thấy lúc bấm
+  xác nhận; nếu trong lúc đó máy khác vừa chuyển thêm mục vào thùng rác, mục đó được giữ lại và app
+  báo cho bạn.
+- **Sao lưu & khôi phục** (Cài đặt): app tự giữ các bản sao lưu ở thư mục `vault.pwv.backups` cạnh
+  file kho: **10 bản mới nhất**, cộng **bản cuối cùng của mỗi ngày** trong 30 ngày gần nhất *có lưu
+  kho*, cộng **bản cuối cùng của mỗi đợt 30 ngày** trong 12 đợt gần nhất *có lưu kho*. ("Ngày có lưu
+  kho" nghĩa là: nếu bạn không mở kho cả tháng, các bản cũ không bị xoá vì thời gian trôi qua — chỉ
+  bị thay dần khi có bản mới. Việc dọn cũng không phụ thuộc đồng hồ của máy.) Chọn một bản, xem mục
+  nào khác hiện tại, khôi phục từng mục. Khôi phục là "một lần sửa mới": mật khẩu hiện tại được giữ
+  trong lịch sử của mục, và thay đổi lan sang mọi thiết bị. Bản có nhãn **"ghi bằng mật khẩu cũ"**
+  thì app không bao giờ tự gộp — xem *Đổi master password* bên dưới.
 - **Kiểm tra sức khoẻ mật khẩu** + rò rỉ (Have I Been Pwned: chỉ gửi 5 ký tự đầu của mã băm).
 - **Nhập CSV** từ Chrome/Edge, Firefox, Bitwarden, KeePass 2/KeePassXC, 1Password, Proton Pass,
   LastPass, Dashlane, Safari. Không dòng nào bị bỏ trừ khi trống hoặc giống hệt mục đã có. Sau khi
@@ -72,11 +78,38 @@ Xem mục *Phát hành* để tạo khoá ký cố định.
 - Cửa sổ app được loại khỏi ảnh chụp / quay màn hình (Windows 10 2004 trở lên; Android chặn chụp màn hình).
 
 ### Đổi master password
-Đổi mật khẩu cũng **đổi luôn khoá mã hoá** của kho và mã hoá lại các bản sao lưu trên máy. Các thiết
-bị khác sẽ hỏi mật khẩu mới. Lưu ý: những bản sao **đã rời khỏi máy** (lịch sử phiên bản / thùng rác
+Đổi mật khẩu cũng **đổi luôn khoá mã hoá** của kho và mã hoá lại các bản sao lưu trên máy. Trước khi
+đổi, app đồng bộ một lần; nếu file kho đang có vấn đề (hỏng, chưa tải xong…) thì app báo lỗi và
+**chưa đổi gì**. Các thiết bị khác sẽ hỏi mật khẩu mới ở lần mở tới.
+
+**Đổi mật khẩu bảo vệ được gì:**
+- Người chỉ biết mật khẩu CŨ không đọc được những gì app ghi ra sau lần đổi (file kho, bản sao lưu) —
+  trừ những gì một thiết bị *chưa nhận mật khẩu mới* tiếp tục ghi bằng mật khẩu cũ.
+- Từ đó về sau, **mọi thứ được ghi bằng mật khẩu cũ không bao giờ được gộp tự động vào kho.** Nếu app
+  gặp một bản như vậy (ví dụ một máy chưa nhận mật khẩu mới vẫn tiếp tục lưu, hoặc dịch vụ đồng bộ đặt
+  lại một bản cũ), nó cất bản đó vào *Cài đặt → Sao lưu & khôi phục* với nhãn **"ghi bằng mật khẩu
+  cũ"** và báo cho bạn. Ở đó bạn xem được mục nào khác với kho hiện tại và lấy lại từng mục — **chỉ làm
+  vậy khi bạn biết chắc những thay đổi đó là của mình**, vì ai biết mật khẩu cũ cũng làm ra được một
+  bản như thế.
+- Hệ quả: những gì bạn sửa trên một thiết bị **chưa nhận mật khẩu mới** phải được lấy lại bằng tay từ
+  bản "ghi bằng mật khẩu cũ" đó. Cách dễ nhất để tránh: trước khi đổi, mở và đồng bộ kho trên mọi
+  thiết bị; ngay sau khi đổi, mở kho bằng mật khẩu mới trên từng thiết bị.
+
+**Đổi mật khẩu KHÔNG bảo vệ được:** những bản sao **đã rời khỏi máy** (lịch sử phiên bản / thùng rác
 của Drive-Dropbox-OneDrive, bản xem ngoại tuyến trên điện thoại, máy khác chưa đồng bộ) vẫn mở được
-bằng mật khẩu CŨ và chứa dữ liệu tại thời điểm đó. Nếu nghi mật khẩu cũ bị lộ: đổi cả mật khẩu của
-các tài khoản quan trọng (ngân hàng, email).
+bằng mật khẩu CŨ và chứa dữ liệu tại thời điểm đó.
+
+**Sau khi đổi, đừng bao giờ gõ lại mật khẩu cũ** — ở bất kỳ máy nào. Nếu ai đó biết mật khẩu cũ và có
+quyền ghi vào thư mục đồng bộ, họ có thể đặt vào đó một "kho" mở được bằng mật khẩu cũ; gõ mật khẩu cũ
+là mở đúng kho của họ. (Máy đã từng mở kho thật sẽ cảnh báo "kho này không nối tiếp từ kho máy này
+dùng lần trước" — xem bảng bên dưới.)
+
+**Nếu mật khẩu cũ có thể đã bị lộ**, làm theo đúng thứ tự:
+1. **Đổi mật khẩu tài khoản cloud** (Google / Dropbox / Microsoft) và **đăng xuất mọi phiên đăng nhập
+   khác** của tài khoản đó — để người kia không còn đọc/ghi được thư mục đồng bộ.
+2. **Đổi master password** trong pwv.
+3. **Đổi mật khẩu của các tài khoản quan trọng** (ngân hàng, email): người kia có thể đã đọc được bản
+   cũ của kho.
 
 ## Đồng bộ qua Google Drive / Dropbox / OneDrive
 
@@ -104,12 +137,20 @@ các tài khoản quan trọng (ngân hàng, email).
 | File kho cũ hơn bản máy này từng thấy | Dịch vụ đồng bộ khôi phục bản cũ, hoặc có người chép đè | Kiểm tra các mục mới thêm gần đây; dùng *Sao lưu & khôi phục* nếu thiếu |
 | Hãy cập nhật phần mềm | File do bản app mới hơn ghi | Cài bản mới nhất trên máy này |
 | Không mở được kho (file hỏng) khi đang khoá | File kho hỏng hẳn | *Khôi phục từ bản sao lưu* ngay trên màn hình mở khoá |
+| Tìm thấy bản của kho được ghi bằng mật khẩu chính CŨ | Sau lần đổi master password, một thiết bị chưa nhận mật khẩu mới vẫn ghi, hoặc dịch vụ đồng bộ đặt lại bản cũ — hiếm hơn, người biết mật khẩu cũ. App **không gộp** bản đó | Bấm *Mở Sao lưu & khôi phục*, chọn bản có nhãn "ghi bằng mật khẩu cũ", xem khác biệt. Chỉ khôi phục mục nào bạn chắc chắn là thay đổi của mình. Mở kho bằng mật khẩu MỚI trên thiết bị kia |
+| Bản này được ghi bằng một mật khẩu chính khác (mới hơn) | Một bản cạnh file kho dùng mật khẩu mà máy này không có — thường là bạn vừa đổi master password ở máy khác | Khoá app rồi mở lại bằng mật khẩu MỚI. Nếu bạn không hề đổi mật khẩu: xoá file được nêu tên (app không đụng tới nó, việc đồng bộ vẫn chạy bình thường) |
+| Mật khẩu này chỉ mở được các bản sao lưu cũ (khi khôi phục) | Bạn vừa gõ một master password CŨ; khôi phục từ đó sẽ đưa kho về mật khẩu cũ và mất mọi thay đổi sau lần đổi | Gõ master password HIỆN TẠI (mật khẩu đặt gần nhất) rồi khôi phục lại. Chỉ chọn *vẫn khôi phục từ các bản cũ* khi bạn thật sự không còn mật khẩu hiện tại |
+| Không có bản sao lưu nào dùng được (khi khôi phục) | Thư mục sao lưu trống / hỏng / không có bản nào mở được bằng mật khẩu này | Tìm bản khác: lịch sử phiên bản / thùng rác trên trang web của Drive-Dropbox-OneDrive, một máy khác, bản xem ngoại tuyến trên điện thoại, hoặc *Cứu hộ dữ liệu không cần app* bên dưới. Đừng tạo kho mới đè lên |
+| Kho vừa mở KHÔNG phải là phần tiếp nối của kho máy này dùng lần trước | Bạn vừa mở bằng một master password CŨ, hoặc file kho đã bị thay bằng file do người biết mật khẩu cũ làm ra | Bấm *Khoá lại* và mở bằng master password HIỆN TẠI. Đừng tin địa chỉ trang web / mật khẩu đang hiện cho tới khi kiểm tra xong. Chỉ bấm *Đã hiểu, vẫn dùng kho này* nếu bạn biết rõ vì sao (ví dụ chính bạn vừa khôi phục kho từ một bản cũ) |
+| Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi | File đã được ghi, nhưng lúc đọc lại để kiểm tra thì bị chương trình đồng bộ / diệt virus giữ | Không cần làm gì: thay đổi vẫn còn trong app, lần đồng bộ tới app tự kiểm tra và ghi lại nếu cần. Nếu lần nào cũng báo, hãy cho thư mục kho vào danh sách loại trừ của phần mềm diệt virus |
 
 App không bao giờ tự ghi đè file kho khi nó hỏng, biến mất, thuộc kho khác hay do bản mới hơn ghi.
 
 Nếu app phải khoá (hết giờ, đóng cửa sổ) trong lúc file kho đang có vấn đề và còn thay đổi chưa ghi
 được, nó để lại một **bản cứu hộ** (đã mã hoá bằng master password của bạn) trong
-`%LOCALAPPDATA%\vn.pwv.vault\rescue` và tự gộp lại ở lần mở khoá sau — bạn không phải làm gì.
+`%LOCALAPPDATA%\vn.pwv.vault\rescue` và tự gộp lại ở lần mở khoá sau — bạn không phải làm gì. Bản
+cứu hộ nào không gộp được (ví dụ nó được ghi trước khi master password bị đổi ở máy khác) **không bị
+xoá**: app báo "N bản cứu hộ chưa gộp được, vẫn được giữ lại" và thử lại ở lần mở khoá sau.
 
 ## Công cụ dòng lệnh `pwv.exe` (tuỳ chọn)
 
@@ -161,9 +202,24 @@ app (chỉ dựa trên [docs/FORMAT.md](docs/FORMAT.md)) và đọc được c�
   Android đời mới đã bật sẵn).
 - **Bản sao cũ của file kho** trong lịch sử phiên bản của dịch vụ đồng bộ vẫn mở được bằng master
   password của thời điểm đó (xem *Đổi master password*).
-- **Clipboard khi app bị tắt đột ngột:** nếu app bị buộc dừng (Task Manager) hoặc gặp sự cố trong
-  20 giây sau khi sao chép, mật khẩu vừa chép nằm lại trong clipboard cho tới khi bạn chép thứ khác
-  hoặc đăng xuất / tắt máy.
+- **Clipboard khi app bị tắt đột ngột:** nếu app bị buộc dừng (Task Manager), máy mất điện, hoặc app
+  sập vì một lỗi nằm ngoài phần mã của chính nó (ví dụ trình hiển thị WebView) trong 20 giây sau khi
+  sao chép, mật khẩu vừa chép nằm lại trong clipboard cho tới khi bạn chép thứ khác hoặc đăng xuất /
+  tắt máy. (Khi chính app gặp lỗi nghiêm trọng, nó cố xoá clipboard trước khi thoát — nhưng chỉ là cố.)
+- **Hai lần đổi master password trên hai máy chưa đồng bộ với nhau** (ví dụ cả hai máy đang mất mạng):
+  app chỉ tự nối lại được trong một số trường hợp; nếu hai máy đổi sang hai mật khẩu KHÁC nhau thì
+  không bao giờ tự nối được — những gì sửa trên máy kia phải lấy lại bằng tay từ bản sao lưu. Hãy chỉ
+  đổi master password trên MỘT máy, khi các máy khác đã đồng bộ xong.
+- **Thư mục sao lưu nằm trong thư mục đồng bộ.** Ai có quyền ghi vào thư mục đồng bộ (ví dụ biết mật
+  khẩu tài khoản Google của bạn) có thể xoá các bản sao lưu, hoặc đặt vào đó những file "bản sao lưu"
+  giả. Bản giả làm bằng mật khẩu cũ không bao giờ được tự gộp, nhưng vẫn HIỆN trong danh sách khôi
+  phục với nhãn "ghi bằng mật khẩu cũ" — chỉ khôi phục từ bản mang nhãn đó khi chắc chắn nó là của bạn.
+  Lịch sử phiên bản / thùng rác của dịch vụ đồng bộ là lớp dự phòng cuối cùng. Vì vậy hãy bảo vệ tài
+  khoản cloud bằng mật khẩu mạnh và xác thực hai bước.
+- **Máy mới cài không phát hiện được kho giả mạo.** Cảnh báo "kho này không nối tiếp từ kho máy này
+  dùng lần trước" chỉ có trên máy đã từng mở kho thật. Trên máy mới cài (hoặc điện thoại), nếu bạn gõ
+  một master password CŨ và thư mục đồng bộ đã bị người biết mật khẩu cũ thay file kho, app mở ra kho
+  của họ mà không cảnh báo gì. Quy tắc: sau khi đổi master password, đừng bao giờ gõ lại mật khẩu cũ.
 - **Master password yếu.** Ai lấy được file kho đều có thể thử mật khẩu ngoại tuyến; Argon2id chỉ
   làm việc đó chậm đi. Cụm 6 từ ngẫu nhiên là đủ an toàn; tên + năm sinh thì không.
 - Phần mềm đã qua một đợt rà soát mã nguồn kỹ nhưng **chưa được một tổ chức kiểm định độc lập**, và

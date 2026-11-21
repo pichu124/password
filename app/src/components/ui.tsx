@@ -100,8 +100,15 @@ export function useDebounced<T>(value: T, ms: number): T {
   return v;
 }
 
+/**
+ * Thời điểm ≤ 1 giây sau mốc 1970 không phải ngày thật: 0 = chưa biết, 1 = giá trị nhập từ file CSV
+ * chưa từng được sửa (lõi cố ý dùng mốc này để bản nhập luôn thua mọi lần sửa thật). Hiện "—" thay vì
+ * "01/01/1970".
+ */
+const isRealTime = (ms: number) => Number.isFinite(ms) && ms > 1000;
+
 export function formatDate(ms: number): string {
-  if (!ms) return "—";
+  if (!isRealTime(ms)) return "—";
   return new Date(ms).toLocaleString("vi-VN", { dateStyle: "medium", timeStyle: "short" });
 }
 
@@ -119,7 +126,7 @@ export function avatarHue(title: string): number {
 
 /** Ngày giờ theo giờ địa phương, có cả giây khi cần phân biệt các bản sao lưu gần nhau. */
 export function formatDateTime(ms: number): string {
-  if (!ms) return "—";
+  if (!isRealTime(ms)) return "—";
   return new Date(ms).toLocaleString("vi-VN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 

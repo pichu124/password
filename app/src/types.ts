@@ -18,7 +18,11 @@ export type ErrorCode =
   | "different_vault"
   | "read_only"
   | "not_found"
-  | "read_failed";
+  | "read_failed"
+  /** Khôi phục: mật khẩu vừa nhập chỉ mở được các bản sao lưu từ TRƯỚC lần đổi mật khẩu chính gần nhất. */
+  | "older_password"
+  /** Khôi phục: thư mục sao lưu không có bản nào dùng được. */
+  | "no_backup";
 
 export interface Strength {
   score: number;
@@ -150,6 +154,10 @@ export interface SyncResult {
   /** App vừa ghi lại file kho. */
   wrote: boolean;
   backup_failed: boolean;
+  /** Số bản của kho ghi bằng mật khẩu chính CŨ: không được gộp, đã cất vào thư mục sao lưu (loại "oldkey"). */
+  old_key_archived: number;
+  /** Đã ghi file kho nhưng chưa đọc lại kiểm tra được (lần đồng bộ sau kiểm tra lại). */
+  unverified: boolean;
   /** File kho trên đĩa đang có vấn đề. */
   problem: AppError | null;
 }
@@ -159,12 +167,16 @@ export interface RollbackView {
   seen_modified_at: number;
   file_modified_at: number;
   older_password: boolean;
+  /** Kho vừa mở KHÔNG nối tiếp từ kho máy này dùng lần trước (mật khẩu chính cũ, hoặc file bị thay). */
+  unknown_key: boolean;
 }
 
 export interface UnlockInfo {
   rollback: RollbackView | null;
   /** Số bản cứu hộ vừa được gộp lại vào kho. */
   rescued: number;
+  /** Số bản cứu hộ chưa gộp được — vẫn được giữ lại, lần mở khoá sau thử lại. */
+  rescue_kept: number;
   sync: SyncResult;
 }
 
@@ -174,6 +186,8 @@ export interface RecoverInfo {
   newest_backup_at: number;
   /** Nơi file hỏng được cất. */
   archived: string | null;
+  /** Số bản cứu hộ chưa gộp được (vẫn được giữ lại). */
+  rescue_kept: number;
 }
 
 export interface HealthItem {
@@ -218,7 +232,18 @@ export interface MoveView {
 
 export interface PasswordChangeView {
   backups_reencrypted: number;
+  /** Bản sao lưu để nguyên: không đọc được, hoặc chỉ mở được bằng một mật khẩu chính cũ hơn nữa. */
   backups_skipped: number;
+  /** Mật khẩu ĐÃ đổi, nhưng chưa đọc lại kiểm tra được file vừa ghi. */
+  unverified: boolean;
+}
+
+/** Kết quả "dọn sạch thùng rác". */
+export interface EmptyTrashView {
+  /** Số mục đã xoá vĩnh viễn (trong số các mục đã thấy khi xác nhận). */
+  purged: number;
+  /** Số mục còn lại trong thùng rác (ví dụ máy khác vừa chuyển thêm vào). */
+  remaining: number;
 }
 
 export interface TrashItem {
@@ -228,7 +253,7 @@ export interface TrashItem {
   deleted_at: number;
 }
 
-export type BackupKind = "auto" | "merged" | "damaged";
+export type BackupKind = "auto" | "merged" | "damaged" | "oldkey";
 
 export interface BackupView {
   /** Tên file trong thư mục sao lưu (dùng làm khoá khi gọi lại). */
@@ -237,6 +262,8 @@ export interface BackupView {
   timestamp: number;
   /** Số mục trong bản sao lưu (null = không đọc được). */
   entries: number | null;
+  /** Bản này chỉ mở được bằng một mật khẩu chính CŨ (có thể không phải do chủ kho ghi). */
+  retired_key: boolean;
 }
 
 export type BackupEntryStatus = "changed" | "in_trash" | "missing";

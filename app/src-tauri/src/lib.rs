@@ -112,18 +112,20 @@ async fn unlock(app: tauri::AppHandle, path: String, password: String) -> AppRes
     .await
 }
 
-/// File kho hỏng: dựng lại từ thư mục sao lưu.
+/// File kho hỏng: dựng lại từ thư mục sao lưu. `allow_older` (JS: `allowOlder`): chủ kho đã chọn
+/// rõ ràng khôi phục từ các bản sao lưu tạo trước lần đổi mật khẩu chính gần nhất.
 #[tauri::command]
 async fn recover_vault(
     app: tauri::AppHandle,
     path: String,
     password: String,
+    allow_older: bool,
 ) -> AppResult<RecoverInfo> {
     let password = Zeroizing::new(password);
     blocking(move || {
         let state = app.state::<AppState>();
         let mut s = lock_state(&state);
-        s.recover(&PathBuf::from(path), &password)
+        s.recover(&PathBuf::from(path), &password, allow_older)
     })
     .await
 }
@@ -246,9 +248,10 @@ fn purge_entry(state: State<AppState>, id: String) -> AppResult<()> {
     with(&state, |s| s.purge_entry(&id))
 }
 
+/// `ids`: các mục người dùng đã thấy trong thùng rác lúc bấm xác nhận — chỉ những mục đó bị xoá.
 #[tauri::command(async)]
-fn empty_trash(state: State<AppState>) -> AppResult<usize> {
-    with(&state, |s| s.empty_trash())
+fn empty_trash(state: State<AppState>, ids: Vec<String>) -> AppResult<EmptyTrashView> {
+    with(&state, |s| s.empty_trash(&ids))
 }
 
 #[tauri::command(async)]
@@ -668,6 +671,41 @@ fn set_clipboard_text(cb: &mut arboard::Clipboard, value: &str) -> Result<(), St
     cb.set_text(value).map_err(|e| e.to_string())
 }
 
+/// Panic hook (chỉ máy tính): bản phát hành dùng `panic = "abort"`, nên một panic bất kỳ giết tiến
+/// trình NGAY — bộ hẹn giờ xoá clipboard chết theo và mật khẩu vừa chép nằm lại trên clipboard vô
+/// thời hạn. Hook này cố xoá clipboard (chỉ khi nó vẫn giữ đúng bí mật app đã chép) rồi mới để hook
+/// mặc định chạy tiếp (in thông báo lỗi; sau đó tiến trình kết thúc như cũ).
+///
+/// Nguyên tắc trong hook: không bao giờ chờ và không được panic lần nữa — dùng `try_lock` (luồng
+/// đang panic có thể chính là luồng đang giữ khoá), thử clipboard đúng một lần, bỏ qua mọi lỗi.
+/// (Bản debug dùng `panic = "unwind"`: panic trong một lệnh không giết app nhưng hook vẫn xoá
+/// clipboard sớm — vô hại.)
+///
+/// KHÔNG bảo vệ được: tiến trình chết mà không qua panic của Rust (lỗi truy cập bộ nhớ trong thư
+/// viện C / WebView, bị "End task" hoặc bị hệ điều hành diệt, hết RAM), mất điện / máy treo cứng.
+/// Khi đó clipboard có thể còn giữ mật khẩu cho tới khi người dùng chép thứ khác.
+#[cfg(desktop)]
+fn install_panic_hook(app: tauri::AppHandle) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(guard) = app.try_state::<ClipboardGuard>() {
+            let pending = match guard.pending.try_lock() {
+                Ok(mut p) => p.take(),
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().take(),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some((_, value)) = pending {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if cb.get_text().is_ok_and(|t| t == *value) {
+                        let _ = cb.clear();
+                    }
+                }
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 #[cfg(desktop)]
 fn clear_clipboard(_app: &tauri::AppHandle, ours: &str) {
     // Clipboard có thể đang bị ứng dụng khác giữ trong tích tắc ⇒ thử lại vài lần.
@@ -772,6 +810,9 @@ pub fn run() {
                     lock_state(&app.state::<AppState>()).config = pwv_vault_core::Config::load();
                 }
             }
+            // Panic ⇒ cố xoá mật khẩu vừa chép khỏi clipboard trước khi tiến trình chết.
+            #[cfg(desktop)]
+            install_panic_hook(app.handle().clone());
             // Nơi ghi bản cứu hộ khi phải khoá mà chưa lưu được ra thư mục đồng bộ.
             if let Ok(dir) = app.path().app_local_data_dir() {
                 lock_state(&app.state::<AppState>()).rescue_dir = Some(dir.join("rescue"));

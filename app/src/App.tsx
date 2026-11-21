@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, pickFile, reloadPage, STASHED_LOCK_NOTE, STASHED_UNLOCK_INFO, stashForReload } from "./api";
+import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, onWriteResult, pickFile, reloadPage, STASHED_LOCK_NOTE, STASHED_UNLOCK_INFO, stashForReload } from "./api";
 import { EntryForm } from "./components/EntryForm";
 import { EntryView } from "./components/EntryView";
 import { Generator } from "./components/Generator";
@@ -18,11 +18,16 @@ type View =
   | { kind: "generator" }
   | { kind: "health" }
   | { kind: "trash" }
-  | { kind: "settings" };
+  /** `section`: cuộn tới mục đó khi mở (ví dụ từ thông báo "bản ghi bằng mật khẩu cũ"). */
+  | { kind: "settings"; section?: "backups"; at?: number };
 
 const SYNC_EVERY_MS = 20_000;
 const UPDATE_CHECK_EVERY_MS = 24 * 60 * 60 * 1000;
 const TOUCH_EVERY_MS = 15_000;
+
+/** Ghi xong nhưng chưa đọc lại kiểm tra được (SyncResult.unverified). */
+const UNVERIFIED_TEXT =
+  "Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi (có thể chương trình đồng bộ hoặc diệt virus đang giữ file). App sẽ tự kiểm tra lại ở lần đồng bộ tới.";
 
 // Thông tin (không bí mật) mà trang trước để lại trước khi nạp lại: lý do khoá, kết quả mở khoá.
 const STASHED_NOTE = STASHED_LOCK_NOTE;
@@ -191,6 +196,9 @@ function VaultScreen({
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [problem, setProblem] = useState<AppError | null>(status.disk_problem);
   const [rollback, setRollback] = useState<RollbackView | null>(unlockInfo?.rollback ?? null);
+  // Số bản ghi bằng mật khẩu cũ vừa được cất (cộng dồn cho tới khi người dùng đóng thông báo; một lần
+  // đồng bộ MỚI có bản như vậy thì hiện lại).
+  const [oldKeyCopies, setOldKeyCopies] = useState(0);
   const { notices, add: addNotice, dismiss } = useNotices();
   const searchRef = useRef<HTMLInputElement>(null);
   const syncBusy = useRef(false);
@@ -220,6 +228,22 @@ function VaultScreen({
 
   const lock = useCallback(() => lockAndReload(), []);
 
+  /** Những điều cần báo trong một kết quả ghi/đồng bộ (dùng cả cho kết quả của "lưu mục" / "xoá mục"). */
+  const applyNotices = useCallback(
+    (r: SyncResult) => {
+      if (r.old_key_archived > 0) setOldKeyCopies((n) => n + r.old_key_archived);
+      if (r.unverified) addNotice(UNVERIFIED_TEXT, "warn");
+      if (r.backup_failed) addNotice("Lần ghi vừa rồi không tạo được bản sao lưu tự động (thư mục sao lưu bị đầy hoặc không ghi được). Dữ liệu vẫn được lưu.", "warn");
+      if (r.password_changed_elsewhere) addNotice("Mật khẩu chính đã được đổi ở máy khác — lần sau hãy mở khoá bằng mật khẩu MỚI.", "info");
+    },
+    [addNotice],
+  );
+
+  useEffect(() => {
+    onWriteResult(applyNotices);
+    return () => onWriteResult(null);
+  }, [applyNotices]);
+
   const applySync = useCallback(
     (r: SyncResult, manual: boolean) => {
       setProblem(r.problem);
@@ -232,10 +256,9 @@ function VaultScreen({
       }
       if (r.conflicts_merged) toast(`Đã gộp ${r.conflicts_merged} bản xung đột từ dịch vụ đồng bộ`, "info");
       r.errors.forEach((e) => addNotice(`Bản xung đột chưa gộp được: ${e}`, "error"));
-      if (r.backup_failed) addNotice("Lần ghi vừa rồi không tạo được bản sao lưu tự động (thư mục sao lưu bị đầy hoặc không ghi được). Dữ liệu vẫn được lưu.", "warn");
-      if (r.password_changed_elsewhere) addNotice("Mật khẩu chính đã được đổi ở máy khác — lần sau hãy mở khoá bằng mật khẩu MỚI.", "info");
+      applyNotices(r);
     },
-    [toast, reload, addNotice, onStatusChange],
+    [toast, reload, addNotice, applyNotices, onStatusChange],
   );
 
   // Kết quả lần mở khoá vừa rồi.
@@ -247,6 +270,11 @@ function VaultScreen({
       addNotice(
         `Đã khôi phục những thay đổi chưa kịp lưu của lần dùng trước (${unlockInfo.rescued} bản cứu hộ) và gộp lại vào kho. Hãy xem lại các mục bạn sửa gần đây.`,
         "info",
+      );
+    if (unlockInfo.rescue_kept > 0)
+      addNotice(
+        `${unlockInfo.rescue_kept} bản cứu hộ (thay đổi chưa kịp lưu của lần dùng trước) chưa gộp được vào kho — có thể chúng được ghi bằng một mật khẩu chính khác. Chúng vẫn được giữ lại trên máy này; app sẽ thử gộp lại ở lần mở khoá sau.`,
+        "warn",
       );
     applySync(unlockInfo.sync, false);
   }, [unlockInfo, addNotice, applySync]);
@@ -391,16 +419,60 @@ function VaultScreen({
 
       {problem && <DiskProblemBanner problem={problem} status={status} onRetry={() => sync(true)} onResolved={() => { setProblem(null); onStatusChange(); }} onMoved={afterMove} />}
 
-      {rollback && (
+      {rollback && rollback.unknown_key && (
+        // Mạnh hơn cảnh báo "file cũ hơn": kho này không biết khoá mà máy này dùng lần trước ⇒ hoặc vừa gõ
+        // một mật khẩu chính CŨ, hoặc file kho đã bị thay bằng file do người biết mật khẩu cũ làm ra.
+        <div className="banner danger" role="alert">
+          <div className="banner-body">
+            <strong>
+              <Icon name="warn" size={16} /> Kho vừa mở KHÔNG phải là phần tiếp nối của kho mà máy này dùng lần trước.
+            </strong>{" "}
+            Có thể bạn vừa mở bằng một mật khẩu chính CŨ, hoặc file kho đã bị thay bằng một file do người biết mật khẩu cũ tạo ra. Nếu bạn đã đổi mật
+            khẩu chính, hãy <strong>khoá lại ngay</strong> và mở bằng mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất).{" "}
+            <strong>Đừng tin các địa chỉ trang web hay mật khẩu hiện ở đây</strong> cho tới khi bạn đã kiểm tra.
+            <div className="row gap banner-actions">
+              <button className="btn primary" onClick={lock}>
+                <Icon name="lock" /> Khoá lại
+              </button>
+              <button className="btn" onClick={acceptRollback}>
+                Đã hiểu, vẫn dùng kho này
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {rollback && !rollback.unknown_key && (
         <div className="banner danger">
           <div className="banner-body">
             <strong>File kho đang mở CŨ HƠN bản mà máy này từng thấy.</strong> File được sửa lần cuối lúc {formatDateTime(rollback.file_modified_at)}, trong
             khi máy này đã thấy bản lúc {formatDateTime(rollback.seen_modified_at)}.
             {rollback.older_password && <> File này còn dùng một mật khẩu chính CŨ hơn mật khẩu hiện tại.</>} Có thể dịch vụ đồng bộ đã khôi phục một
-            bản cũ — những mục thêm hoặc sửa gần đây có thể bị thiếu. Nếu thiếu, xem <button className="btn link" onClick={() => setView({ kind: "settings" })}>Cài đặt → Sao lưu &amp; khôi phục</button>.
+            bản cũ — những mục thêm hoặc sửa gần đây có thể bị thiếu. Nếu thiếu, xem <button className="btn link" onClick={() => setView({ kind: "settings", section: "backups", at: Date.now() })}>Cài đặt → Sao lưu &amp; khôi phục</button>.
           </div>
           <button className="btn" onClick={acceptRollback}>
             Đã hiểu
+          </button>
+        </div>
+      )}
+
+      {oldKeyCopies > 0 && (
+        <div className="banner" role="status">
+          <div className="banner-body">
+            <strong>Tìm thấy {oldKeyCopies > 1 ? `${oldKeyCopies} bản` : "một bản"} của kho được ghi bằng mật khẩu chính CŨ.</strong> Thường là do một
+            thiết bị chưa nhận mật khẩu mới vẫn tiếp tục ghi, hoặc dịch vụ đồng bộ vừa đặt lại một bản cũ — hiếm hơn, do một người khác biết mật khẩu
+            cũ. App <strong>không gộp</strong> bản đó vào kho; nó được cất trong Cài đặt → Sao lưu &amp; khôi phục, đánh dấu “ghi bằng mật khẩu cũ”. Ở
+            đó bạn xem được những gì khác với kho hiện tại và khôi phục từng mục — <strong>chỉ khi bạn biết chắc những thay đổi đó là của bạn</strong>.
+            <div className="row gap banner-actions">
+              <button
+                className="btn"
+                onClick={() => setView({ kind: "settings", section: "backups", at: Date.now() })}
+              >
+                <Icon name="restore" /> Mở Sao lưu &amp; khôi phục
+              </button>
+            </div>
+          </div>
+          <button className="icon-btn small-btn" onClick={() => setOldKeyCopies(0)} title="Đóng thông báo" aria-label="Đóng thông báo">
+            <Icon name="close" size={16} />
           </button>
         </div>
       )}
@@ -543,6 +615,8 @@ function VaultScreen({
           )}
           {view.kind === "settings" && (
             <SettingsView
+              section={view.section}
+              focusAt={view.at}
               status={status}
               onImported={() => {
                 reload();

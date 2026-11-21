@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorText, pickFile } from "../api";
 import type { BackupEntryView, BackupKind, BackupView, ImportView, MoveView, PasswordChangeView, Settings, Status, UpdateInfo } from "../types";
 import { MasterPasswordField, useMasterCheck } from "./MasterField";
@@ -7,12 +7,18 @@ import { formatDate, formatDateTime, Icon, useToast } from "./ui";
 
 export function SettingsView({
   status,
+  section,
+  focusAt,
   onImported,
   onSwitchVault,
   onMoved,
   onChanged,
 }: {
   status: Status;
+  /** Cuộn tới mục này khi mở (ví dụ từ thông báo "bản ghi bằng mật khẩu cũ"). */
+  section?: "backups";
+  /** Đổi giá trị ⇒ cuộn lại (bấm lại cùng một nút khi trang cài đặt đang mở). */
+  focusAt?: number;
   /** Dữ liệu kho vừa thay đổi (nhập CSV, khôi phục từ bản sao lưu) ⇒ tải lại danh sách. */
   onImported: () => void;
   onSwitchVault: () => void;
@@ -24,6 +30,11 @@ export function SettingsView({
   const [s, setS] = useState<Settings | null>(null);
   const [backups, setBackups] = useState<string | null>(null);
   const [moved, setMoved] = useState<MoveView | null>(null);
+  const backupsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (section === "backups") backupsRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [section, focusAt]);
 
   useEffect(() => {
     api.getSettings().then(setS).catch((e) => toast(errorText(e), "error"));
@@ -96,7 +107,9 @@ export function SettingsView({
 
         <ImportCsv onImported={onImported} />
 
-        <BackupsPanel onRestored={onImported} />
+        <div ref={backupsRef} className="scroll-anchor">
+          <BackupsPanel onRestored={onImported} />
+        </div>
 
         <section className="card">
           <h3>File kho & đồng bộ</h3>
@@ -207,7 +220,9 @@ function ChangeMaster() {
       setNext2("");
       mc.reset();
     } catch (err) {
-      setError(errorText(err));
+      // Mọi lỗi ở đây xảy ra TRƯỚC khi đổi (sai mật khẩu, mật khẩu yếu, file kho hỏng / biến mất khi
+      // đồng bộ trước…) hoặc khiến lần đổi bị hoàn tác — nói rõ để người dùng không tưởng đã đổi xong.
+      setError(`Mật khẩu chính CHƯA được đổi: ${errorText(err)}`);
     } finally {
       setBusy(false);
     }
@@ -218,18 +233,29 @@ function ChangeMaster() {
       <section className="card">
         <h3>Đã đổi mật khẩu chính</h3>
         <p className="small">
-          Kho trên máy này đã dùng mật khẩu mới. Đã mã hoá lại <strong>{result.backups_reencrypted}</strong> bản sao lưu
-          {result.backups_skipped > 0 && (
-            <>
-              ; <strong>{result.backups_skipped}</strong> bản không mã hoá lại được (vẫn dùng mật khẩu cũ)
-            </>
-          )}
-          .
+          Mật khẩu chính <strong>đã được đổi</strong>: kho trên máy này đã dùng mật khẩu mới. Đã mã hoá lại <strong>{result.backups_reencrypted}</strong> bản
+          sao lưu bằng mật khẩu mới.
         </p>
+        {result.unverified && (
+          <div className="note-box">
+            Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi (có thể chương trình đồng bộ hoặc diệt virus đang giữ file). App sẽ tự kiểm tra lại ở lần
+            đồng bộ tới. Mật khẩu mới vẫn là mật khẩu đúng từ bây giờ.
+          </div>
+        )}
+        {result.backups_skipped > 0 && (
+          <p className="small">
+            <strong>{result.backups_skipped}</strong> bản sao lưu được để nguyên, không mã hoá lại: bản không đọc được, hoặc bản được ghi bằng một mật
+            khẩu chính cũ hơn nữa (những bản đó vẫn mở được bằng mật khẩu cũ ấy; app cố ý không mã hoá lại chúng vì không chắc chúng là của bạn).
+          </p>
+        )}
         <div className="warning small">
           <p>
             <strong>Những bản sao đã rời khỏi máy này vẫn mở được bằng mật khẩu CŨ</strong> và chứa dữ liệu tại thời điểm đó: lịch sử phiên bản
             và thùng rác của Google Drive / Dropbox / OneDrive, bản lưu ngoại tuyến trên điện thoại, các máy tính khác chưa đồng bộ.
+          </p>
+          <p>
+            Từ nay <strong>đừng bao giờ gõ lại mật khẩu cũ</strong>. Những gì được ghi bằng mật khẩu cũ (ví dụ trên một thiết bị chưa nhận mật khẩu
+            mới) sẽ không được gộp tự động mà hiện thành “bản ghi bằng mật khẩu cũ” trong Sao lưu &amp; khôi phục để bạn xem lại.
           </p>
           <p>
             Nếu mật khẩu cũ có thể đã bị lộ, hãy đổi mật khẩu của các tài khoản quan trọng (ngân hàng, email). Các thiết bị khác sẽ hỏi mật khẩu
@@ -365,7 +391,15 @@ const KIND_LABEL: Record<BackupKind, string> = {
   auto: "Tự động",
   merged: "Bản xung đột đã gộp",
   damaged: "File hỏng đã cất",
+  oldkey: "Bản chưa gộp",
 };
+
+/**
+ * Bản này chứa nội dung ghi bằng một mật khẩu chính CŨ: hoặc nó chỉ mở được bằng khoá cũ, hoặc nó là
+ * bản "oldkey-…" mà app đã cất thay vì gộp. Cả hai có thể không phải do chủ kho ghi (ai biết mật khẩu
+ * cũ cũng làm ra được) ⇒ luôn gắn nhãn và cảnh báo trước khi khôi phục.
+ */
+const writtenWithOldPassword = (b: BackupView) => b.kind === "oldkey" || b.retired_key;
 
 function statusText(e: BackupEntryView): string {
   if (e.status === "changed") return `Khác hiện tại: ${e.changed_fields.join(", ")}`;
@@ -383,6 +417,8 @@ function BackupsPanel({ onRestored }: { onRestored: () => void }) {
   const [diffError, setDiffError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  // Bản ghi bằng mật khẩu cũ: người dùng phải xác nhận một lần trước khi được khôi phục.
+  const [oldPwAck, setOldPwAck] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -403,6 +439,7 @@ function BackupsPanel({ onRestored }: { onRestored: () => void }) {
     setDiff(null);
     setDiffError(null);
     setPicked(new Set());
+    setOldPwAck(false);
     try {
       setDiff(await api.backupDiff(b.name));
     } catch (e) {
@@ -439,7 +476,8 @@ function BackupsPanel({ onRestored }: { onRestored: () => void }) {
       <h3>Sao lưu & khôi phục</h3>
       <p className="small muted">
         App tự giữ các bản sao lưu của kho. Chọn một bản để xem những mục khác với hiện tại, rồi khôi phục từng mục. Khôi phục là một lần sửa mới:
-        mật khẩu hiện tại của mục được giữ trong lịch sử của nó, và thay đổi được đồng bộ tới mọi thiết bị.
+        mật khẩu hiện tại của mục được giữ trong lịch sử của nó, và thay đổi được đồng bộ tới mọi thiết bị. Bản có nhãn “ghi bằng mật khẩu cũ”
+        không bao giờ được gộp tự động — hãy xem kỹ trước khi khôi phục mục nào từ nó.
       </p>
       {listError && <p className="error">{listError}</p>}
       {list && list.length === 0 && <p className="muted small">Chưa có bản sao lưu nào.</p>}
@@ -457,7 +495,10 @@ function BackupsPanel({ onRestored }: { onRestored: () => void }) {
             {list.map((b) => (
               <tr key={b.name} className={chosen?.name === b.name ? "selected" : undefined}>
                 <td>{formatDateTime(b.timestamp)}</td>
-                <td>{KIND_LABEL[b.kind] ?? b.kind}</td>
+                <td>
+                  {KIND_LABEL[b.kind] ?? b.kind}
+                  {writtenWithOldPassword(b) && <span className="badge warn-badge">ghi bằng mật khẩu cũ</span>}
+                </td>
                 <td>{b.entries ?? <span className="muted">không đọc được</span>}</td>
                 <td className="right">
                   <button className="btn link" onClick={() => choose(b)}>
@@ -473,6 +514,7 @@ function BackupsPanel({ onRestored }: { onRestored: () => void }) {
         <div className="confirm-box">
           <p className="small">
             <strong>Bản sao lưu lúc {formatDateTime(chosen.timestamp)}</strong> ({KIND_LABEL[chosen.kind] ?? chosen.kind})
+            {writtenWithOldPassword(chosen) && <span className="badge warn-badge">ghi bằng mật khẩu cũ</span>}
           </p>
           {diffError && <p className="error">{diffError}</p>}
           {diff === null && !diffError && <p className="muted small">Đang so sánh…</p>}
@@ -494,8 +536,21 @@ function BackupsPanel({ onRestored }: { onRestored: () => void }) {
                   </li>
                 ))}
               </ul>
+              {writtenWithOldPassword(chosen) && (
+                <div className="warning old-pw-warning" role="alert">
+                  <p>
+                    <strong>Bản này được ghi bằng một mật khẩu chính CŨ.</strong> Nó có thể là của chính bạn — từ một thiết bị chưa nhận mật khẩu mới,
+                    hoặc từ trước lần đổi mật khẩu — nhưng cũng có thể do một người khác biết mật khẩu cũ tạo ra. Chỉ khôi phục từ bản này nếu bạn chắc
+                    chắn những thay đổi đó là của bạn; sau khi khôi phục, hãy kiểm tra lại địa chỉ trang web và mật khẩu của các mục đó.
+                  </p>
+                  <label className="check">
+                    <input type="checkbox" checked={oldPwAck} onChange={(e) => setOldPwAck(e.target.checked)} />
+                    <span>Tôi chắc chắn những thay đổi trong bản này là của tôi</span>
+                  </label>
+                </div>
+              )}
               <div className="row gap confirm-actions">
-                <button className="btn primary" disabled={busy || picked.size === 0} onClick={restore}>
+                <button className="btn primary" disabled={busy || picked.size === 0 || (writtenWithOldPassword(chosen) && !oldPwAck)} onClick={restore}>
                   <Icon name="restore" /> {busy ? "Đang khôi phục…" : `Khôi phục mục đã chọn (${picked.size})`}
                 </button>
                 <button className="btn" onClick={() => setChosen(null)}>

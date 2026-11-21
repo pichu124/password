@@ -9,6 +9,8 @@ export function Trash({ onChanged }: { onChanged: () => void }) {
   const [items, setItems] = useState<TrashItem[] | null>(null);
   const [confirm, setConfirm] = useState<{ kind: "purge"; item: TrashItem } | { kind: "empty" } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Sau "dọn sạch": số mục mới vào thùng rác trong lúc xác nhận (ví dụ từ máy khác) — chưa bị xoá.
+  const [leftOver, setLeftOver] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -23,11 +25,12 @@ export function Trash({ onChanged }: { onChanged: () => void }) {
     load();
   }, [load]);
 
-  async function act(fn: () => Promise<unknown>, done: string) {
+  async function act(fn: () => Promise<unknown>, done: string | null) {
     setBusy(true);
+    setLeftOver(0);
     try {
       await fn();
-      toast(done);
+      if (done) toast(done);
       setConfirm(null);
       await load();
       onChanged();
@@ -60,13 +63,26 @@ export function Trash({ onChanged }: { onChanged: () => void }) {
         )}
       </header>
       <div className="fields">
+        {leftOver > 0 && (
+          <div className="note-box" role="status">
+            Trong lúc bạn xác nhận, thùng rác có thêm {leftOver} mục mới (có thể từ máy khác). {leftOver > 1 ? "Các mục đó" : "Mục đó"}{" "}
+            <strong>chưa bị xoá</strong> — hãy xem lại bên dưới.
+          </div>
+        )}
         {confirm?.kind === "empty" && (
           <ConfirmBox
             danger
             busy={busy}
-            text={permanentText(`tất cả ${items?.length ?? 0} mục trong thùng rác`)}
+            text={permanentText(`${items?.length ?? 0} mục đang hiện trong thùng rác`)}
             confirmLabel="Dọn sạch thùng rác"
-            onConfirm={() => act(() => api.emptyTrash(), "Đã dọn sạch thùng rác")}
+            onConfirm={() =>
+              // Gửi đúng danh sách người dùng đang nhìn thấy: mục nào vào thùng rác sau đó không bị xoá.
+              act(async () => {
+                const r = await api.emptyTrash((items ?? []).map((i) => i.id));
+                setLeftOver(r.remaining);
+                toast(r.remaining > 0 ? `Đã xoá vĩnh viễn ${r.purged} mục` : "Đã dọn sạch thùng rác");
+              }, null)
+            }
             onCancel={() => setConfirm(null)}
           />
         )}
