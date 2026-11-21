@@ -180,8 +180,14 @@ pub const HEADER_PEEK_LEN: usize = PREFIX_LEN + MAX_HEADER_LEN;
 /// Chỉ dùng để nhận diện file (vault_id, thời điểm đổi mật khẩu) — không tin nội dung cho tới khi
 /// phần thân giải mã thành công.
 pub fn peek_header(prefix: &[u8]) -> Result<Header> {
-    let (_, header_end) = parse_prefix(prefix)?;
-    serde_json::from_slice(&prefix[PREFIX_LEN..header_end]).map_err(|_| Error::BadFormat)
+    peek_versioned(prefix).map(|(_, h)| h)
+}
+
+/// Như [`peek_header`], kèm phiên bản định dạng ghi trong file (CHƯA được xác thực).
+pub fn peek_versioned(prefix: &[u8]) -> Result<(u16, Header)> {
+    let (version, header_end) = parse_prefix(prefix)?;
+    let h = serde_json::from_slice(&prefix[PREFIX_LEN..header_end]).map_err(|_| Error::BadFormat)?;
+    Ok((version, h))
 }
 
 pub fn parse(bytes: &[u8]) -> Result<RawFile<'_>> {
@@ -215,6 +221,12 @@ impl RawFile<'_> {
             return Err(Error::BadFormat);
         }
         let mut data: VaultData = serde_json::from_slice(&plain[4..4 + len])?;
+        if self.version == 1 {
+            // Bản 0.1.x giữ một mục được sửa SAU lần xoá vĩnh viễn (`deleted_at < updated_at`), và
+            // tombstone vẫn nằm trong file. Từ v2 tombstone là tuyệt đối ⇒ phải bỏ đúng các tombstone
+            // đó trước khi đưa về dạng chuẩn, không thì mục còn sống ở 0.1.2 biến mất khi nâng cấp.
+            data.drop_tombstones_superseded_in_v1();
+        }
         data.normalize();
         Ok(data)
     }

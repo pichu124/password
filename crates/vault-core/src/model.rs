@@ -733,6 +733,18 @@ impl VaultData {
         true
     }
 
+    /// Quy tắc của định dạng v1 (bản 0.1.x): tombstone chỉ xoá mục có `updated_at` KHÔNG mới hơn lần
+    /// xoá. Bỏ các tombstone mà mục cùng id còn sống và được sửa SAU lần xoá (đúng `deleted_at <
+    /// updated_at`, như bản 0.1.2), để sau khi đọc như v2 (tombstone tuyệt đối) mục đó vẫn còn.
+    pub(crate) fn drop_tombstones_superseded_in_v1(&mut self) {
+        let entries = &self.entries;
+        self.tombstones.retain(|t| {
+            !entries
+                .iter()
+                .any(|e| e.id == t.id && t.deleted_at < e.updated_at)
+        });
+    }
+
     /// Ghi nhớ một khoá kho vừa ngừng dùng (khi đổi master password).
     pub(crate) fn push_old_key(&mut self, key: &[u8; KEY_LEN], retired_at: i64) {
         if !self.old_keys.iter().any(|k| &k.key == key) {

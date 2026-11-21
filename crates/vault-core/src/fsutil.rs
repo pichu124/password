@@ -60,6 +60,21 @@ pub fn read_retry(path: &Path) -> std::io::Result<Vec<u8>> {
     retry(|| fs::read(path))
 }
 
+/// Như [`read_retry`], nhưng file lớn hơn `max` byte thì không đọc (trả về `Ok(None)`): một file
+/// khổng lồ bị cài vào chỗ file kho không được làm cạn RAM mỗi lần mở khoá / đồng bộ.
+pub fn read_retry_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
+    retry(|| {
+        let f = fs::File::open(path)?;
+        if f.metadata()?.len() > max {
+            return Ok(None);
+        }
+        // File có thể vừa lớn lên sau khi xem kích thước: đọc tối đa max + 1 byte rồi kiểm tra lại.
+        let mut buf = Vec::new();
+        f.take(max.saturating_add(1)).read_to_end(&mut buf)?;
+        Ok((buf.len() as u64 <= max).then_some(buf))
+    })
+}
+
 /// Đọc tối đa `max` byte đầu của file.
 pub fn read_prefix(path: &Path, max: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -494,6 +509,18 @@ fn transient_kind(e: &std::io::Error) -> Option<Transient> {
 /// `vault-TÊN-MÁY.pwv`…). Không đoán theo tên: người gọi sẽ đọc header và chỉ nhận file có cùng
 /// `vault_id`. Bỏ qua file ẩn/tạm (tên bắt đầu bằng dấu chấm) và file quá lớn.
 pub fn sibling_candidates(path: &Path) -> Vec<PathBuf> {
+    let mut out = sibling_files(path);
+    out.truncate(MAX_SIBLINGS);
+    out
+}
+
+/// Số bản cạnh kho CÙNG KHO tối đa được xét ở mỗi lần đồng bộ / mở khoá.
+pub const MAX_SAME_VAULT_SIBLINGS: usize = MAX_SIBLINGS;
+
+/// Như [`sibling_candidates`] nhưng KHÔNG cắt bớt (xếp theo tên). Người gọi lọc theo header rồi mới
+/// giới hạn số bản cùng kho — nếu cắt trước khi lọc thì vài chục file `.pwv` rác (tên xếp trước)
+/// đẩy được bản xung đột thật ra ngoài mãi mãi.
+pub fn sibling_files(path: &Path) -> Vec<PathBuf> {
     let Ok(rd) = fs::read_dir(parent_of(path)) else {
         return Vec::new();
     };
@@ -515,7 +542,6 @@ pub fn sibling_candidates(path: &Path) -> Vec<PathBuf> {
         })
         .collect();
     out.sort();
-    out.truncate(MAX_SIBLINGS);
     out
 }
 
