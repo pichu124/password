@@ -1130,6 +1130,7 @@ dependencies = [
  "serde",
  "sha2",
  "thiserror",
+ "unicode-normalization",
  "zeroize",
  "zxcvbn",
 ]

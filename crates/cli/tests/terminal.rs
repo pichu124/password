@@ -411,3 +411,84 @@ fn recover_from_stale_backups_asks_first_and_writes_nothing_on_no() {
     assert!(v.rollback_against(&cfg).is_none());
     assert_eq!(v.entries().len(), 1);
 }
+
+/// fix2-cli-policy#5: phần thừa của một lần dán vào lời nhắc ẩn CUỐI CÙNG của một lệnh ghi
+/// ("Nhập lại:" của `add`) và vào một câu hỏi [y/N] cũng không được rơi vào shell.
+#[test]
+fn lines_pasted_at_the_last_prompt_of_add_or_at_a_yes_no_question_never_reach_the_shell() {
+    let sb = Sandbox::new();
+    let pw = "ngua-pin-kep-dung-bien-xanh-42";
+    let mut v = create(&sb.vault(), pw);
+    add(&mut v, "Cũ");
+    drop(v);
+
+    let mut s = sb.spawn(&["add", "Ngân hàng B"]);
+    s.expect("Master password: ");
+    s.send(&format!("{pw}\n"));
+    s.expect("Mật khẩu của tài khoản (ẩn khi gõ): ");
+    s.send("Real-Bank-Pw-1!\n");
+    s.expect("Nhập lại: ");
+    s.send("Real-Bank-Pw-1!\nPIN-9876-SECRET\n");
+    assert!(s.wait().success(), "{}", s.transcript());
+    assert!(s.transcript().contains("Đã thêm \"Ngân hàng B\""));
+    assert_eq!(s.leftover_input(), "");
+    let v = Vault::open(sb.vault(), pw.as_bytes()).unwrap();
+    let e = v
+        .entries()
+        .iter()
+        .find(|e| e.title == "Ngân hàng B")
+        .unwrap();
+    assert_eq!(e.password, "Real-Bank-Pw-1!");
+    drop(v);
+
+    let mut s = sb.spawn(&["delete", "Cũ"]);
+    s.expect("Master password: ");
+    s.send(&format!("{pw}\n"));
+    s.expect("[y/N] ");
+    s.send("y\nrm -rf ~/PIN-1234\n");
+    assert!(s.wait().success(), "{}", s.transcript());
+    assert!(s.transcript().contains("vào thùng rác"));
+    assert_eq!(s.leftover_input(), "");
+}
+
+/// fix2-cli-policy#3: `pwv passwd` nhập lại đúng mật khẩu hiện tại (lời khuyên của `pwv backups`
+/// cho kho từng đổi mật khẩu ở bản 0.1.x) được chấp nhận kể cả khi mật khẩu đó chưa đạt chính sách
+/// mới, có cảnh báo, và báo cáo nói thật rằng mật khẩu giữ nguyên.
+#[test]
+fn passwd_with_the_current_password_renews_the_key_even_if_it_fails_todays_policy() {
+    let sb = Sandbox::new();
+    // Một mật khẩu bản 0.1.x từng nhận, nay bị chính sách từ chối.
+    let pw = "nguyenvanan1990";
+    let mut v = create(&sb.vault(), pw);
+    add(&mut v, "A");
+    let old_tag = v.key_tag();
+    drop(v);
+
+    let mut s = sb.spawn(&["passwd"]);
+    s.expect("Master password: ");
+    s.send(&format!("{pw}\n"));
+    s.expect("Master password MỚI: ");
+    s.send(&format!("{pw}\n"));
+    s.expect("Đây là master password hiện tại");
+    s.expect("chưa đạt chính sách");
+    s.expect("Nhập lại: ");
+    s.send(&format!("{pw}\n"));
+    s.expect("Mật khẩu giữ nguyên; khoá mã hoá đã được thay mới");
+    assert!(s.wait().success(), "{}", s.transcript());
+    let t = s.transcript();
+    assert!(!t.contains("Chưa dùng được") && !t.contains("mật khẩu cũ không còn đọc được"));
+    let v = Vault::open(sb.vault(), pw.as_bytes()).unwrap();
+    assert_ne!(v.key_tag(), old_tag, "khoá mã hoá phải được thay");
+    assert_eq!(v.entries().len(), 1);
+
+    // Một mật khẩu MỚI khác mà yếu thì vẫn bị từ chối như trước.
+    let mut s = sb.spawn(&["passwd"]);
+    s.expect("Master password: ");
+    s.send(&format!("{pw}\n"));
+    s.expect("Master password MỚI: ");
+    s.send("tranvanbinh12031985\n");
+    s.expect("Chưa dùng được");
+    s.expect("Master password MỚI: ");
+    s.send("\n");
+    assert_eq!(s.wait().code(), Some(1));
+}

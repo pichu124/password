@@ -305,6 +305,13 @@ const MASTER_MIN_PERSONAL_LETTERS: usize = 8;
 /// Chỉ dùng khi TẠO kho hoặc ĐỔI master password — không bao giờ khi mở kho, nên siết chính sách
 /// không khoá ai khỏi kho đang có.
 pub fn check_master_password(password: &str) -> MasterCheck {
+    use unicode_normalization::UnicodeNormalization;
+    // Kho mã hoá dạng NFC của master password (vault-core `normalized_password`): chấm ĐÚNG chuỗi
+    // đó. Gõ bằng bàn phím tiếng Việt kiểu "Unicode tổ hợp" (dấu thanh rời) cho ra dạng NFD — trước
+    // đây mỗi dấu rời cắt đôi một âm tiết (`Trần` thành `tra` + `n`) nên luật tên người không bắt
+    // được, và độ dài bị đếm cả các dấu rời.
+    let nfc: Zeroizing<String> = Zeroizing::new(password.nfc().collect());
+    let password = nfc.as_str();
     let s = estimate_strength(password, master_user_inputs());
     let chars = password.chars().count();
     let personal = personal_pattern_scan(password).is_personal();
@@ -409,9 +416,14 @@ impl PersonalScan {
 ///
 /// Ngoại lệ: một dãy chữ cái tách trọn vẹn được thành các từ của danh sách EFF (đúng những từ bộ
 /// tạo passphrase dùng) là chữ cái tự do hết — các từ đó được chọn ngẫu nhiên, không phải thông tin
-/// cá nhân, kể cả khi trong từ có một âm tiết trùng tên người (`manhandle`, `chosen`). Nhờ vậy luật
-/// này không bao giờ từ chối một passphrase do pwv tạo ra (zxcvbn vẫn chấm những từ quen như
-/// `password`, `google`).
+/// cá nhân, kể cả khi trong từ có một âm tiết trùng tên người (`manhandle`, `chosen`). TRỪ KHI chính
+/// cả dãy là một từ trong danh sách: khoảng chục từ EFF cũng là tên dịch vụ / tên người (`google`,
+/// `facebook`, `yahoo`, `banking`, `apple`, `yen`...) và vẫn bị tính là thông tin cá nhân
+/// (`Google@TranVanBinh85`). Một passphrase do pwv tạo chỉ bị từ chối nếu hầu hết các từ của nó rơi
+/// đúng vào nhóm chục từ đó — với 4 từ trở lên, xác suất cỡ 10⁻¹⁰.
+///
+/// Mật khẩu được tách dấu (NFD) và bỏ mọi dấu kết hợp trước khi quét, nên dạng dựng sẵn (NFC), dạng
+/// dấu rời (NFD) và dạng trộn đều cho cùng kết quả.
 ///
 /// Song song, mỗi dãy chữ cái được thử tách TRỌN VẸN (quy hoạch động, không chỉ tham lam) thành
 /// các từ trong danh sách, kể cả tên 2 chữ cái: `lethimai` = le+thi+mai. Dãy tách được (và không
@@ -425,7 +437,9 @@ pub fn personal_pattern_scan(password: &str) -> PersonalScan {
         if run.is_empty() {
             return;
         }
-        if dict.splits_into_eff_words(run) {
+        // Ngoại lệ EFF, trừ khi chính dãy đó là một từ trong danh sách (`google`, `facebook`,
+        // `yahoo`, `banking`...: vừa là từ EFF vừa là tên dịch vụ).
+        if !dict.words.contains(&run[..]) && dict.splits_into_eff_words(run) {
             scan.free_letters += run.len();
             scan.unexplained_runs += 1;
             run.clear();
@@ -458,7 +472,15 @@ pub fn personal_pattern_scan(password: &str) -> PersonalScan {
         }
         run.clear();
     };
-    for c in password.chars().flat_map(char::to_lowercase) {
+    use unicode_normalization::char::is_combining_mark;
+    use unicode_normalization::UnicodeNormalization;
+    // Tách dấu (NFD) rồi bỏ mọi dấu kết hợp: `ầ`, `a` + dấu rời, hay `â` + dấu rời đều thành `a`.
+    // `đ` không có dạng tách — `fold_vietnamese` lo.
+    for c in password
+        .nfd()
+        .flat_map(char::to_lowercase)
+        .filter(|c| !is_combining_mark(*c))
+    {
         let c = fold_vietnamese(c);
         if c.is_ascii_lowercase() {
             run.push(c as u8);
@@ -596,6 +618,8 @@ pub const VN_NAME_SYLLABLES: &[&str] = &[
     "sau", "sen", "tho", "toai", "ut", "bich", "bang", "cam", "chien", "dan", "danh", "luc",
     "manh", "thai", "hoang", "diu", "ly", "nhan", "oanh", "kiet", "kiem", "lich", "lua", "nguyen",
     "phat", "quang", "thuc", "trieu", "trinh", "tri", "tuyet", "vu",
+    // Viết tắt và các từ hay đi kèm tên trong mật khẩu ("Ng.Van.An", "ngay sinh", "Ha.Noi").
+    "ng", "ngay", "sinh", "noi",
 ];
 
 /// Ngân hàng, ví điện tử, nhà mạng và dịch vụ lớn ở Việt Nam, cùng các từ luôn bị phạt.
@@ -962,6 +986,75 @@ mod tests {
         );
     }
 
+    /// fix2-cli-policy#1: bàn phím tiếng Việt kiểu "Unicode tổ hợp" (dấu thanh rời, NFD) hay dạng
+    /// trộn (nguyên âm dựng sẵn + dấu thanh rời) không được lách luật tên người; độ dài được đếm trên
+    /// dạng NFC — đúng chuỗi mà kho mã hoá.
+    #[test]
+    fn decomposed_vietnamese_input_is_checked_like_the_precomposed_form() {
+        use unicode_normalization::UnicodeNormalization;
+        for nfc in [
+            "Trần Thị Bình 12/03/1985",
+            "Nguyễn Văn Ánh 1985",
+            "Đặng Thị Hồng 0912345678",
+            "Phạm Đức Huy@1990",
+            "Hoàng Minh Tuấn 15081988",
+            "Lê.Thị.Mai.1990.12.03",
+        ] {
+            let nfd: String = nfc.nfd().collect();
+            assert_ne!(nfc, nfd);
+            // Dạng trộn: chữ có mũ / móc dựng sẵn, dấu thanh rời (như vài bộ gõ tạo ra).
+            let mixed: String = nfd
+                .replace("a\u{302}", "â")
+                .replace("e\u{302}", "ê")
+                .replace("o\u{302}", "ô")
+                .replace("a\u{306}", "ă")
+                .replace("u\u{31b}", "ư");
+            for form in [nfc.to_string(), nfd, mixed] {
+                let c = check_master_password(&form);
+                assert!(!c.ok, "{form:?}");
+                assert_eq!(c.message, MASTER_PERSONAL_MESSAGE, "{form:?}");
+                assert_eq!(
+                    personal_pattern_scan(&form),
+                    personal_pattern_scan(nfc),
+                    "{form:?}"
+                );
+            }
+        }
+        // 11 ký tự ở dạng NFC nhưng 23 "ký tự" ở dạng NFD: vẫn là quá ngắn.
+        let short_nfc = "ồẩẫẹữ#1ởĩxy";
+        let short_nfd: String = short_nfc.nfd().collect();
+        assert!(short_nfd.chars().count() >= MASTER_MIN_CHARS);
+        let c = check_master_password(&short_nfd);
+        assert!(!c.ok && c.message.contains("(hiện 11)"), "{}", c.message);
+        // Dạng NFD của một passphrase tiếng Việt hợp lệ vẫn đạt.
+        let good: String = "chiếc ghế gỗ kêu cót két dưới gầm bếp".nfd().collect();
+        assert!(check_master_password(&good).ok);
+    }
+
+    /// fix2-cli-policy#2: một từ vừa là từ EFF vừa là tên dịch vụ (`google`, `facebook`, `yahoo`)
+    /// đứng riêng thành một dãy vẫn là thông tin cá nhân; nhiều từ EFF ghép lại vẫn là ngẫu nhiên.
+    #[test]
+    fn service_names_that_are_also_eff_words_still_count() {
+        for weak in [
+            "Google@TranVanBinh85",
+            "Facebook.Nguyenvanan.1985",
+            "Yahoo-Lethimai-1990",
+            "Banking.Phamminhanh.0912",
+            "Ng.Van.An.1990!!",
+            "ngay sinh 12/03/1985 Ha.Noi",
+        ] {
+            let c = check_master_password(weak);
+            assert!(!c.ok, "{weak}");
+            assert_eq!(c.message, MASTER_PERSONAL_MESSAGE, "{weak}");
+        }
+        for (w, personal) in [("google", true), ("facebook", true), ("manhandle", false)] {
+            let s = personal_pattern_scan(w);
+            assert_eq!(s.unexplained_runs == 0, personal, "{w}: {s:?}");
+        }
+        // Nhiều từ EFF trong một dãy (passphrase không dấu ngăn cách): vẫn là ngẫu nhiên.
+        assert_eq!(personal_pattern_scan("googlemanhandle").unexplained_runs, 1);
+    }
+
     /// Luật thứ hai (theo cấu trúc) tách trọn vẹn bằng quy hoạch động, không chỉ tham lam.
     #[test]
     fn short_name_rule_segments_whole_runs_only() {
@@ -975,8 +1068,9 @@ mod tests {
             // Quá ít chữ cái: để zxcvbn chấm.
             ("an#8391$2047!6", false),
             ("k9$Tq2mLx7Rw4pZb", false),
-            // Dãy toàn từ EFF không tính là "tên".
-            ("Google.Facebook.Grab", false),
+            // Dãy toàn từ EFF không tính là "tên" — trừ khi chính dãy là tên dịch vụ.
+            ("Manhandle.Chosen.Among", false),
+            ("Google.Facebook.Grab", true),
             // Chữ cái ngoài a–z là một dãy không giải thích được.
             ("Nguyen Ωμέγα", false),
         ] {
