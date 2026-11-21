@@ -153,14 +153,16 @@ fn accept_rollback(state: State<AppState>) -> AppResult<()> {
     with(&state, |s| s.accept_rollback())
 }
 
+/// Khoá bằng tay: KHÔNG chờ khoá phiên (một thao tác đĩa chậm có thể đang giữ nó). Ghi yêu cầu khoá
+/// rồi trả về ngay — trang nạp lại và vứt bí mật; khoá giải mã bị xoá ngay khi khoá phiên rảnh, và
+/// mọi lệnh đến sau (kể cả `status` của trang mới) đều thấy kho đã khoá.
 #[tauri::command(async)]
-fn lock(state: State<AppState>) -> AppResult<()> {
+fn lock(app: tauri::AppHandle) -> AppResult<()> {
     // Không xoá clipboard ở đây: "chép mật khẩu → khoá app → dán" là thao tác bình thường; bộ hẹn
     // giờ vẫn xoá sau N giây vì tiến trình còn chạy.
-    with(&state, |s| {
-        s.lock();
-        Ok(())
-    })
+    app.state::<AppState>().request_lock(LOCK_MANUAL);
+    std::thread::spawn(move || drop(lock_state(&app.state::<AppState>())));
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -205,7 +207,8 @@ fn totp_code(state: State<AppState>, id: String) -> AppResult<TotpCode> {
 
 /// Sao chép trực tiếp từ Rust vào clipboard: bí mật không đi qua JavaScript.
 /// `field`: password | username | totp | url | notes | url:<n> | history:<n>. `updated_at` (JS
-/// `updatedAt`): thời điểm sửa của mục đang hiện — mục đã đổi ⇒ lỗi `entry_changed`.
+/// `updatedAt`): thời điểm sửa của mục đang hiện; `shown`: dòng đang hiện (địa chỉ của `url:<n>`,
+/// `replaced_at` của `history:<n>`) — mục đã đổi ⇒ lỗi `entry_changed`.
 #[tauri::command(async)]
 fn copy_field(
     app: tauri::AppHandle,
@@ -213,10 +216,11 @@ fn copy_field(
     id: String,
     field: String,
     updated_at: Option<i64>,
+    shown: Option<String>,
 ) -> AppResult<u32> {
     let (value, secs) = with(&state, |s| {
         Ok((
-            s.field_value_checked(&id, &field, updated_at)?,
+            s.field_value_checked(&id, &field, updated_at, shown.as_deref())?,
             s.config.clipboard_clear_secs,
         ))
     })?;
@@ -1047,14 +1051,16 @@ fn auto_lock_loop(handle: &tauri::AppHandle) {
         let state = handle.state::<AppState>();
         if let Some(mut s) = state.try_lock() {
             known = (s.vault.is_some(), s.config.auto_lock_minutes);
+            // Quyết định trước, báo trang vứt bí mật NGAY, rồi mới khoá: việc khoá có thể phải ghi ra
+            // thư mục đồng bộ đang chậm. Trang vừa nạp lại hỏi `status` thì phải chờ khoá phiên — tới
+            // lúc đó kho đã khoá xong.
             if suspend && known.0 {
-                s.lock_because("Kho đã tự khoá vì máy vừa ngủ hoặc app bị tạm dừng.");
-                drop(s);
-                clear_clipboard_if_ours(handle, None);
                 let _ = handle.emit("vault-locked", "suspend");
-            } else if s.auto_lock_if_idle() {
-                drop(s);
+                clear_clipboard_if_ours(handle, None);
+                s.lock_because(SUSPEND_NOTE);
+            } else if s.idle_lock_due() {
                 let _ = handle.emit("vault-locked", "idle");
+                s.lock_because(IDLE_NOTE);
             }
             continue;
         }
