@@ -1900,7 +1900,10 @@ impl Session {
         // Nhập lại ĐÚNG mật khẩu đang dùng = chỉ thay khoá mã hoá (cách khuyên dùng để "đổi khoá" kho
         // từng đổi mật khẩu bằng bản 0.1.x): không phải một lựa chọn mới ⇒ không chặn bằng chính sách,
         // chỉ cảnh báo nếu nó không còn đạt (chính sách 0.2 chặt hơn 0.1.x).
-        let same = new == current;
+        // So sánh ở dạng chuẩn hoá (NFC) — đúng dạng mà kho băm: cùng một mật khẩu gõ bằng hai bộ gõ
+        // tiếng Việt khác nhau (dấu rời / dựng sẵn) vẫn là "mật khẩu đang dùng".
+        let same = *pwv_vault_core::crypto::normalized_password(new.as_bytes())
+            == *pwv_vault_core::crypto::normalized_password(current.as_bytes());
         if !same {
             check_master_strength(new)?;
         }

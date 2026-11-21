@@ -348,8 +348,9 @@ khẩu thua vẫn nằm trong lịch sử.
   này vẫn đọc được file của thời khoá cũ. File nào không ĐỌC được hoặc không GHI lại được được thử lại
   một lần ở cuối; vẫn lỗi ⇒ tên nó được báo cho chủ kho (app và `pwv passwd`): file đó có thể VẪN mở
   được bằng mật khẩu vừa bị thay, nên xoá đi nếu mật khẩu cũ có thể đã lộ (file không đọc được thì không
-  phân loại được, nên có thể cả một bản đã dùng mật khẩu mới cũng bị nêu tên). File đọc được nhưng không
-  phải bản của kho / quá 64 MiB / chỉ mở được bằng một khoá cũ hơn nữa được để nguyên và chỉ được đếm.
+  phân loại được, nên có thể cả một bản đã dùng mật khẩu mới cũng bị nêu tên). File không phải file kho,
+  file quá 64 MiB (không được đọc) và file chỉ mở được bằng một khoá cũ hơn nữa được để nguyên và chỉ
+  được đếm; file của kho khác (khác `vault_id`) bị bỏ qua, không đếm.
   `damaged-…` bị bỏ qua mà không đọc. File chỉ mở được bằng một khoá đã nghỉ từ
   TRƯỚC đó thì để nguyên và không bao giờ được mã hoá lại ở bất cứ đâu: thư mục sao lưu nằm trong thư
   mục đồng bộ, nên người biết một mật khẩu cũ có thể đặt vào đó file do họ tự mã hoá bằng khoá cũ; mã

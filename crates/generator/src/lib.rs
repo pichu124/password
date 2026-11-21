@@ -582,7 +582,8 @@ fn fold_vietnamese(c: char) -> char {
         ("òóỏõọôồốổỗộơờớởỡợ", 'o'),
         ("ùúủũụưừứửữự", 'u'),
         ("ỳýỷỹỵ", 'y'),
-        ("đ", 'd'),
+        // "ð" (U+00F0, chữ thường của "Ð" U+00D0) và "ɖ" trông y hệt "đ" khi viết hoa: gộp chung.
+        ("đðɖ", 'd'),
     ];
     if c.is_ascii() {
         return c;
@@ -1188,6 +1189,21 @@ mod tests {
                 let c = check_master_password(&p);
                 assert!(c.ok, "{}: {}", *p, c.message);
             }
+        }
+    }
+
+    /// Rà lại fix3: "Ð" (U+00D0) trông y hệt "Đ" (U+0110) nhưng từng không được gộp về "d", nên tên
+    /// có chữ đó lọt qua luật tên riêng.
+    #[test]
+    fn lookalike_d_does_not_bypass_the_personal_rule() {
+        for pw in [
+            "Đặng Thị Hồng 0912345678",
+            "\u{00D0}ặng Thị Hồng 0912345678",
+            "\u{00D0}ang Thi Hong 0912345678",
+        ] {
+            let c = check_master_password(pw);
+            assert!(!c.ok, "{pw:?} phải bị từ chối");
+            assert_eq!(c.message, MASTER_PERSONAL_MESSAGE, "{pw:?}");
         }
     }
 }

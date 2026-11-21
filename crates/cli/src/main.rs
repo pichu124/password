@@ -1773,7 +1773,7 @@ fn passwd_report_lines(
     };
     if r.backups_skipped > 0 {
         b.push_str(&format!(
-            "; {} bản để nguyên: không phải bản của kho này / không phải file kho, hoặc chỉ mở được \
+            "; {} bản để nguyên: không phải file kho / lớn quá 64 MiB, hoặc chỉ mở được \
              bằng một master password CŨ HƠN nữa (từ trước lần đổi trước, bản `oldkey-…` đã cất, hoặc do \
              người khác đặt vào) — những bản đó vẫn mở được bằng mật khẩu cũ tương ứng, nhưng không bao \
              giờ được tự gộp vào kho (xem `pwv backups`, trong {})",

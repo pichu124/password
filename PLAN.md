@@ -334,7 +334,8 @@ mục 1, 2, 3, 5, 6 ("Mốc đã thấy", "Dữ liệu riêng của app"), 7.
 - **Không đổi tên các bản sao lưu** để tránh việc 0.1.x dọn theo tên: tên cũ phải tiếp tục đọc được, và
   lời giải đúng là không dùng 0.1.x nữa khi đã có máy chạy 0.2 (README, mục nâng cấp).
 - **Không làm tombstone có điều kiện** ở v2 (tombstone vẫn tuyệt đối); chỉ phần thân v1 được đọc theo
-  quy tắc của 0.1.2. Xoá vĩnh viễn ở máy 0.1.x vẫn thắng lần sửa mới hơn ở máy 0.2 khi gộp.
+  quy tắc của 0.1.2. ~~Xoá vĩnh viễn ở máy 0.1.x vẫn thắng lần sửa mới hơn ở máy 0.2 khi gộp.~~ (Đã đổi ở
+  9.3: quy tắc 0.1.x được áp cả khi gộp một file v1 về sau; chỉ tombstone ĐÃ ghi vào file v2 mới là tuyệt đối.)
 - ~~Bản cứu hộ và bản lưu riêng được tin cho cả nội dung dưới khoá đã nghỉ~~ — quyết định này bị đảo lại
   ở 9.3: không còn ngoại lệ nào cho nội dung dưới mật khẩu cũ.
 - Không chặn mọi mật khẩu "tự đặt": chỉ chấp nhận cụm từ do app sinh sẽ chặn cả mật khẩu mạnh hợp lệ.
