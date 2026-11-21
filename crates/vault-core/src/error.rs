@@ -37,6 +37,27 @@ pub enum Error {
     PasswordChangedElsewhere,
     #[error("ghi xong nhưng đọc lại không khớp — file kho có thể chưa được ghi đúng")]
     WriteVerifyFailed,
+    /// Một bản cạnh kho (bản xung đột) chỉ mở được bằng khoá của mật khẩu chính CŨ. Ai biết mật
+    /// khẩu cũ cũng làm ra được bản như vậy, nên nó không bao giờ được tự gộp vào kho.
+    #[error(
+        "bản này được ghi bằng mật khẩu chính CŨ nên không được tự gộp — đã cất vào thư mục sao lưu \
+         để bạn xem lại"
+    )]
+    RetiredKeyCopy,
+    /// Một bản cạnh kho dùng một khoá mà máy này không có, và nó ghi là được tạo SAU lần đổi mật
+    /// khẩu chính mà máy này biết. Không làm gì với nó (có thể chỉ là file rác).
+    #[error(
+        "bản này được ghi bằng một mật khẩu chính khác (mới hơn) — nếu bạn vừa đổi mật khẩu chính trên \
+         thiết bị khác, hãy khoá app rồi mở lại bằng mật khẩu MỚI; nếu không, hãy xoá file này"
+    )]
+    CopyUsesOtherPassword,
+    /// Khôi phục từ sao lưu: mật khẩu vừa nhập chỉ mở được các bản sao lưu tạo TRƯỚC lần đổi mật
+    /// khẩu chính gần nhất. Dựng lại kho từ chúng sẽ quay về mật khẩu cũ và mất các thay đổi sau đó.
+    #[error(
+        "mật khẩu này chỉ mở được các bản sao lưu tạo TRƯỚC lần đổi mật khẩu chính gần nhất — hãy nhập \
+         mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)"
+    )]
+    OlderPasswordBackups,
     #[error("lỗi đọc/ghi file: {0}")]
     Io(#[from] std::io::Error),
     /// Lưu ý: không kèm thông báo gốc của serde_json vì nó có thể trích lại dữ liệu trong kho.

@@ -17,7 +17,8 @@ pub const KEEP_RECENT: usize = 10;
 pub const KEEP_DAILY_DAYS: i64 = 30;
 /// …cộng bản cuối cùng của mỗi "tháng" (30 ngày) trong ngần này tháng.
 pub const KEEP_MONTHLY: i64 = 12;
-/// Số bản xung đột đã gộp / file hỏng đã cất giữ lại trong thư mục sao lưu.
+/// Số bản xung đột đã gộp / file hỏng đã cất / bản ghi bằng khoá cũ giữ lại (mỗi loại) trong thư
+/// mục sao lưu.
 pub const KEEP_ARCHIVED: usize = 20;
 /// File lớn hơn mức này không được coi là file kho (chống file rác làm đầy RAM).
 pub const MAX_VAULT_FILE: u64 = 64 * 1024 * 1024;
@@ -133,6 +134,10 @@ pub enum BackupKind {
     Merged,
     /// File kho bị hỏng đã được thay bằng bản tốt: `damaged-<ms>-<tên gốc>`.
     Damaged,
+    /// Một bản (file kho chính hoặc bản xung đột) chỉ mở được bằng khoá của mật khẩu chính CŨ, nên
+    /// KHÔNG được tự gộp: `oldkey-<ms>-<tên gốc>`. Nội dung đã được mã hoá lại bằng khoá hiện tại
+    /// (mật khẩu cũ không mở được nó nữa); chủ kho xem lại và lấy từng mục ra nếu muốn.
+    OldKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +172,7 @@ fn classify(vault_path: &Path, name: &str) -> Option<(BackupKind, i64)> {
     for (prefix, kind) in [
         ("merged-", BackupKind::Merged),
         ("damaged-", BackupKind::Damaged),
+        ("oldkey-", BackupKind::OldKey),
     ] {
         if let Some(rest) = name.strip_prefix(prefix) {
             let (ts, rest) = leading_timestamp(rest)?;
@@ -303,7 +309,7 @@ pub fn prune_backups(vault_path: &Path, now: i64, is_ours: impl Fn(&Path) -> boo
             let _ = fs::remove_file(&b.path);
         }
     }
-    for kind in [BackupKind::Merged, BackupKind::Damaged] {
+    for kind in [BackupKind::Merged, BackupKind::Damaged, BackupKind::OldKey] {
         // `all` đã xếp mới nhất trước.
         for b in all.iter().filter(|b| b.kind == kind).skip(KEEP_ARCHIVED) {
             if is_ours(&b.path) {
@@ -318,6 +324,7 @@ pub fn archive_path(vault_path: &Path, kind: BackupKind, now: i64, original: &Pa
     let prefix = match kind {
         BackupKind::Merged => "merged",
         BackupKind::Damaged => "damaged",
+        BackupKind::OldKey => "oldkey",
         BackupKind::Auto => "copy",
     };
     let dir = backup_dir(vault_path);
@@ -341,6 +348,24 @@ pub fn archive_file(
     fs::create_dir_all(backup_dir(vault_path))?;
     let target = archive_path(vault_path, kind, now, file);
     retry(|| fs::rename(file, &target))?;
+    Ok(target)
+}
+
+/// Ghi `bytes` thành một file mới trong thư mục sao lưu dưới tên `<loại>-<ms>-<tên gốc>` (nguyên
+/// tử). Dùng khi thứ được cất không phải chính file gốc (ví dụ bản đã được mã hoá lại).
+pub fn write_archive(
+    vault_path: &Path,
+    kind: BackupKind,
+    now: i64,
+    original: &Path,
+    bytes: &[u8],
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(backup_dir(vault_path))?;
+    let target = archive_path(vault_path, kind, now, original);
+    atomic_write(&target, bytes).map_err(|e| match e {
+        Error::Io(io) => io,
+        e => std::io::Error::other(e.to_string()),
+    })?;
     Ok(target)
 }
 

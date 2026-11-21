@@ -785,6 +785,7 @@ fn backup_kind_label(k: BackupKind) -> &'static str {
         BackupKind::Auto => "tự động",
         BackupKind::Merged => "bản xung đột đã gộp",
         BackupKind::Damaged => "file hỏng đã cất",
+        BackupKind::OldKey => "ghi bằng mật khẩu chính cũ (chưa gộp)",
     }
 }
 
@@ -1172,6 +1173,8 @@ fn sync_report_lines(r: &SyncReport, backups: &Path) -> Vec<String> {
                 "Đã gộp bản xung đột {name}: {} — nhưng chưa cất được, vẫn để nguyên tại chỗ (có thể tự xoá).",
                 merge_stats_text(s)
             )),
+            // (Chỉ có ở bản ghi bằng mật khẩu chính cũ: lời nhắn của lỗi đã nói là đã cất đi.)
+            Err(e) if c.archived => out.push(format!("⚠  Không gộp {name}: {e}.")),
             Err(e) => out.push(format!(
                 "⚠  Không gộp được {name}: {e} — để nguyên tại chỗ."
             )),
@@ -1804,6 +1807,7 @@ mod tests {
             }),
             adopted_remote_password: true,
             backup_failed: true,
+            ..Default::default()
         };
         let l = save_report_lines(&r, p);
         assert_eq!(l.len(), 3);
@@ -1839,6 +1843,7 @@ mod tests {
             wrote: true,
             adopted_remote_password: false,
             backup_failed: false,
+            ..Default::default()
         };
         let l = sync_report_lines(&r, p).join("\n");
         assert!(l.contains("vault (1).pwv") && l.contains("đã cất vào thư mục sao lưu"));

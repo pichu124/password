@@ -1326,6 +1326,7 @@ impl Session {
                     BackupKind::Auto => "auto",
                     BackupKind::Merged => "merged",
                     BackupKind::Damaged => "damaged",
+                    BackupKind::OldKey => "oldkey",
                 },
                 timestamp: b.timestamp,
                 entries: v.read_backup(&b.path).ok().map(|d| d.entries.len()),
