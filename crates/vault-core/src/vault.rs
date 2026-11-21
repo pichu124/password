@@ -188,6 +188,10 @@ pub struct Vault {
     archived_old_keys: Vec<[u8; 32]>,
     /// Phiên bản định dạng của file kho chính như lúc mở (xem [`Vault::opened_version`]).
     opened_version: u16,
+    /// Id của các tombstone trong `data` đến từ một phần thân v1 (0.1.x) mà CHƯA được ghi vào file
+    /// kho v2 nào: chúng chỉ có hiệu lực theo quy tắc gộp của 0.1.2 (xem [`merge_tracked`]). Không
+    /// bao giờ được ghi ra đĩa; xoá sạch sau mỗi lần ghi file kho (v2) xác minh được.
+    v1_tombstones: Vec<String>,
 }
 
 impl std::fmt::Debug for Vault {
@@ -297,12 +301,48 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
 /// hiệu lực với mục KHÔNG được sửa sau lần xoá — so với chính `target` (quy tắc gộp của 0.1.2), vì
 /// file v1 có thể chỉ mang lần xoá mà không mang lần sửa sau đó (bản sao lưu ghi giữa hai việc,
 /// bản xung đột còn sót).
-fn merge_versioned(target: &mut VaultData, src: &VaultData, version: u16) -> MergeStats {
+///
+/// `v1_ids`: id của các tombstone trong `target` đến từ một phần thân v1 và CHƯA từng được ghi vào
+/// một file v2 (xem `Vault::v1_tombstones`). Chúng cũng chỉ có hiệu lực theo quy tắc 0.1.2: nguồn
+/// (v1 hay v2) mang mục đó — đang dùng hay trong thùng rác — được sửa SAU lần xoá ⇒ tombstone ấy bị bỏ
+/// khỏi `target` trước khi gộp. Tombstone không nằm trong `v1_ids` (tức có từ một file v2 / một lần
+/// xoá vĩnh viễn ở bản này) thì tuyệt đối, không bao giờ bị bỏ. Sau khi gộp, `v1_ids` được cập nhật:
+/// thêm các tombstone MỚI mà nguồn v1 mang vào, bỏ những id mà một nguồn v2 cũng mang tombstone.
+fn merge_tracked(
+    target: &mut VaultData,
+    v1_ids: &mut Vec<String>,
+    src: &VaultData,
+    version: u16,
+) -> MergeStats {
+    if !v1_ids.is_empty() {
+        let superseded = |id: &str, deleted_at: i64| {
+            src.entries
+                .iter()
+                .chain(src.trash.iter())
+                .any(|e| e.id == id && deleted_at < e.updated_at)
+        };
+        let dropped: Vec<String> = target
+            .tombstones
+            .iter()
+            .filter(|t| v1_ids.contains(&t.id) && superseded(&t.id, t.deleted_at))
+            .map(|t| t.id.clone())
+            .collect();
+        if !dropped.is_empty() {
+            target.tombstones.retain(|t| !dropped.contains(&t.id));
+            v1_ids.retain(|id| !dropped.contains(id));
+        }
+    }
     if version == 1 {
         let mut s = src.clone();
         s.drop_v1_tombstones_superseded_by(target);
+        for t in &s.tombstones {
+            if !target.tombstones.iter().any(|x| x.id == t.id) && !v1_ids.contains(&t.id) {
+                v1_ids.push(t.id.clone());
+            }
+        }
         target.merge_from(&s)
     } else {
+        v1_ids.retain(|id| !src.tombstones.iter().any(|t| &t.id == id));
         target.merge_from(src)
     }
 }
@@ -442,7 +482,7 @@ enum Decrypted {
     Current {
         data: VaultData,
         adopt_header: Option<Header>,
-        /// Phiên bản định dạng của file (1 = bản 0.1.x: xem [`merge_versioned`]).
+        /// Phiên bản định dạng của file (1 = bản 0.1.x: xem [`merge_tracked`]).
         version: u16,
     },
     /// Chỉ mở được bằng một khoá cũ. Một máy chưa biết lần đổi mật khẩu ghi ra được file như vậy,
@@ -487,6 +527,7 @@ struct Snapshot {
     disk_fingerprint: Option<[u8; 32]>,
     dirty: bool,
     pending_old_keys: Vec<PendingOldKey>,
+    v1_tombstones: Vec<String>,
 }
 
 /// Kết quả mã hoá lại một bản sao lưu lúc đổi mật khẩu.
@@ -579,6 +620,20 @@ impl Vault {
             pending_old_keys: Vec::new(),
             archived_old_keys: Vec::new(),
             opened_version: format::VERSION,
+            v1_tombstones: Vec::new(),
+        }
+    }
+
+    /// Gộp dữ liệu đọc từ một file định dạng `version` vào `self.data` (xem [`merge_tracked`]).
+    fn merge_in(&mut self, src: &VaultData, version: u16) -> MergeStats {
+        merge_tracked(&mut self.data, &mut self.v1_tombstones, src, version)
+    }
+
+    /// Dữ liệu vừa đọc làm nền của kho từ một file định dạng `version`: tombstone của file v1 là
+    /// tombstone "v1 chưa ghi".
+    fn note_v1_base(&mut self, version: u16) {
+        if version == 1 {
+            self.v1_tombstones = self.data.tombstones.iter().map(|t| t.id.clone()).collect();
         }
     }
 
@@ -613,6 +668,7 @@ impl Vault {
                     false,
                     opts.allow_weak_kdf,
                 );
+                v.note_v1_base(u.version);
                 v.absorb_forked_copies(password);
                 v
             }
@@ -693,7 +749,7 @@ impl Vault {
             if u.header.key_changed_at <= self.header.key_changed_at {
                 continue;
             }
-            merge_versioned(&mut self.data, &u.data, u.version);
+            self.merge_in(&u.data, u.version);
             if *u.key != **self.vault_key {
                 let old: Key = Zeroizing::new(**self.vault_key);
                 self.data.push_old_key(&old, u.header.key_changed_at);
@@ -826,7 +882,8 @@ impl Vault {
             );
             match used {
                 KeyUsed::Current => {
-                    merge_versioned(&mut v.data, &main_data, main.version);
+                    v.note_v1_base(raw.version);
+                    v.merge_in(&main_data, main.version);
                 }
                 KeyUsed::Retired => v.queue_old_key_archive(main_fp, main_bytes),
             }
@@ -1045,18 +1102,26 @@ impl Vault {
                 newest = newest.max(b.timestamp.min(now));
             }
         }
+        let mut late_v1_ids: Vec<String> = Vec::new();
         if !v1_tombstones.is_empty() {
             let mut late = VaultData {
                 tombstones: v1_tombstones,
                 ..Default::default()
             };
             late.drop_v1_tombstones_superseded_by(&data);
+            late_v1_ids = late
+                .tombstones
+                .iter()
+                .filter(|t| !data.tombstones.iter().any(|x| x.id == t.id))
+                .map(|t| t.id.clone())
+                .collect();
             data.merge_from(&late);
         }
         if used == 0 {
             return Err(Error::NoUsableBackup);
         }
-        let v = Vault::assemble(path, header, key, data, None, true, opts.allow_weak_kdf);
+        let mut v = Vault::assemble(path, header, key, data, None, true, opts.allow_weak_kdf);
+        v.v1_tombstones = late_v1_ids;
         Ok((v, used, newest))
     }
 
@@ -1084,6 +1149,7 @@ impl Vault {
         );
         v.read_only = true;
         v.opened_version = u.version;
+        v.note_v1_base(u.version);
         Ok(v)
     }
 
@@ -1111,7 +1177,7 @@ impl Vault {
             }
         };
         let before = self.data.clone();
-        merge_versioned(&mut self.data, &remote, version);
+        self.merge_in(&remote, version);
         if let Some(h) = adopt {
             self.header = h;
         }
@@ -1420,6 +1486,7 @@ impl Vault {
     /// Xoá vĩnh viễn một mục trên mọi thiết bị (không khôi phục được, trừ từ bản sao lưu).
     pub fn purge(&mut self, id: &str) -> Result<()> {
         self.data.purge_at(id, now_ms())?;
+        self.v1_tombstones.retain(|x| x != id);
         self.dirty = true;
         Ok(())
     }
@@ -1431,6 +1498,7 @@ impl Vault {
         for id in &ids {
             let _ = self.data.purge_at(id, now);
         }
+        self.v1_tombstones.retain(|x| !ids.contains(x));
         if !ids.is_empty() {
             self.dirty = true;
         }
@@ -1445,6 +1513,7 @@ impl Vault {
         let mut n = 0;
         for id in ids {
             if self.data.get_trashed(id).is_some() && self.data.purge_at(id, now).is_ok() {
+                self.v1_tombstones.retain(|x| x != id);
                 n += 1;
             }
         }
@@ -1558,7 +1627,7 @@ impl Vault {
             }
         };
         let disk_header = format::peek_header(&bytes)?;
-        let stats = merge_versioned(&mut self.data, &remote, version);
+        let stats = self.merge_in(&remote, version);
         let adopted = adopt.is_some();
         if let Some(h) = adopt {
             self.header = h;
@@ -1600,6 +1669,7 @@ impl Vault {
             disk_fingerprint: self.disk_fingerprint,
             dirty: self.dirty,
             pending_old_keys: self.pending_old_keys.clone(),
+            v1_tombstones: self.v1_tombstones.clone(),
         }
     }
 
@@ -1612,6 +1682,7 @@ impl Vault {
         self.disk_fingerprint = s.disk_fingerprint;
         self.dirty = s.dirty;
         self.pending_old_keys = s.pending_old_keys;
+        self.v1_tombstones = s.v1_tombstones;
     }
 
     /// Cất NGUYÊN VĂN (xem [`PendingOldKey`]) các bản chỉ mở được bằng khoá cũ đang chờ.
@@ -1682,6 +1753,8 @@ impl Vault {
         if verified {
             self.disk_fingerprint = Some(fp);
             self.dirty = false;
+            // Từ đây các tombstone đó đã nằm trong một file v2: tuyệt đối như mọi tombstone khác.
+            self.v1_tombstones.clear();
         } else {
             self.disk_fingerprint = None;
             self.dirty = true;
@@ -1839,6 +1912,7 @@ impl Vault {
                 }
                 self.disk_fingerprint = Some(fp);
                 self.dirty = false;
+                self.v1_tombstones.clear();
                 Ok(None)
             }
             Err(Error::VaultFileDamaged) => {
@@ -2031,10 +2105,13 @@ impl Vault {
     /// - mở được bằng khoá hiện tại ⇒ gộp như bình thường: [`LocalMerge::Merged`];
     /// - chỉ mở được bằng khoá cũ, và gộp nó vào cũng không thay đổi gì ⇒ không làm gì:
     ///   [`LocalMerge::RetiredNoNews`] (người gọi xoá / ghi đè file được);
-    /// - chỉ mở được bằng khoá cũ, và nó có thứ kho chưa có ⇒ KHÔNG gộp; chép NGUYÊN VĂN vào thư mục
-    ///   sao lưu thành bản `oldkey-…` (chủ kho xem lại và lấy từng mục ra từ đó):
-    ///   [`LocalMerge::RetiredArchived`] với đường dẫn bản cất. Không cất được ⇒ lỗi, file gốc để
-    ///   nguyên.
+    /// - chỉ mở được bằng khoá cũ, và nó có thứ kho chưa có ⇒ KHÔNG gộp; cất vào thư mục sao lưu
+    ///   thành bản `oldkey-…` (chủ kho xem lại và lấy từng mục ra từ đó, có cảnh báo "ghi bằng mật
+    ///   khẩu cũ"): [`LocalMerge::RetiredArchived`] với đường dẫn bản cất. Bản cất KHÔNG phải là các
+    ///   byte gốc (thư mục sao lưu nằm trong thư mục đồng bộ; bản riêng có thể chứa thứ chưa từng
+    ///   được tải lên) mà là nội dung đó mã hoá lại bằng khoá HIỆN TẠI, mang dấu `pre_change` (không
+    ///   bao giờ được tự dùng, mật khẩu cũ không mở được). Đã có một bản `oldkey-…` cùng nội dung ⇒
+    ///   trả về bản đó, không cất thêm. Không cất được ⇒ lỗi, file gốc để nguyên.
     ///
     /// Lỗi khác như trước: [`Error::CopyUsesOtherPassword`] (khoá mà kho không biết, tự khai mới
     /// hơn), [`Error::VaultFileDamaged`], [`Error::DifferentVault`], [`Error::UnsupportedVersion`],
@@ -2056,20 +2133,62 @@ impl Vault {
                 let mut current = self.data.clone();
                 current.normalize();
                 let mut trial = current.clone();
-                merge_versioned(&mut trial, &data, version);
+                let mut ids = self.v1_tombstones.clone();
+                merge_tracked(&mut trial, &mut ids, &data, version);
                 if trial == current {
                     return Ok(LocalMerge::RetiredNoNews);
                 }
                 if self.read_only {
                     return Err(Error::ReadOnly);
                 }
+                // Cùng nội dung đã được cất rồi (lần gọi trước): không cất thêm bản nữa.
+                if let Some(existing) = self.oldkey_archive_with(&data) {
+                    return Ok(LocalMerge::RetiredArchived(existing));
+                }
+                // KHÔNG chép nguyên văn: thư mục sao lưu nằm trong thư mục đồng bộ, còn bản riêng
+                // này có thể chứa thứ CHƯA BAO GIỜ được tải lên (lần lưu đã thất bại) — chép nguyên
+                // văn là đưa nó lên mây dưới mật khẩu CŨ. Mã hoá lại bằng khoá hiện tại, mang dấu
+                // `pre_change` (đã xác thực: không bao giờ được tự dùng) và các khoá cũ của kho, đúng
+                // như các bản sao lưu từ trước một lần đổi mật khẩu.
+                let mut sealed = data;
+                for k in &self.data.old_keys {
+                    sealed.push_old_key(&k.key, k.retired_at);
+                }
+                let marked = Header {
+                    pre_change: true,
+                    ..self.header.clone()
+                };
+                let out = format::serialize(&marked, &sealed, &self.vault_key)?;
                 let archived =
-                    fsutil::write_archive(&self.path, BackupKind::OldKey, now_ms(), other, &bytes)?;
+                    fsutil::write_archive(&self.path, BackupKind::OldKey, now_ms(), other, &out)?;
                 Ok(LocalMerge::RetiredArchived(archived))
             }
             Err(Error::PasswordChangedElsewhere) => Err(Error::CopyUsesOtherPassword),
             Err(e) => Err(e),
         }
+    }
+
+    /// Một bản `oldkey-…` đã có trong thư mục sao lưu mà nội dung (bỏ qua danh sách khoá cũ) giải
+    /// mã ra đúng bằng `data`.
+    fn oldkey_archive_with(&self, data: &VaultData) -> Option<PathBuf> {
+        let strip = |d: &VaultData| VaultData {
+            old_keys: Vec::new(),
+            ..d.clone()
+        };
+        let want = strip(data);
+        fsutil::list_backups(&self.path)
+            .into_iter()
+            .filter(|b| b.kind == BackupKind::OldKey)
+            .find(|b| {
+                read_copy(&b.path).is_some_and(|bytes| {
+                    format::parse(&bytes).is_ok_and(|raw| {
+                        raw.header.vault_id == self.header.vault_id
+                            && decrypt_with_keys(&raw, &self.vault_key, &self.data)
+                                .is_ok_and(|(d, _)| strip(&d) == want)
+                    })
+                })
+            })
+            .map(|b| b.path)
     }
 
     /// Gộp dữ liệu đã giải mã (và nhận header, nếu có) vào RAM.
@@ -2080,7 +2199,7 @@ impl Vault {
         version: u16,
     ) -> (MergeStats, bool) {
         let before = self.data.clone();
-        let stats = merge_versioned(&mut self.data, remote, version);
+        let stats = self.merge_in(remote, version);
         let adopted = adopt.is_some();
         if let Some(h) = adopt {
             self.header = h;
@@ -2310,6 +2429,7 @@ impl Vault {
         self.path = new_path.clone();
         self.disk_fingerprint = Some(fingerprint(&bytes));
         self.dirty = false;
+        self.v1_tombstones.clear();
         // (Bản ghi bằng khoá cũ còn chờ chỉ có thể nằm ở chỗ cũ khi "cứu" — chỗ cũ giữ nguyên.)
         self.pending_old_keys.clear();
         self.archived_old_keys.clear();
@@ -2446,6 +2566,7 @@ mod tests {
         let (_, r) = v.transact(|v| Ok(v.add(Entry::new("B")))).unwrap();
         assert_eq!(readback_faults_left(), 0);
         assert!(r.unverified);
+        assert_eq!(v.disk_fingerprint(), None, "đĩa chưa xác minh được");
         assert_eq!(titles(&v), ["A", "B"], "không hoàn tác");
         assert!(v.has_unsaved_changes());
         assert_eq!(titles(&open(&p)), titles(&v));
