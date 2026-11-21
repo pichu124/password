@@ -251,7 +251,11 @@ impl GenArgs {
 }
 
 fn main() {
-    if let Err(e) = run(Cli::parse()) {
+    let result = run(Cli::parse());
+    // Phần thừa của một lần dán (dòng thứ hai trở đi) còn nằm trong bộ đệm bàn phím không được rơi
+    // vào shell khi pwv thoát — shell sẽ chạy nó như một lệnh và lưu vào lịch sử. Cả khi lỗi.
+    discard_leftover_input();
+    if let Err(e) = result {
         eprintln!("Lỗi: {e:#}");
         std::process::exit(1);
     }
@@ -566,6 +570,15 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             for line in sync_report_lines(&pre, &bdir, false) {
                 eprintln!("{line}");
             }
+            // Đĩa / thư mục sao lưu đang có vấn đề: lần đổi mật khẩu cũng phải ghi lại mọi bản sao
+            // lưu, bản nào ghi lỗi sẽ vẫn mở được bằng mật khẩu sắp bị thay.
+            if passwd_disk_problem(&pre) {
+                eprintln!("{}", passwd_disk_warning(&bdir));
+                if !confirm_required(PASSWD_DISK_QUESTION, PASSWD_DISK_REFUSAL)? {
+                    eprintln!("Chưa đổi master password.");
+                    return Ok(());
+                }
+            }
             let new = prompt_new_master("Master password MỚI: ")?;
             eprintln!(
                 "Đang thay khoá kho và mã hoá lại kho + các bản sao lưu (Argon2id, có thể mất vài giây)..."
@@ -843,6 +856,18 @@ fn backups_cmd(v: &Vault) -> Result<()> {
     if any_old {
         println!("{}", OLD_PASSWORD_BACKUP_NOTE);
         println!();
+    }
+    // Chỉ quét ở đây (lệnh này vốn đã đọc mọi bản sao lưu), không quét ở mọi lệnh.
+    match v.backups_under_other_password() {
+        Ok(0) => {}
+        Ok(n) => {
+            println!(
+                "{}",
+                other_password_backups_advice(n, &backup_dir(v.path()))
+            );
+            println!();
+        }
+        Err(e) => eprintln!("(Không kiểm tra được thư mục sao lưu: {e})"),
     }
     println!("Lấy lại: `pwv restore --from <số> <ID|tên>` hoặc `pwv restore --from <số> --all`.");
     Ok(())
@@ -1392,13 +1417,14 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
     // Lõi chỉ biết những gì có trong thư mục sao lưu (con số `key_changed_at` trong đó ai cũng sửa
     // được). Máy này còn nhớ khoá nó đã dùng: nếu kho vừa dựng dùng mật khẩu CŨ hơn, hoặc không nối
     // tiếp khoá đó, thì mật khẩu vừa nhập rất có thể là mật khẩu cũ (hoặc các bản sao lưu đã bị thay)
-    // ⇒ hỏi như trên trước khi ghi bất cứ thứ gì.
+    // ⇒ hỏi như trên trước khi ghi bất cứ thứ gì. Kiểm tra cả khi chỉ còn bản `pre_change`: một bản
+    // cũ được chép lại vào thư mục sao lưu vẫn mang gói khoá của mật khẩu CŨ (cli-fix-review#1).
+    let mut stale = None;
     let older = older
-        || (!pre_change
-            && match v.rollback_against(&Config::load()) {
-                Some(r) if r.older_password || r.unknown_key => {
-                    eprintln!("{OLDER_THAN_THIS_PC_WARNING}");
-                    if !confirm_required(
+        || match v.rollback_against(&Config::load()) {
+            Some(r) if r.older_password || r.unknown_key => {
+                eprintln!("{OLDER_THAN_THIS_PC_WARNING}");
+                if !confirm_required(
                     "Vẫn dựng lại kho từ các bản sao lưu này?",
                     "máy này đã từng dùng một master password MỚI HƠN mật khẩu vừa nhập — dựng lại kho \
                      cần bạn xác nhận trực tiếp ở cửa sổ dòng lệnh. Chưa thay đổi gì. Tốt nhất: chạy lại \
@@ -1409,10 +1435,24 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
                     );
                     return Ok(());
                 }
-                    true
-                }
-                _ => false,
-            });
+                true
+            }
+            Some(r) if r.file_modified_at < r.seen_modified_at => {
+                stale = Some(r);
+                false
+            }
+            _ => false,
+        };
+    // Cùng khoá, chỉ là CŨ HƠN nội dung máy này từng thấy: thường do các bản sao lưu mới hơn chưa
+    // đồng bộ về máy này. Hỏi trước khi ghi (không bỏ qua được bằng -y); chỉ sau khi ghi xong mới
+    // lấy trạng thái này làm mốc mới (`accept_as_seen` ở dưới).
+    if let Some(r) = &stale {
+        eprintln!("{}", stale_recovery_warning(r));
+        if !confirm_required(STALE_RECOVERY_QUESTION, STALE_RECOVERY_REFUSAL)? {
+            eprintln!("Chưa thay đổi gì.");
+            return Ok(());
+        }
+    }
     println!(
         "Tìm thấy {} mục (+{} trong thùng rác), gộp từ {used} file sao lưu; bản sao lưu mới nhất \
          dùng được tạo lúc {}, nội dung sửa lần cuối lúc {}.",
@@ -1449,16 +1489,19 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
             "⚠  Kho dựng lại dùng master password bạn vừa nhập (cũ hơn mật khẩu máy này từng dùng), và chỉ có dữ liệu tới lần đổi \
              mật khẩu đó. Hãy kiểm tra các mục quan trọng, rồi nên đổi master password (`pwv passwd`)."
         );
-    } else if pre_change {
+    }
+    if pre_change {
         eprintln!(
             "⚠  Kho được dựng lại từ các bản sao lưu có từ TRƯỚC lần đổi master password: những gì \
              thêm/sửa sau lần đổi không có ở đây. Hãy kiểm tra lại ĐỊA CHỈ TRANG WEB và mật khẩu của các \
              tài khoản quan trọng (ngân hàng, email) trước khi dùng — nếu mật khẩu cũ từng bị lộ, nội \
              dung các bản đó có thể đã bị sửa."
         );
-    } else if v.rollback_against(&c).is_some() {
+    } else if stale.is_some() {
         eprintln!(
-            "(Kho dựng lại cũ hơn bản máy này từng thấy — hãy kiểm tra xem có mục nào bị thiếu.)"
+            "(Kho dựng lại cũ hơn bản máy này từng thấy — hãy kiểm tra xem có mục nào bị thiếu. Nếu \
+             sau này các bản mới hơn đồng bộ về, lấy lại từng mục bằng `pwv backups` rồi \
+             `pwv restore --from <số> <mục>`.)"
         );
     }
     v.accept_as_seen(&mut c);
@@ -1468,19 +1511,45 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
     Ok(())
 }
 
-const OLDER_PASSWORD_RECOVERY_WARNING: &str = "⚠  Mật khẩu bạn vừa nhập là một master password CŨ: nó chỉ mở được các bản sao lưu tạo \
-     TRƯỚC lần đổi master password gần nhất.\n   Nếu dựng lại kho từ các bản đó: kho quay về mật khẩu \
-     cũ này, và MỌI thứ đã thêm/sửa sau lần đổi mật khẩu sẽ KHÔNG có trong kho dựng lại.\n   Nên làm: \
-     trả lời N, rồi chạy lại `pwv recover` với master password HIỆN TẠI (mật khẩu đặt gần đây nhất). \
-     Nếu một máy tính / điện thoại khác vẫn mở được kho, hãy dùng máy đó.\n   Chỉ trả lời y nếu bạn \
-     chắc chắn không còn cách nào mở bằng mật khẩu hiện tại.";
+const OLDER_PASSWORD_RECOVERY_WARNING: &str = "⚠  Mật khẩu bạn vừa nhập có vẻ là một master password CŨ: nó chỉ mở được các bản sao lưu tạo \
+     TRƯỚC lần đổi master password gần nhất, còn thư mục sao lưu có bản dùng một master password đặt \
+     SAU đó.\n   Nếu dựng lại kho từ các bản đó: kho quay về mật khẩu cũ này, và MỌI thứ đã thêm/sửa \
+     sau lần đổi mật khẩu sẽ KHÔNG có trong kho dựng lại.\n   Nên làm: trả lời N, rồi chạy lại \
+     `pwv recover` với master password HIỆN TẠI (mật khẩu đặt gần đây nhất). Nếu một máy tính / điện \
+     thoại khác vẫn mở được kho, hãy dùng máy đó.\n   Chỉ trả lời y nếu bạn chắc chắn không còn cách \
+     nào mở bằng mật khẩu hiện tại.";
 
-const ONLY_PRE_CHANGE_WARNING: &str = "⚠  Mật khẩu bạn vừa nhập là ĐÚNG, nhưng mọi bản sao lưu ghi sau lần đổi master password gần \
-     nhất đã mất — chỉ còn các bản có từ TRƯỚC lần đổi đó. pwv không tự dùng chúng: nếu bạn đổi \
-     mật khẩu vì nghi nó đã bị lộ, người biết mật khẩu cũ có thể đã sửa các bản đó trước khi bạn đổi \
-     (ví dụ thay địa chỉ trang web ngân hàng).\n   Nên làm trước: tìm một bản mới hơn của file kho \
-     trong lịch sử phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc trên máy tính / \
-     điện thoại khác. Chỉ trả lời y nếu không còn bản nào khác.";
+/// Chỉ nói điều đã biết chắc: mật khẩu này mở được các bản có từ TRƯỚC một lần đổi master password,
+/// và không mở được bản nào ghi sau lần đổi đó. KHÔNG khẳng định đó là mật khẩu hiện tại, cũng không
+/// khẳng định các bản mới hơn đã mất (có thể chúng chưa đồng bộ về, hoặc dùng một mật khẩu khác).
+const ONLY_PRE_CHANGE_WARNING: &str = "⚠  Mật khẩu bạn vừa nhập chỉ mở được các bản sao lưu có từ TRƯỚC lần đổi master password gần \
+     nhất: không bản sao lưu nào ghi SAU lần đổi đó mở được bằng mật khẩu này. Có thể các bản mới hơn \
+     đã mất hoặc chưa đồng bộ về máy này — hoặc chúng dùng một master password khác (mới hơn).\n   pwv \
+     không tự dùng các bản này: nếu bạn đổi mật khẩu vì nghi nó đã bị lộ, người biết mật khẩu cũ có \
+     thể đã sửa chúng trước khi bạn đổi (ví dụ thay địa chỉ trang web ngân hàng).\n   Nên làm trước: \
+     thử lại với master password đặt gần đây nhất; tìm một bản mới hơn của file kho trong lịch sử \
+     phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc trên máy tính / điện thoại khác. \
+     Chỉ trả lời y nếu không còn bản nào khác.";
+
+const STALE_RECOVERY_QUESTION: &str = "Vẫn dựng lại kho từ các bản sao lưu CŨ HƠN này?";
+
+const STALE_RECOVERY_REFUSAL: &str = "kho dựng lại cũ hơn nội dung máy này đã từng thấy — dựng lại cần \
+     bạn xác nhận trực tiếp ở cửa sổ dòng lệnh (không dùng được -y). Chưa thay đổi gì. Hãy đợi dịch \
+     vụ đồng bộ tải xong thư mục sao lưu rồi chạy lại `pwv recover`.";
+
+/// Kho dựng lại dùng đúng khoá máy này biết, nhưng nội dung cũ hơn nội dung máy này đã từng thấy.
+fn stale_recovery_warning(r: &Rollback) -> String {
+    format!(
+        "⚠  Kho dựng lại CŨ HƠN nội dung mà máy này đã từng thấy: máy này đã thấy nội dung sửa lúc \
+         {}, còn kho dựng lại chỉ tới {}. Những gì thêm/sửa sau thời điểm đó sẽ KHÔNG có trong kho \
+         dựng lại.\n   Có thể các bản sao lưu mới hơn chưa đồng bộ về máy này. Nên làm trước: đợi \
+         Google Drive / Dropbox / OneDrive đồng bộ xong rồi chạy lại `pwv recover`; xem máy tính / \
+         điện thoại khác còn mở được kho không; hoặc tìm một bản mới hơn của file kho trong lịch sử \
+         phiên bản trên trang web của dịch vụ đồng bộ.",
+        format_time(r.seen_modified_at),
+        format_time(r.file_modified_at)
+    )
+}
 
 const OLDER_THAN_THIS_PC_WARNING: &str = "⚠  Máy này đã từng mở kho này bằng một master password MỚI HƠN mật khẩu bạn vừa nhập (hoặc \
      các bản sao lưu tìm được không nối tiếp kho mà máy này dùng lần trước).\n   Nếu dựng lại từ \
@@ -1692,6 +1761,16 @@ fn passwd_report_lines(
     }
     b.push('.');
     out.push(b);
+    if !r.backups_failed.is_empty() {
+        out.push(format!(
+            "⚠  {} bản sao lưu KHÔNG ghi lại được bằng mật khẩu mới (lỗi ghi đĩa): {}. Các bản này VẪN \
+             mở được bằng master password vừa bị thay. Nếu mật khẩu cũ có thể đã lộ, hãy xoá các file \
+             đó trong thư mục sao lưu: {}",
+            r.backups_failed.len(),
+            r.backups_failed.join(", "),
+            backups.display()
+        ));
+    }
     if archived_after > 0 {
         out.push(format!(
             "⚠  {archived_after} bản xung đột có từ trước lần đổi này đã được chuyển NGUYÊN VĂN vào thư \
@@ -1741,6 +1820,44 @@ fn passwd_report_lines(
             .to_string(),
     );
     out
+}
+
+/// Lần đồng bộ ngay trước khi đổi mật khẩu cho thấy đĩa có vấn đề (không chép được bản sao lưu,
+/// hoặc đọc lại file vừa ghi không khớp).
+fn passwd_disk_problem(pre: &SyncReport) -> bool {
+    pre.backup_failed || pre.unverified
+}
+
+fn passwd_disk_warning(backups: &Path) -> String {
+    format!(
+        "⚠  Đĩa hoặc thư mục sao lưu đang có vấn đề (xem cảnh báo ở trên). Đổi master password cũng \
+         phải ghi lại mọi bản sao lưu trong {} bằng mật khẩu mới — bản nào ghi lỗi sẽ VẪN mở được \
+         bằng mật khẩu cũ. Nên làm trước: kiểm tra dung lượng đĩa, đợi dịch vụ đồng bộ / phần mềm \
+         diệt virus thôi giữ file, chạy `pwv sync` cho tới khi hết cảnh báo, rồi mới đổi mật khẩu.",
+        backups.display()
+    )
+}
+
+const PASSWD_DISK_QUESTION: &str = "Vẫn đổi master password ngay bây giờ?";
+
+const PASSWD_DISK_REFUSAL: &str =
+    "đĩa hoặc thư mục sao lưu đang có vấn đề nên đổi master password cần \
+     bạn xác nhận trực tiếp ở cửa sổ dòng lệnh. Chưa đổi gì.";
+
+/// Lời khuyên khi có bản sao lưu dùng một master password KHÁC mà vẫn mở ra được khoá hiện tại
+/// (thường do đã đổi mật khẩu bằng bản 0.1.x, bản đó đổi mật khẩu mà giữ nguyên khoá mã hoá).
+fn other_password_backups_advice(n: usize, backups: &Path) -> String {
+    format!(
+        "⚠  LỜI KHUYÊN: {n} bản sao lưu trong {} dùng một master password KHÁC mật khẩu bạn vừa nhập \
+         nhưng vẫn mở ra được khoá mã hoá HIỆN TẠI của kho (thường do lần đổi master password trước \
+         đây được làm bằng bản pwv 0.1.x — bản đó đổi mật khẩu mà giữ nguyên khoá). Ai biết mật khẩu \
+         cũ đó và có một bản sao của thư mục đồng bộ thì đọc được cả kho hiện tại.\n   Cách sửa: \
+         chạy `pwv passwd` MỘT lần, trên MỘT máy (khoá app trên các máy khác trong lúc đó). Nếu mật \
+         khẩu hiện tại vẫn an toàn, bạn có thể nhập lại chính nó làm mật khẩu mới — khoá mã hoá vẫn \
+         được thay mới và các bản sao lưu được mã hoá lại. (Bản cũ trong lịch sử phiên bản trên cloud \
+         thì pwv không với tới được.)",
+        backups.display()
+    )
 }
 
 fn deleted_message(title: &str, id: &str) -> String {
@@ -1825,9 +1942,11 @@ fn advice(e: &CoreError) -> Option<&'static str> {
              xong về máy này, đợi rồi chạy lại `pwv recover`."
         }
         CoreError::OnlyPreChangeBackups => {
-            "Mật khẩu vừa nhập là đúng. Trước hết hãy tìm một bản mới hơn của file kho trong lịch sử \
-             phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc trên máy khác. Nếu không \
-             còn: chạy `pwv recover` trong cửa sổ dòng lệnh và xác nhận dựng lại từ các bản cũ đó."
+            "Mật khẩu vừa nhập chỉ mở được các bản sao lưu có từ TRƯỚC lần đổi master password gần \
+             nhất. Hãy thử lại với master password đặt gần đây nhất, và tìm một bản mới hơn của file kho \
+             trong lịch sử phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc trên máy khác. \
+             Nếu không còn: chạy `pwv recover` trong cửa sổ dòng lệnh và xác nhận dựng lại từ các bản \
+             cũ đó."
         }
         CoreError::OlderPasswordBackups => {
             "Dựng lại từ các bản đó sẽ đưa kho về master password CŨ và mất mọi thay đổi sau lần đổi \
@@ -2027,6 +2146,7 @@ fn prompt_line(msg: &str) -> Result<String> {
     io::stderr().flush()?;
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
+    discard_leftover_input();
     Ok(s)
 }
 
@@ -2044,7 +2164,9 @@ fn confirm_required(question: &str, refusal: &str) -> Result<bool> {
         eprint!("{question} [y/N] ");
         io::stderr().flush()?;
     }
-    match ask_yes_no_from(&mut io::stdin().lock(), interactive)? {
+    let answer = ask_yes_no_from(&mut io::stdin().lock(), interactive)?;
+    discard_leftover_input();
+    match answer {
         Some(yes) => Ok(yes),
         None => bail!("{refusal}"),
     }
@@ -2135,16 +2257,55 @@ fn prompt_notes() -> Result<Zeroizing<String>> {
     Ok(notes)
 }
 
-/// Hỏi một bí mật, ẩn khi gõ. Trước đó xả bộ đệm bàn phím: chữ còn sót lại (phần thừa của một lần
-/// dán) không được thành mật khẩu.
+/// Hỏi một bí mật, ẩn khi gõ (đọc thẳng từ cửa sổ dòng lệnh, không qua stdin).
+///
+/// Xả bộ đệm bàn phím TRƯỚC khi hỏi (chữ còn sót lại — phần thừa của một lần dán — không được
+/// thành mật khẩu) và SAU khi đọc: `rpassword` dừng ở dấu xuống dòng đầu tiên, nên các dòng sau của
+/// một lần dán nhiều dòng (mã PIN, mã khôi phục...) sẽ nằm lại và bị shell chạy như một lệnh, lưu
+/// vào lịch sử lệnh.
 fn prompt_hidden(msg: &str) -> Result<Zeroizing<String>> {
     discard_pending_input();
-    Ok(Zeroizing::new(rpassword::prompt_password(msg)?))
+    let read = rpassword::prompt_password(msg).map(Zeroizing::new);
+    READ_FROM_TERMINAL.store(true, std::sync::atomic::Ordering::Relaxed);
+    term::flush_input();
+    match read {
+        Ok(s) => Ok(s),
+        Err(_) if !term::has_terminal() => bail!("{}", no_terminal_message(msg)),
+        Err(e) => Err(anyhow!(e).context("không đọc được mật khẩu từ cửa sổ dòng lệnh")),
+    }
 }
+
+/// Không có cửa sổ dòng lệnh (chạy từ Task Scheduler, một lối tắt không có console, `setsid`...):
+/// nói rõ thay vì in lỗi của hệ điều hành ("No such device or address (os error 6)").
+fn no_terminal_message(prompt: &str) -> String {
+    let what = if prompt.starts_with("Master password") {
+        "master password"
+    } else {
+        "mật khẩu (ẩn khi gõ)"
+    };
+    format!(
+        "pwv cần một cửa sổ dòng lệnh để hỏi {what} — hãy chạy lệnh trong PowerShell / Terminal \
+         (pwv không nhận mật khẩu qua đường ống hay file)."
+    )
+}
+
+/// Đã có lần đọc thẳng từ cửa sổ dòng lệnh (lời nhắc ẩn) trong lần chạy này.
+static READ_FROM_TERMINAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Xả những gì đang chờ trong bộ đệm bàn phím của cửa sổ dòng lệnh (chưa được chương trình đọc).
 fn discard_pending_input() {
     term::flush_input();
+}
+
+/// Như [`discard_pending_input`], dùng SAU một lần đọc và khi thoát: chỉ khi pwv thật sự đọc từ cửa
+/// sổ dòng lệnh (stdin là cửa sổ dòng lệnh, hoặc đã có lời nhắc ẩn). Chạy với stdin là đường ống /
+/// file (script, test) mà không hỏi gì ẩn thì không đụng tới cửa sổ dòng lệnh nào. (Xả bộ đệm của
+/// cửa sổ dòng lệnh không bao giờ lấy mất dữ liệu của một đường ống.)
+fn discard_leftover_input() {
+    if io::stdin().is_terminal() || READ_FROM_TERMINAL.load(std::sync::atomic::Ordering::Relaxed) {
+        term::flush_input();
+    }
 }
 
 /// Unix: `tcflush(TCIFLUSH)` trên `/dev/tty` — đúng thiết bị mà `rpassword` đọc mật khẩu.
@@ -2171,6 +2332,11 @@ mod term {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     const TCIFLUSH: c_int = 1;
 
+    /// Có terminal điều khiển (`/dev/tty` mở được) — nơi `rpassword` đọc mật khẩu.
+    pub fn has_terminal() -> bool {
+        std::fs::File::open("/dev/tty").is_ok()
+    }
+
     pub fn flush_input() {
         // Không có terminal điều khiển (chạy từ script, dịch vụ) ⇒ không có gì để xả.
         if let Ok(tty) = std::fs::File::open("/dev/tty") {
@@ -2189,6 +2355,15 @@ mod term {
     use std::os::windows::io::AsRawHandle;
 
     use windows_sys::Win32::System::Console::FlushConsoleInputBuffer;
+
+    /// Có cửa sổ console (`CONIN$` mở được) — nơi `rpassword` đọc mật khẩu.
+    pub fn has_terminal() -> bool {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("CONIN$")
+            .is_ok()
+    }
 
     pub fn flush_input() {
         // Cần quyền ghi trên handle bộ đệm nhập của console.
@@ -2216,6 +2391,10 @@ mod term {
     target_os = "dragonfly"
 )))]
 mod term {
+    pub fn has_terminal() -> bool {
+        true
+    }
+
     pub fn flush_input() {}
 }
 
@@ -2890,6 +3069,86 @@ mod tests {
         );
     }
 
+    /// cli-fix-review#3: bản sao lưu ghi lại thất bại được nêu tên riêng, và nói thật rằng chúng vẫn
+    /// mở được bằng mật khẩu vừa bị thay.
+    #[test]
+    fn passwd_report_names_backups_that_could_not_be_rewritten() {
+        let r = PasswordChangeReport {
+            backups_reencrypted: 3,
+            backups_skipped: 1,
+            backups_failed: vec!["vault-1700.pwv".into(), "merged-1800-vault (1).pwv".into()],
+            ..Default::default()
+        };
+        let lines = passwd_report_lines(&r, 0, &[], Path::new("d/vault.pwv.backups"));
+        let failed = lines
+            .iter()
+            .find(|l| l.contains("KHÔNG ghi lại được"))
+            .expect("thiếu dòng về bản ghi lỗi");
+        assert!(failed.contains("2 bản sao lưu"));
+        assert!(failed.contains("vault-1700.pwv") && failed.contains("merged-1800-vault (1).pwv"));
+        assert!(failed.contains("VẪN mở được bằng master password vừa bị thay"));
+        assert!(failed.contains("hãy xoá") && failed.contains("d/vault.pwv.backups"));
+        // Câu "để nguyên" (không đọc được / khoá cũ hơn) vẫn giữ, và không lẫn tên các bản ghi lỗi.
+        let skipped = lines
+            .iter()
+            .find(|l| l.contains("1 bản để nguyên"))
+            .unwrap();
+        assert!(skipped.contains("CŨ HƠN nữa") && !skipped.contains("vault-1700.pwv"));
+        let l = passwd_report_lines(&PasswordChangeReport::default(), 0, &[], Path::new("x"))
+            .join("\n");
+        assert!(!l.contains("KHÔNG ghi lại được"));
+        // Trước khi đổi: đồng bộ báo lỗi đĩa ⇒ phải hỏi.
+        assert!(!passwd_disk_problem(&SyncReport::default()));
+        for r in [
+            SyncReport {
+                backup_failed: true,
+                ..Default::default()
+            },
+            SyncReport {
+                unverified: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(passwd_disk_problem(&r));
+        }
+        let w = passwd_disk_warning(Path::new("d/vault.pwv.backups"));
+        assert!(w.contains("d/vault.pwv.backups") && w.contains("VẪN mở được bằng mật khẩu cũ"));
+        assert!(!w.contains("     ") && !PASSWD_DISK_QUESTION.is_empty());
+    }
+
+    /// compat-upgrade#2: lời khuyên đổi mật khẩu một lần cho kho từng đổi mật khẩu ở bản 0.1.x.
+    #[test]
+    fn other_password_backups_advice_text() {
+        let a = other_password_backups_advice(3, Path::new("d/vault.pwv.backups"));
+        assert!(a.starts_with("⚠  LỜI KHUYÊN: 3 bản sao lưu"));
+        assert!(a.contains("pwv passwd") && a.contains("MỘT lần") && a.contains("MỘT máy"));
+        assert!(a.contains("khoá app trên các máy khác"));
+        assert!(a.contains("nhập lại chính nó làm mật khẩu mới"));
+        assert!(!a.contains("     "));
+    }
+
+    /// cli-fix-review#4.
+    #[test]
+    fn missing_terminal_is_explained() {
+        let m = no_terminal_message("Master password: ");
+        assert!(m.starts_with("pwv cần một cửa sổ dòng lệnh để hỏi master password"));
+        assert!(!m.contains("     "));
+        assert!(no_terminal_message("Mật khẩu mới: ").contains("để hỏi mật khẩu (ẩn khi gõ)"));
+    }
+
+    #[test]
+    fn stale_recovery_warning_shows_both_dates() {
+        let w = stale_recovery_warning(&Rollback {
+            seen_modified_at: 1_700_000_500_000,
+            file_modified_at: 1_700_000_000_123,
+            older_password: false,
+            unknown_key: false,
+        });
+        assert!(w.contains("2023-11-14 22:21:40 UTC") && w.contains("2023-11-14 22:13:20 UTC"));
+        assert!(w.contains("chưa đồng bộ") && w.contains("lịch sử phiên bản"));
+        assert!(!w.contains("     "));
+    }
+
     #[test]
     fn delete_message_points_to_trash_not_backups() {
         let m = deleted_message("Gmail", "aaaa1111-2222");
@@ -2966,13 +3225,26 @@ mod tests {
             assert!(!t.contains("     "), "{t}");
         }
         assert!(OLDER_THAN_THIS_PC_WARNING.contains("MỚI HƠN"));
+        // cli-fix-review#1: không khẳng định mật khẩu vừa nhập là mật khẩu hiện tại, cũng không khẳng
+        // định các bản mới hơn đã mất — chỉ nói điều đã biết.
         assert!(
-            ONLY_PRE_CHANGE_WARNING.contains("ĐÚNG")
+            !ONLY_PRE_CHANGE_WARNING.contains("ĐÚNG")
+                && !ONLY_PRE_CHANGE_WARNING.contains("đã mất —")
+                && ONLY_PRE_CHANGE_WARNING.contains("TRƯỚC lần đổi master password")
+                && ONLY_PRE_CHANGE_WARNING.contains("không bản sao lưu nào ghi SAU lần đổi đó")
                 && ONLY_PRE_CHANGE_WARNING.contains("lịch sử phiên bản")
         );
         let p = advice(&CoreError::OnlyPreChangeBackups).unwrap();
-        assert!(p.contains("đúng") && p.contains("pwv recover"));
-        assert!(!ONLY_PRE_CHANGE_WARNING.contains("     "));
+        assert!(!p.contains("là đúng") && p.contains("TRƯỚC") && p.contains("pwv recover"));
+        for t in [
+            ONLY_PRE_CHANGE_WARNING,
+            STALE_RECOVERY_QUESTION,
+            STALE_RECOVERY_REFUSAL,
+            PASSWD_DISK_REFUSAL,
+        ] {
+            assert!(!t.contains("     "), "{t}");
+        }
+        assert!(OLDER_PASSWORD_RECOVERY_WARNING.contains("có vẻ là một master password CŨ"));
         assert!(OLDER_THAN_THIS_PC_WARNING.contains("HIỆN TẠI"));
     }
 

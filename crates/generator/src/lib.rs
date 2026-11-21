@@ -279,26 +279,393 @@ pub struct MasterCheck {
     pub message: String,
 }
 
+/// Lý do từ chối khi master password chủ yếu ghép từ tên người, tên ngân hàng / dịch vụ và chữ số.
+pub const MASTER_PERSONAL_MESSAGE: &str =
+    "Mật khẩu này chủ yếu ghép từ tên người, tên ngân hàng/dịch vụ và chữ số — người biết bạn có \
+     thể đoán được. Hãy dùng một cụm 5–6 từ ngẫu nhiên (bấm «Gợi ý»).";
+
+/// Còn ít hơn chừng này chữ cái "không giải thích được" (không thuộc tên người, tên ngân hàng /
+/// dịch vụ, địa danh) thì master password bị coi là ghép từ thông tin cá nhân.
+pub const MASTER_MIN_FREE_LETTERS: usize = 6;
+
+/// Chỉ áp dụng luật trên khi các tên tìm thấy dài từ 3 chữ cái trở lên phủ ít nhất chừng này chữ
+/// cái: một mật khẩu ngẫu nhiên nhiều chữ số / ký hiệu (ít chữ cái, có thể tình cờ chứa `vu`, `le`,
+/// `hua`) không phải là "tên + ngày sinh". (Thử với hàng triệu mật khẩu ngẫu nhiên từ 14 ký tự: mức
+/// 6 vẫn từ chối nhầm vài cái, mức 8 thì không cái nào.)
+const MASTER_MIN_PERSONAL_LETTERS: usize = 8;
+
 /// Chấm một master password theo chính sách của pwv. Dùng chung cho app và CLI.
+///
+/// Ba luật, theo thứ tự: (1) ít nhất [`MASTER_MIN_CHARS`] ký tự; (2) không chủ yếu ghép từ tên
+/// người Việt, tên ngân hàng / ví / nhà mạng / dịch vụ lớn, địa danh và chữ số (xem
+/// [`personal_pattern_scan`] — zxcvbn không có từ điển tiếng Việt nên chấm những mật khẩu như
+/// `tranvanbinh12031985` như chuỗi ngẫu nhiên); (3) zxcvbn ước tính ít nhất
+/// 10^[`MASTER_MIN_GUESSES_LOG10`] lần đoán.
+///
+/// Chỉ dùng khi TẠO kho hoặc ĐỔI master password — không bao giờ khi mở kho, nên siết chính sách
+/// không khoá ai khỏi kho đang có.
 pub fn check_master_password(password: &str) -> MasterCheck {
-    let s = estimate_strength(password, &["pwv", "vault", "matkhau", "password", "master"]);
+    let s = estimate_strength(password, master_user_inputs());
     let chars = password.chars().count();
-    let message = if chars < MASTER_MIN_CHARS {
-        format!("Quá ngắn: cần ít nhất {MASTER_MIN_CHARS} ký tự (hiện {chars}).")
+    let personal = personal_pattern_scan(password).is_personal();
+    let (ok, message) = if chars < MASTER_MIN_CHARS {
+        (
+            false,
+            format!("Quá ngắn: cần ít nhất {MASTER_MIN_CHARS} ký tự (hiện {chars})."),
+        )
+    } else if personal {
+        (false, MASTER_PERSONAL_MESSAGE.to_string())
     } else if s.guesses_log10 < MASTER_MIN_GUESSES_LOG10 {
-        "Quá dễ đoán (tên, ngày sinh, số điện thoại, từ quen thuộc… ghép lại rất dễ bị dò). \
-         Hãy dùng một cụm 5–6 từ ngẫu nhiên, KHÔNG liên quan đến nhau (bộ tạo mật khẩu của pwv \
-         tạo được cụm như vậy)."
-            .to_string()
+        (
+            false,
+            "Quá dễ đoán (tên, ngày sinh, số điện thoại, từ quen thuộc… ghép lại rất dễ bị dò). \
+             Hãy dùng một cụm 5–6 từ ngẫu nhiên, KHÔNG liên quan đến nhau (bộ tạo mật khẩu của pwv \
+             tạo được cụm như vậy)."
+                .to_string(),
+        )
     } else {
-        "Đạt".to_string()
+        (true, "Đạt".to_string())
     };
     MasterCheck {
-        ok: chars >= MASTER_MIN_CHARS && s.guesses_log10 >= MASTER_MIN_GUESSES_LOG10,
+        ok,
         guesses_log10: s.guesses_log10,
         message,
     }
 }
+
+/// Từ "của pwv" luôn bị phạt, cộng các tên ngân hàng / dịch vụ / địa danh cho zxcvbn: từ 4 chữ cái
+/// trở lên (âm tiết tên người thì quá ngắn — zxcvbn sẽ chia nhỏ cả từ tiếng Anh bình thường) và
+/// không có trong danh sách EFF (để không hạ điểm passphrase do bộ tạo sinh ra, ví dụ `apple`).
+fn master_user_inputs() -> &'static [&'static str] {
+    use std::sync::OnceLock;
+    static INPUTS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    INPUTS.get_or_init(|| {
+        let mut v: Vec<&'static str> = vec!["pwv", "vault", "matkhau", "password", "master"];
+        for w in VN_SERVICE_WORDS.iter().chain(VN_PLACE_WORDS) {
+            if w.len() >= 4 && !v.contains(w) && !eff_wordlist().contains(w) {
+                v.push(w);
+            }
+        }
+        v
+    })
+}
+
+/// Kết quả quét "mẫu cá nhân" của một mật khẩu (xem [`personal_pattern_scan`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PersonalScan {
+    /// Chữ cái nằm trong một tên người / ngân hàng / dịch vụ / địa danh dài từ 3 chữ cái trở lên.
+    pub personal_letters: usize,
+    /// Chữ cái nằm trong một tên 2 chữ cái (`an`, `le`, `vu`, `mb`): giải thích được, nhưng không
+    /// tính vào `personal_letters` (chuỗi ngẫu nhiên rất hay tình cờ chứa chúng).
+    pub short_name_letters: usize,
+    /// Chữ cái còn lại (không giải thích được).
+    pub free_letters: usize,
+}
+
+impl PersonalScan {
+    /// Mật khẩu chủ yếu ghép từ thông tin cá nhân: các tên dài từ 3 chữ cái phủ ít nhất
+    /// [`MASTER_MIN_PERSONAL_LETTERS`] chữ cái và còn lại ít hơn [`MASTER_MIN_FREE_LETTERS`] chữ
+    /// cái tự do.
+    pub fn is_personal(&self) -> bool {
+        self.personal_letters >= MASTER_MIN_PERSONAL_LETTERS
+            && self.free_letters < MASTER_MIN_FREE_LETTERS
+    }
+}
+
+/// Quét mật khẩu (xác định, không ngẫu nhiên): chữ thường, bỏ dấu tiếng Việt (đ → d), rồi trong
+/// mỗi dãy chữ cái liền nhau, từ trái sang phải, đánh dấu từ dài nhất khớp được trong các danh sách
+/// tên người Việt (họ, tên đệm, tên), tên ngân hàng / ví điện tử / nhà mạng / dịch vụ lớn (và các
+/// từ như `pwv`, `matkhau`, `password`), địa danh. Chữ số, ký hiệu, khoảng trắng luôn "giải thích
+/// được" (không phải chữ cái). Chữ cái nào không thuộc từ nào là chữ cái tự do.
+///
+/// Ngoại lệ: một dãy chữ cái tách trọn vẹn được thành các từ của danh sách EFF (đúng những từ bộ
+/// tạo passphrase dùng) là chữ cái tự do hết — các từ đó được chọn ngẫu nhiên, không phải thông tin
+/// cá nhân, kể cả khi trong từ có một âm tiết trùng tên người (`manhandle`, `chosen`). Nhờ vậy luật
+/// này không bao giờ từ chối một passphrase do pwv tạo ra (zxcvbn vẫn chấm những từ quen như
+/// `password`, `google`).
+pub fn personal_pattern_scan(password: &str) -> PersonalScan {
+    let dict = personal_dictionary();
+    let mut scan = PersonalScan::default();
+    let mut run: Vec<u8> = Vec::new();
+    let flush = |run: &mut Vec<u8>, scan: &mut PersonalScan| {
+        if dict.splits_into_eff_words(run) {
+            scan.free_letters += run.len();
+            run.clear();
+            return;
+        }
+        let mut i = 0;
+        while i < run.len() {
+            let longest = (2..=dict.max_len.min(run.len() - i))
+                .rev()
+                .find(|&n| dict.words.contains(&run[i..i + n]));
+            match longest {
+                Some(n) if n >= 3 => {
+                    scan.personal_letters += n;
+                    i += n;
+                }
+                Some(n) => {
+                    scan.short_name_letters += n;
+                    i += n;
+                }
+                None => {
+                    scan.free_letters += 1;
+                    i += 1;
+                }
+            }
+        }
+        run.clear();
+    };
+    for c in password.chars().flat_map(char::to_lowercase) {
+        let c = fold_vietnamese(c);
+        if c.is_ascii_lowercase() {
+            run.push(c as u8);
+        } else {
+            flush(&mut run, &mut scan);
+            if c.is_alphabetic() {
+                // Chữ cái ngoài bảng a–z (chữ Hy Lạp, Cyrillic, chữ Hán...): không có trong từ điển.
+                scan.free_letters += 1;
+            }
+        }
+    }
+    flush(&mut run, &mut scan);
+    scan
+}
+
+struct PersonalDictionary {
+    words: std::collections::HashSet<&'static [u8]>,
+    max_len: usize,
+    eff: std::collections::HashSet<&'static [u8]>,
+    eff_max_len: usize,
+}
+
+impl PersonalDictionary {
+    /// `run` (chữ thường a–z) ghép trọn vẹn từ một hay nhiều từ EFF.
+    fn splits_into_eff_words(&self, run: &[u8]) -> bool {
+        if run.is_empty() {
+            return false;
+        }
+        // reach[i]: run[..i] tách được.
+        let mut reach = vec![false; run.len() + 1];
+        reach[0] = true;
+        for i in 0..run.len() {
+            if !reach[i] {
+                continue;
+            }
+            for n in 1..=self.eff_max_len.min(run.len() - i) {
+                if self.eff.contains(&run[i..i + n]) {
+                    reach[i + n] = true;
+                }
+            }
+        }
+        reach[run.len()]
+    }
+}
+
+fn personal_dictionary() -> &'static PersonalDictionary {
+    use std::sync::OnceLock;
+    static DICT: OnceLock<PersonalDictionary> = OnceLock::new();
+    DICT.get_or_init(|| {
+        let words: std::collections::HashSet<&'static [u8]> = VN_NAME_SYLLABLES
+            .iter()
+            .chain(VN_SERVICE_WORDS)
+            .chain(VN_PLACE_WORDS)
+            .map(|w| w.as_bytes())
+            .filter(|w| w.len() >= 2)
+            .collect();
+        let max_len = words.iter().map(|w| w.len()).max().unwrap_or(0);
+        let eff: std::collections::HashSet<&'static [u8]> =
+            // "drop-down", "t-shirt"...: dấu gạch ngang tách thành hai dãy chữ cái.
+            eff_wordlist()
+                .iter()
+                .flat_map(|w| std::iter::once(*w).chain(w.split('-')))
+                .filter(|w| !w.is_empty())
+                .map(str::as_bytes)
+                .collect();
+        let eff_max_len = eff.iter().map(|w| w.len()).max().unwrap_or(0);
+        PersonalDictionary {
+            words,
+            max_len,
+            eff,
+            eff_max_len,
+        }
+    })
+}
+
+/// Bỏ dấu một chữ cái tiếng Việt (đã viết thường): `ằ` → `a`, `đ` → `d`, `ữ` → `u`...
+fn fold_vietnamese(c: char) -> char {
+    const GROUPS: [(&str, char); 7] = [
+        ("àáảãạăằắẳẵặâầấẩẫậ", 'a'),
+        ("èéẻẽẹêềếểễệ", 'e'),
+        ("ìíỉĩị", 'i'),
+        ("òóỏõọôồốổỗộơờớởỡợ", 'o'),
+        ("ùúủũụưừứửữự", 'u'),
+        ("ỳýỷỹỵ", 'y'),
+        ("đ", 'd'),
+    ];
+    if c.is_ascii() {
+        return c;
+    }
+    GROUPS
+        .iter()
+        .find(|(set, _)| set.contains(c))
+        .map_or(c, |&(_, base)| base)
+}
+
+/// Họ, tên đệm và tên phổ biến của người Việt (viết thường, không dấu).
+pub const VN_NAME_SYLLABLES: &[&str] = &[
+    // Họ
+    "nguyen", "tran", "le", "pham", "hoang", "huynh", "phan", "vu", "vo", "dang", "bui", "do", "ho",
+    "ngo", "duong", "ly", "dinh", "doan", "trinh", "truong", "lam", "luong", "luu", "mai", "cao",
+    "ha", "ta", "tang", "thai", "chau", "quach", "ton", "la", "kieu", "khuc", "giang", "mac",
+    "hua", "trieu", "vuong", "tong", "phung", "kim", "diep", "nghiem", "lai", "thach", "khong",
+    "bach", "tieu", "nong", "lo", "chu", "dao", "lieu", "ung", "ong", "khuat", "quan", "au", "lu",
+    "cu", "kha", "thieu", "uong", "lang", "tiet", "ninh", "son", "ma", "doan",
+    // Tên đệm và tên
+    "van", "thi", "huu", "duc", "cong", "quang", "dinh", "xuan", "thanh", "minh", "ngoc", "gia",
+    "bao", "anh", "an", "binh", "hung", "hoa", "hai", "hanh", "hien", "hieu", "hoai", "hong",
+    "hue", "huong", "huy", "khanh", "khoa", "kien", "lan", "linh", "loan", "long", "my", "nam",
+    "nga", "ngan", "nhan", "nhung", "phong", "phuc", "phuong", "quoc", "quyen", "tam", "tan",
+    "thao", "thang", "thinh", "thu", "thuy", "tien", "trang", "trung", "tuan", "tung", "tuyet",
+    "uyen", "viet", "vinh", "yen", "cuong", "chi", "dung", "dat", "diem", "dieu", "hau", "hiep",
+    "hoan", "khang", "khai", "loc", "luan", "man", "nhi", "nhu", "phat", "phu", "quy", "sang",
+    "tai", "thien", "thong", "thuan", "ti", "toan", "truc", "tu", "tue", "tuong", "vy", "duy",
+    "hao", "dong", "nhat", "nhien", "nguyet", "tuyen", "chinh", "dai", "dien", "doanh", "giao",
+    "han", "hang", "hop", "khiem", "khue", "lap", "lien", "loi", "luyen", "mien", "mong", "nghia",
+    "phi", "phuoc", "quynh", "sinh", "suong", "tham", "thoa", "thom", "thuong", "tin", "tinh",
+    "trai", "tram", "tri", "trong", "uy", "vi", "vien", "xuyen", "khoi", "khuong", "quyet", "sam",
+    "sau", "sen", "tho", "toai", "ut", "bich", "bang", "cam", "chien", "dan", "danh", "luc",
+    "manh", "thai", "hoang", "diu", "ly", "nhan", "oanh", "kiet", "kiem", "lich", "lua", "nguyen",
+    "phat", "quang", "thuc", "trieu", "trinh", "tri", "tuyet", "vu",
+];
+
+/// Ngân hàng, ví điện tử, nhà mạng và dịch vụ lớn ở Việt Nam, cùng các từ luôn bị phạt.
+pub const VN_SERVICE_WORDS: &[&str] = &[
+    "vietcombank",
+    "vcb",
+    "techcombank",
+    "tcb",
+    "bidv",
+    "vietinbank",
+    "ctg",
+    "agribank",
+    "mbbank",
+    "mb",
+    "acb",
+    "vpbank",
+    "tpbank",
+    "sacombank",
+    "stb",
+    "hdbank",
+    "vib",
+    "shb",
+    "ocb",
+    "msb",
+    "eximbank",
+    "seabank",
+    "lienvietpostbank",
+    "lpbank",
+    "namabank",
+    "abbank",
+    "baovietbank",
+    "bacabank",
+    "pvcombank",
+    "kienlongbank",
+    "ncb",
+    "scb",
+    "vietbank",
+    "vietabank",
+    "shinhan",
+    "hsbc",
+    "citibank",
+    "uob",
+    "woori",
+    "cake",
+    "timo",
+    "tnex",
+    "momo",
+    "zalopay",
+    "vnpay",
+    "shopeepay",
+    "viettelpay",
+    "moca",
+    "airpay",
+    "viettel",
+    "vinaphone",
+    "mobifone",
+    "vietnamobile",
+    "gmobile",
+    "vnpt",
+    "fpt",
+    "zalo",
+    "facebook",
+    "fb",
+    "google",
+    "gmail",
+    "yahoo",
+    "hotmail",
+    "outlook",
+    "icloud",
+    "apple",
+    "microsoft",
+    "shopee",
+    "lazada",
+    "tiki",
+    "sendo",
+    "grab",
+    "gojek",
+    "tiktok",
+    "youtube",
+    "instagram",
+    "messenger",
+    "netflix",
+    "evn",
+    "bank",
+    "nganhang",
+    "banking",
+    "pwv",
+    "vault",
+    "matkhau",
+    "mk",
+    "password",
+    "pass",
+    "master",
+    "admin",
+    "login",
+    "email",
+    "mail",
+    "com",
+    "vn",
+];
+
+/// Tỉnh, thành phố hay được dùng trong mật khẩu.
+pub const VN_PLACE_WORDS: &[&str] = &[
+    "vietnam",
+    "hanoi",
+    "saigon",
+    "hcm",
+    "tphcm",
+    "sg",
+    "hn",
+    "danang",
+    "haiphong",
+    "cantho",
+    "hue",
+    "nhatrang",
+    "dalat",
+    "vungtau",
+    "quangninh",
+    "halong",
+    "namdinh",
+    "thaibinh",
+    "nghean",
+    "thanhhoa",
+    "binhduong",
+    "dongnai",
+    "bienhoa",
+    "quynhon",
+    "buonmathuot",
+    "phuquoc",
+];
 
 fn label_for(score: u8) -> &'static str {
     match score {
@@ -486,5 +853,134 @@ mod tests {
         // Mật khẩu ngẫu nhiên 20 ký tự cũng đạt.
         let p = generate_password(&PasswordOptions::default()).unwrap();
         assert!(check_master_password(&p).ok);
+    }
+
+    /// docs-claims#1: zxcvbn không có từ điển tên người / ngân hàng Việt Nam nên các mật khẩu này
+    /// từng được chấm "Đạt".
+    #[test]
+    fn master_password_policy_rejects_names_banks_and_dates() {
+        for weak in [
+            "Vietcombank@Nguyenvanan",
+            "tranvanbinh12031985",
+            "Techcombank#Tranthibinh",
+            "phamminhanh0912345678",
+            "Nguyen.Van.An.1990!",
+            "nguyenvanan_vcb_1990",
+            "NguyenVanAn-12/03/1985",
+            "nguyenvanan@yahoo.com",
+            "an.nguyen.1990@gmail",
+            "Minhanh2012@Hanoi",
+            "Hanoi2024Vietcombank",
+            "Trần Văn Bình 12/03/1985",
+            "Đặng Thị Hồng Nhung 1990",
+            "MOMO-hoangthuy-0987654321",
+        ] {
+            let c = check_master_password(weak);
+            assert!(!c.ok, "{weak} lẽ ra phải bị từ chối");
+            assert_eq!(c.message, MASTER_PERSONAL_MESSAGE, "{weak}");
+            assert!(personal_pattern_scan(weak).is_personal(), "{weak}");
+        }
+        assert!(
+            MASTER_PERSONAL_MESSAGE.contains("tên người")
+                && MASTER_PERSONAL_MESSAGE.contains("Gợi ý")
+        );
+        // Tên ngân hàng / dịch vụ còn được đưa cho zxcvbn: ước tính thấp hơn hẳn trước đây.
+        let old = estimate_strength(
+            "Vietcombank@Nguyenvanan",
+            &["pwv", "vault", "matkhau", "password", "master"],
+        );
+        assert!(
+            check_master_password("Vietcombank@Nguyenvanan").guesses_log10
+                < old.guesses_log10 - 3.0
+        );
+    }
+
+    #[test]
+    fn master_password_policy_accepts_unrelated_words_and_random_strings() {
+        for good in [
+            "correct horse battery staple wagon",
+            "chiếc ghế gỗ kêu cót két dưới gầm bếp",
+            "ngua-pin-kep-dung-bien-xanh-42",
+            "mot-cum-tu-moi-rat-dai-khac-han-77",
+            "q8#Vz!pL2@xR7&mKw",
+            "Gx7-Tq2!vRz9@Lp4",
+        ] {
+            let c = check_master_password(good);
+            assert!(c.ok, "{good}: {} ({:.1})", c.message, c.guesses_log10);
+            assert_eq!(c.message, "Đạt");
+        }
+        // Chữ cái ngoài a–z, chữ số, ký hiệu: không phải tên.
+        assert_eq!(personal_pattern_scan("19851203!!").personal_letters, 0);
+        assert_eq!(personal_pattern_scan("Ωμέγα").free_letters, 5);
+        assert_eq!(fold_vietnamese('ệ'), 'e');
+        assert_eq!(fold_vietnamese('đ'), 'd');
+        assert_eq!(fold_vietnamese('ữ'), 'u');
+    }
+
+    /// Luật "tên + ngân hàng + chữ số" không bao giờ được từ chối thứ mà chính bộ tạo của pwv đề xuất:
+    /// mọi số từ của passphrase, có/không viết hoa, chữ số, mọi kiểu dấu ngăn cách; và mật khẩu ngẫu
+    /// nhiên từ 14 ký tự với mọi tổ hợp nhóm ký tự.
+    #[test]
+    fn personal_pattern_rule_never_rejects_generated_secrets() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut n = 0;
+        for words in MIN_WORDS..=MAX_WORDS {
+            for sep in ["-", " ", "", ".", "_"] {
+                for (capitalize, add_number) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    for _ in 0..12 {
+                        let o = PassphraseOptions {
+                            words,
+                            separator: sep.into(),
+                            capitalize,
+                            add_number,
+                        };
+                        let p = generate_passphrase_with(&o, &mut rng).unwrap();
+                        assert!(!personal_pattern_scan(&p).is_personal(), "{}", *p);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        for length in 14..=48 {
+            for (lowercase, uppercase, digits, symbols, exclude_ambiguous) in [
+                (true, true, true, true, false),
+                (true, true, true, false, false),
+                (true, false, true, false, false),
+                (true, false, false, false, false),
+                (true, false, true, true, false),
+                (true, true, true, true, true),
+                (false, true, true, false, false),
+            ] {
+                for _ in 0..30 {
+                    let o = PasswordOptions {
+                        length,
+                        lowercase,
+                        uppercase,
+                        digits,
+                        symbols,
+                        exclude_ambiguous,
+                        require_each: true,
+                    };
+                    let p = generate_password_with(&o, &mut rng).unwrap();
+                    assert!(!personal_pattern_scan(&p).is_personal(), "{}", *p);
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 10_000);
+        // Toàn bộ chính sách với passphrase mặc định của «Gợi ý» / `pwv gen -p` (5–8 từ).
+        for words in 5..=8 {
+            for _ in 0..25 {
+                let o = PassphraseOptions {
+                    words,
+                    ..Default::default()
+                };
+                let p = generate_passphrase_with(&o, &mut rng).unwrap();
+                let c = check_master_password(&p);
+                assert!(c.ok, "{}: {}", *p, c.message);
+            }
+        }
     }
 }
