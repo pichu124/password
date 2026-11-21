@@ -352,6 +352,9 @@ impl SyncResult {
                      được nó vào thư mục sao lưu — file vẫn để nguyên tại chỗ, app sẽ thử lại ở lần \
                      đồng bộ sau."
                 )),
+                // Đã cất xong: thông báo riêng về "bản ghi bằng mật khẩu cũ" (`old_key_archived`) đã
+                // nói đủ — không báo thêm một dòng "chưa gộp được" cho cùng một việc.
+                Err(VaultError::RetiredKeyCopy) => {}
                 Err(e) => out.errors.push(format!("{name}: {e}")),
             }
         }
@@ -823,6 +826,17 @@ impl Session {
             self.open_opts(),
             allow_older,
         )?;
+        // Lõi chỉ so với các bản trong thư mục sao lưu — mà ai có quyền ghi vào thư mục đồng bộ cũng
+        // xoá được các bản mới hơn. Máy này còn nhớ mốc riêng (ngoài thư mục đồng bộ): nếu nó đã biết
+        // một lần đổi mật khẩu mới hơn, hoặc một khoá mà kho dựng lại không hề biết, thì mật khẩu vừa
+        // nhập là mật khẩu CŨ ⇒ không ghi gì, báo như lõi; chỉ làm tiếp khi chủ kho chọn rõ ràng.
+        if !allow_older
+            && v.rollback_against(&self.config)
+                .is_some_and(|r| r.older_password || r.unknown_key)
+        {
+            drop(v);
+            return Err(VaultError::OlderPasswordBackups.into());
+        }
         self.vault = Some(v);
         self.lock_note = None;
         self.disk_problem = None;
@@ -2319,11 +2333,8 @@ mod tests {
         let r = s.sync().unwrap();
         assert_eq!(r.old_key_archived, 1);
         assert!(r.problem.is_none());
-        assert!(
-            r.errors.iter().any(|e| e.starts_with("v (1).pwv: ")),
-            "{:?}",
-            r.errors
-        );
+        // Đã cất xong ⇒ chỉ báo qua `old_key_archived`, không thêm dòng "chưa gộp được" trùng lặp.
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert!(
             !titles(&s).contains(&"Ghi bằng khoá cũ".to_string()),
             "không gộp"
@@ -2414,6 +2425,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(backup_dir(&p2));
         std::fs::write(&p2, b"hong").unwrap();
         assert_eq!(s2.recover(&p2, MP, false).unwrap_err().code, "no_backup");
+    }
+
+    /// Thư mục sao lưu chỉ còn bản dùng mật khẩu CŨ (các bản mới hơn đã bị xoá / dọn): lõi không thấy
+    /// gì mới hơn, nhưng máy này nhớ đã thấy một lần đổi mật khẩu mới hơn ⇒ vẫn báo `older_password`,
+    /// không ghi gì; chủ kho chọn rõ ràng thì mới khôi phục.
+    #[test]
+    fn recovery_refuses_an_older_password_this_device_knows_is_old() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let before_change = std::fs::read(&p).unwrap();
+        s.change_master_password(MP, MP2).unwrap();
+        s.save_entry(input("B", Some("b"))).unwrap();
+        s.lock();
+        std::fs::remove_dir_all(backup_dir(&p)).unwrap();
+        std::fs::create_dir_all(backup_dir(&p)).unwrap();
+        std::fs::write(backup_dir(&p).join("v-1700000000000.pwv"), &before_change).unwrap();
+        std::fs::write(&p, b"hong").unwrap();
+        let e = s.recover(&p, MP, false).unwrap_err();
+        assert_eq!(e.code, "older_password", "{e:?}");
+        assert!(s.vault.is_none());
+        assert_eq!(std::fs::read(&p).unwrap(), b"hong", "không ghi gì");
+        let r = s.recover(&p, MP, true).unwrap();
+        assert_eq!(r.entries, 1);
+        assert!(s.vault.is_some());
     }
 
     /// Đổi mật khẩu chính đồng bộ trước: file kho trên đĩa hỏng ⇒ báo lỗi và KHÔNG đổi gì.

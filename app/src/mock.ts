@@ -214,9 +214,9 @@ const backups: BackupView[] = [
   { name: "vault (conflicted copy).merged-20261110.pwv", kind: "merged", timestamp: now - 10 * day, entries: 9, retired_key: false },
   { name: "vault.damaged-20261101.pwv", kind: "damaged", timestamp: now - 19 * day, entries: null, retired_key: false },
 ];
-// Bản "oldkey-…" do app cất (đã mã hoá lại bằng khoá hiện tại ⇒ retired_key = false, nhưng vẫn là nội dung ghi bằng mật khẩu cũ).
+// Bản "oldkey-…" do app cất: giữ nguyên văn, vẫn chỉ mở được bằng khoá cũ ⇒ retired_key = true.
 if (flag("oldkey") || flag("oldbackup"))
-  backups.unshift({ name: `oldkey-${now - 60_000}-vault (1).pwv`, kind: "oldkey", timestamp: now - 60_000, entries: 7, retired_key: false });
+  backups.unshift({ name: `oldkey-${now - 60_000}-vault (1).pwv`, kind: "oldkey", timestamp: now - 60_000, entries: 7, retired_key: true });
 // Bản tự động chỉ mở được bằng khoá của mật khẩu chính cũ (ví dụ ai đó đặt vào thư mục sao lưu).
 if (flag("oldbackup")) backups.splice(2, 0, { name: "vault-20261119-0700.pwv", kind: "auto", timestamp: now - 1.5 * day, entries: 7, retired_key: true });
 

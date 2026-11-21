@@ -245,7 +245,7 @@ function ChangeMaster() {
         {result.backups_skipped > 0 && (
           <p className="small">
             <strong>{result.backups_skipped}</strong> bản sao lưu được để nguyên, không mã hoá lại: bản không đọc được, hoặc bản được ghi bằng một mật
-            khẩu chính cũ hơn nữa (những bản đó vẫn mở được bằng mật khẩu cũ ấy; app cố ý không mã hoá lại chúng vì không chắc chúng là của bạn).
+            khẩu chính cũ hơn nữa, kể cả các bản “ghi bằng mật khẩu cũ” app đã cất (những bản đó vẫn mở được bằng mật khẩu cũ ấy; app cố ý không mã hoá lại chúng vì không chắc chúng là của bạn).
           </p>
         )}
         <div className="warning small">

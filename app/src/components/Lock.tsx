@@ -180,18 +180,23 @@ function OlderPasswordBox({ busy, canRecover, onRecoverOlder }: { busy: boolean;
   return (
     <div className="problem-box" role="alert">
       <p>
-        <strong>Bạn vừa nhập một mật khẩu chính CŨ.</strong>
+        <strong>Mật khẩu này có vẻ là một mật khẩu chính CŨ.</strong>
       </p>
       <p className="small">
-        Mật khẩu này chỉ mở được các bản sao lưu tạo <strong>trước</strong> lần đổi mật khẩu chính gần nhất. Khôi phục từ các bản đó sẽ đưa kho về
-        mật khẩu cũ và <strong>mất mọi thứ bạn đã thêm hoặc sửa kể từ lần đổi mật khẩu</strong>.
+        Thư mục sao lưu (hoặc chính máy này) ghi nhận một lần đổi mật khẩu chính <strong>mới hơn</strong> mà mật khẩu vừa nhập không mở được. Nếu
+        khôi phục bằng mật khẩu này, kho chỉ gồm những bản sao lưu nó mở được và sẽ dùng lại mật khẩu này — bạn có thể{" "}
+        <strong>mất mọi thứ đã thêm hoặc sửa kể từ lần đổi mật khẩu</strong>.
       </p>
       <p className="small">
         <strong>Tốt nhất:</strong> xoá ô mật khẩu, nhập mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất) rồi thử lại.
       </p>
       <button type="button" className="btn subtle wrap" disabled={busy || !canRecover} onClick={onRecoverOlder}>
-        {busy ? "Đang khôi phục…" : "Tôi không còn mật khẩu hiện tại — vẫn khôi phục từ các bản cũ"}
+        {busy ? "Đang khôi phục…" : "Vẫn khôi phục bằng mật khẩu này"}
       </button>
+      <p className="small muted">
+        Chỉ bấm nếu bạn không còn nhớ mật khẩu mới hơn, hoặc bạn chắc chắn đây chính là mật khẩu hiện tại (khi đó trong thư mục sao lưu đang có
+        file lạ — hãy kiểm tra ai khác có quyền vào thư mục đồng bộ của bạn).
+      </p>
     </div>
   );
 }
