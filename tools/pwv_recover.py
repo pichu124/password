@@ -6,12 +6,17 @@ Không dùng chung dòng code nào với app Rust. Mục đích:
   2. Nếu một ngày app hỏng / không build được, bạn vẫn lấy lại được dữ liệu.
 
 Cài đặt:  pip install pynacl argon2-cffi
-Dùng:     python pwv_recover.py "G:\\My Drive\\Passwords\\vault.pwv"
-          (in ra JSON đã giải mã — CẨN THẬN, đây là toàn bộ mật khẩu của bạn!)
+Dùng:     python pwv_recover.py "G:\\My Drive\\Passwords\\vault.pwv" -o backup.json
+          (ghi JSON đã giải mã ra file backup.json — CẨN THẬN, đó là toàn bộ mật khẩu của bạn;
+          xoá file ngay sau khi dùng)
+
+Luôn dùng -o thay vì "> backup.json": trên Windows, việc chuyển hướng bằng ">" làm hỏng các ký tự
+có dấu (và có thể làm công cụ dừng giữa chừng).
 
 Dùng được cho cả file trong thư mục sao lưu (vault.pwv.backups\\...).
 Trong JSON: "entries" là các mục đang dùng, "trash" là thùng rác.
 """
+import argparse
 import base64
 import getpass
 import hashlib
@@ -97,12 +102,21 @@ def decrypt_vault(data: bytes, password) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print(__doc__)
-        sys.exit(2)
-    with open(sys.argv[1], "rb") as f:
+    ap = argparse.ArgumentParser(
+        description="Giải mã file kho .pwv thành JSON (công cụ cứu hộ độc lập với app).")
+    ap.add_argument("vault", help="đường dẫn file kho .pwv (hoặc một file trong thư mục sao lưu)")
+    ap.add_argument("-o", "--output", metavar="FILE",
+                    help="ghi JSON ra FILE (UTF-8). Không ghi đè file đã có.")
+    ap.add_argument("--password-stdin", action="store_true",
+                    help="đọc master password từ dòng đầu của stdin (UTF-8) — chỉ dùng cho kiểm thử tự động")
+    args = ap.parse_args()
+
+    with open(args.vault, "rb") as f:
         data = f.read()
-    pw = getpass.getpass("Master password: ")
+    if args.password_stdin:
+        pw = sys.stdin.buffer.readline().decode("utf-8").rstrip("\r\n")
+    else:
+        pw = getpass.getpass("Master password: ")
     try:
         vault = decrypt_vault(data, pw)
     except Exception as e:  # nacl ném CryptoError khi sai mật khẩu / file hỏng
@@ -110,7 +124,25 @@ def main() -> None:
         sys.exit(1)
     # Khoá của các lần đổi master password trước: không cần cho việc cứu dữ liệu, không in ra.
     vault.pop("old_keys", None)
-    print(json.dumps(vault, ensure_ascii=False, indent=2))
+    text = json.dumps(vault, ensure_ascii=False, indent=2)
+    if args.output:
+        try:
+            # "x": báo lỗi nếu file đã có, để không vô tình ghi đè thứ gì khác.
+            with open(args.output, "x", encoding="utf-8", newline="\n") as out:
+                out.write(text + "\n")
+        except FileExistsError:
+            print(f"File {args.output} đã tồn tại — hãy chọn tên khác hoặc xoá nó trước.", file=sys.stderr)
+            sys.exit(1)
+        n = len(vault.get("entries", []))
+        print(f"Đã ghi {n} mục ra {args.output}. File này chứa mật khẩu ở dạng rõ — xoá ngay sau khi dùng.",
+              file=sys.stderr)
+        return
+    # Không có -o: in ra màn hình. Ép UTF-8 để tên/mật khẩu có dấu không làm công cụ dừng giữa chừng.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+    print(text)
 
 
 if __name__ == "__main__":

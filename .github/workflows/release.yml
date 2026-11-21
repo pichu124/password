@@ -19,6 +19,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
@@ -36,6 +39,18 @@ jobs:
           v=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Phát hành phiên bản $v"
+      # Kiểm tra lỗ hổng thư viện, kiểm tra chéo bằng công cụ Python, clippy… chỉ chạy trong CI.
+      # Không phát hành một commit mà CI chưa chạy xong hoặc đang đỏ.
+      - name: CI must be green for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=1" --jq '.total_count')
+          echo "Số lần CI xanh cho commit $GITHUB_SHA: $n"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::CI chưa xanh cho commit này. Hãy đợi workflow CI chạy xong (và xanh) rồi chạy lại Release."
+            exit 1
+          fi
       - name: Refuse to publish the same version twice
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/v${{ steps.v.outputs.version }}" >/dev/null; then
@@ -79,7 +94,7 @@ jobs:
           mkdir dist-release
           cp app/src-tauri/target/release/bundle/nsis/*.exe dist-release/
           cp app/src-tauri/target/release/bundle/msi/*.msi dist-release/
-          cp target/release/pwv.exe dist-release/pwv-cli.exe
+          cp target/release/pwv.exe dist-release/pwv.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -92,7 +107,11 @@ jobs:
     uses: ./.github/workflows/android.yml
     with:
       artifact-name: release-android
-    secrets: inherit
+      release-signing: true
+    # Chỉ chuyển đúng hai secret của khoá ký (không "inherit" toàn bộ).
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
 
   publish:
     needs: [check, windows, android]
@@ -123,9 +142,12 @@ jobs:
           Tải \`pwv_${V}_android-arm64.apk\` rồi mở để cài.
           ${SIGNER}
 
-          ## Lưu ý khi nâng cấp
-          Hãy cập nhật **mọi thiết bị** (các máy tính và điện thoại). Từ bản 0.2.0, file kho dùng định dạng mới:
-          bản app cũ hơn sẽ báo "hãy cập nhật phần mềm" thay vì mở file — không mất dữ liệu.
+          ## Lưu ý khi nâng cấp từ 0.1.x
+          Từ bản 0.2.0, file kho dùng định dạng mới mà bản cũ không đọc/ghi được. Hãy cập nhật **mọi thiết bị**:
+          1. **Khoá hoặc đóng pwv trên tất cả các máy** trước khi cài bản mới ở máy đầu tiên (những gì thêm/sửa
+             trên máy còn chạy bản cũ sau đó sẽ không lưu được).
+          2. Cài bản mới lần lượt trên từng máy tính và điện thoại.
+          3. Máy chưa cập nhật sẽ báo "hãy cập nhật phần mềm" thay vì mở file — dữ liệu không bị ảnh hưởng.
 
           ## Kiểm tra file tải về
           \`SHA256SUMS.txt\` chỉ giúp phát hiện file tải bị LỖI (so bằng PowerShell:

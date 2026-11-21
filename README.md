@@ -113,7 +113,9 @@ Nếu app phải khoá (hết giờ, đóng cửa sổ) trong lúc file kho đan
 
 ## Công cụ dòng lệnh `pwv.exe` (tuỳ chọn)
 
-Tải `pwv-cli.exe` ở trang Releases, hoặc tự build (`cargo build --release -p pwv-cli`).
+Tải `pwv.exe` ở trang Releases (hoặc tự build: `cargo build --release -p pwv-cli`), để vào một thư
+mục, mở PowerShell **tại thư mục đó** và gõ lệnh với `.\` ở đầu — ví dụ `.\pwv list`. (Các ví dụ dưới
+đây viết gọn là `pwv …`; muốn gõ được như vậy ở bất cứ đâu thì thêm thư mục chứa `pwv.exe` vào PATH.)
 
 ```powershell
 pwv init                       # tạo kho; gợi ý đặt trong thư mục đồng bộ
@@ -144,10 +146,11 @@ sử lệnh của PowerShell).
 
 ```powershell
 pip install pynacl argon2-cffi
-python tools\pwv_recover.py "G:\My Drive\Passwords\vault.pwv" > backup.json
+python tools\pwv_recover.py "G:\My Drive\Passwords\vault.pwv" -o backup.json
 ```
-⚠ `backup.json` chứa toàn bộ mật khẩu ở dạng rõ — xoá ngay sau khi dùng. Công cụ này được viết độc
-lập với app (chỉ dựa trên [docs/FORMAT.md](docs/FORMAT.md)) và đọc được cả file trong thư mục sao lưu.
+⚠ `backup.json` chứa toàn bộ mật khẩu ở dạng rõ — xoá ngay sau khi dùng. Luôn dùng `-o` (đừng dùng
+`> backup.json`: trên Windows cách đó làm hỏng các ký tự có dấu). Công cụ này được viết độc lập với
+app (chỉ dựa trên [docs/FORMAT.md](docs/FORMAT.md)) và đọc được cả file trong thư mục sao lưu.
 
 ## Giới hạn — những gì phần mềm KHÔNG bảo vệ được
 
@@ -193,6 +196,8 @@ Hãy làm với một kho thử (vài mục giả) trước:
 4. Bật chế độ máy bay → mở app: vẫn xem được bằng bản đã lưu, có ghi chú cho biết.
 5. Sửa một mục trên máy tính → trên điện thoại bấm ⟳: thấy thay đổi, dòng "Dữ liệu cập nhật lúc…" đổi.
 6. Để app ở nền hơn 1 phút → quay lại: app phải đang khoá.
+7. Khi gõ master password và mở khoá: điện thoại KHÔNG được hỏi "Lưu mật khẩu?" (Google Autofill /
+   trình quản lý mật khẩu của máy không được đề nghị lưu master password).
 
 ## Phát hành bản mới (dành cho người bảo trì)
 
@@ -200,16 +205,17 @@ Hãy làm với một kho thử (vài mục giả) trước:
    ```bash
    python tools/set_version.py 0.2.1
    ```
-2. Commit và push; chờ CI xanh.
+2. Commit và push; chờ CI xanh (workflow Release từ chối chạy nếu CI của đúng commit đó chưa xanh).
 3. Tab **Actions → Release → Run workflow** (chỉ chạy được trên nhánh mặc định). Workflow chạy test,
-   build bộ cài Windows + `pwv-cli.exe` + APK Android, rồi tạo bản phát hành `v0.2.1` kèm `SHA256SUMS.txt`.
+   build bộ cài Windows + `pwv.exe` (dòng lệnh) + APK Android, rồi tạo bản phát hành `v0.2.1` kèm `SHA256SUMS.txt`.
 4. App đang cài trên các máy sẽ hiện "Có phiên bản mới" trong vòng 24 giờ.
 
 **Khoá ký APK cố định** (để cài đè được, không phải gỡ app): tạo một keystore có alias `pwv`
 (`keytool -genkeypair -keystore release.jks -alias pwv -keyalg RSA -keysize 3072 -validity 10000`),
 lưu vào Secrets của repo: `ANDROID_KEYSTORE_BASE64` (nội dung file mã hoá base64) và
-`ANDROID_KEYSTORE_PASSWORD`. **Giữ một bản sao của keystore ở nơi an toàn** — mất nó là quay lại cảnh
-phải gỡ app để cập nhật. Không bao giờ đổi tên tài khoản GitHub chứa repo này: app kiểm tra bản mới
+`ANDROID_KEYSTORE_PASSWORD`. Khoá này chỉ được dùng trong workflow Release (ở một bước riêng không
+chạy mã của bên thứ ba); các bản build thử luôn ký bằng khoá tạm. **Giữ một bản sao của keystore ở
+nơi an toàn** — mất nó là quay lại cảnh phải gỡ app để cập nhật. Không bao giờ đổi tên tài khoản GitHub chứa repo này: app kiểm tra bản mới
 theo đúng tên đó.
 
 `SHA256SUMS.txt` nằm cùng chỗ với file cài nên chỉ giúp phát hiện file tải bị lỗi, không chứng minh

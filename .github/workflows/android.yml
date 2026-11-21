@@ -15,6 +15,11 @@ on:
       artifact-name:
         type: string
         default: dev-build-pwv-android-apk
+      # Chỉ workflow Release đặt true: ký bằng khoá cố định trong Secrets. Mọi bản build thử (push)
+      # luôn ký bằng khoá tạm, nên không bao giờ cài đè được lên app chính thức.
+      release-signing:
+        type: boolean
+        default: false
     secrets:
       ANDROID_KEYSTORE_BASE64:
         required: false
@@ -25,7 +30,8 @@ permissions:
   contents: read
 
 jobs:
-  apk:
+  # Job BUILD chạy mã của bên thứ ba (npm, Gradle, cargo) nên KHÔNG được thấy khoá ký.
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,37 +94,69 @@ jobs:
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npx tauri android build --apk --target aarch64 -- --locked
 
-      - name: Sign APK
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      - name: Collect unsigned APK
         run: |
           set -euo pipefail
           APK=$(find app/src-tauri/gen/android -name "*-unsigned.apk" | head -1)
+          test -n "$APK"
           echo "APK chưa ký: $APK"
+          cp "$APK" pwv-unsigned.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name || 'dev-build-pwv-android-apk' }}-unsigned
+          path: pwv-unsigned.apk
+          retention-days: 1
+
+  # Job KÝ chỉ tải file APK về và chạy công cụ của Android SDK có sẵn trên máy chạy: không checkout
+  # mã nguồn, không chạy npm/Gradle/cargo ⇒ một thư viện bị cài mã độc lúc build không chạm được khoá ký.
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name || 'dev-build-pwv-android-apk' }}-unsigned
+
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ inputs.release-signing && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+          KEYSTORE_PASSWORD: ${{ inputs.release-signing && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          APK=pwv-unsigned.apk
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           if [ -n "${KEYSTORE_B64:-}" ]; then
             echo "$KEYSTORE_B64" | base64 -d > release.jks
             PASS="$KEYSTORE_PASSWORD"
-            SIGNER="khoá cố định của kho mã (cài đè lên bản cũ được)"
+            SIGNER="khoá cố định của kho mã — các bản phát hành sau (cùng khoá này) cài đè lên được. Nếu app pwv đang cài trên điện thoại được ký bằng khoá khác (bản 0.1.x, hoặc một bản build thử) thì phải gỡ app cũ MỘT lần trước khi cài bản này; kho trên Drive/Dropbox không bị ảnh hưởng."
           else
-            # Chưa có khoá ký cố định trong Secrets ⇒ tạo khoá tạm cho lần build này.
-            # Hệ quả: muốn cài bản mới phải gỡ bản cũ trước (kho trên Drive/Dropbox không bị ảnh hưởng).
+            # Không dùng khoá cố định (bản build thử, hoặc chưa có khoá trong Secrets) ⇒ tạo khoá tạm
+            # cho lần build này. Hệ quả: muốn cài bản mới phải gỡ bản cũ trước (kho trên Drive/Dropbox
+            # không bị ảnh hưởng).
             PASS="pwv-temp-$(openssl rand -hex 12)"
             keytool -genkeypair -keystore release.jks -storepass "$PASS" -keypass "$PASS" \
               -alias pwv -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=pwv"
             SIGNER="KHOÁ TẠM của riêng lần build này (phải gỡ bản cũ trước khi cài)"
-            echo "::warning::Đang ký APK bằng khoá tạm. Thêm secret ANDROID_KEYSTORE_BASE64 để cập nhật được mà không cần gỡ app."
+            echo "::warning::Đang ký APK bằng khoá tạm. Bản phát hành cần secret ANDROID_KEYSTORE_BASE64 để cập nhật được mà không phải gỡ app."
           fi
           "$BT/zipalign" -f -p 4 "$APK" pwv-aligned.apk
           "$BT/apksigner" sign --ks release.jks --ks-pass "pass:$PASS" --ks-key-alias pwv \
             --out pwv-android-arm64.apk pwv-aligned.apk
           rm -f release.jks
           "$BT/apksigner" verify --print-certs pwv-android-arm64.apk | tee certs.txt
-          # Kiểm tra trên CHÍNH file APK: không cho sao lưu dữ liệu app.
+          # Kiểm tra trên CHÍNH file APK: không cho sao lưu / chuyển dữ liệu app sang máy khác.
+          # (So đúng GIÁ TRỊ của thuộc tính — mã định danh của thuộc tính cũng chứa chuỗi "0x0".)
           "$BT/aapt2" dump xmltree --file AndroidManifest.xml pwv-android-arm64.apk > manifest.txt
-          grep -A1 'allowBackup' manifest.txt
-          grep -A1 'allowBackup' manifest.txt | grep -q '=false\|0x0'
+          grep -E 'allowBackup|fullBackupContent|dataExtractionRules' manifest.txt || true
+          grep -Eq 'allowBackup\(0x[0-9a-f]+\)=(false|\(type 0x12\)0x0)$' manifest.txt
+          grep -Eq 'fullBackupContent\(0x[0-9a-f]+\)=(false|\(type 0x12\)0x0)$' manifest.txt
+          grep -Eq 'dataExtractionRules\(0x[0-9a-f]+\)=@' manifest.txt
           {
             echo "Ký bằng: $SIGNER"
             grep -i 'SHA-256' certs.txt | head -1

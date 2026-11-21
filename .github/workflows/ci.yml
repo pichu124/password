@@ -110,3 +110,7 @@ jobs:
       - name: npm audit (thư viện đi kèm app)
         working-directory: app
         run: npm audit --omit=dev
+      # Công cụ build (vite, tauri-cli…) tạo ra chính file cài đặt: chặn lỗ hổng mức cao trở lên.
+      - name: npm audit (cả công cụ build, mức cao trở lên)
+        working-directory: app
+        run: npm audit --audit-level=high

@@ -7,8 +7,11 @@ docs/FORMAT.md — phải đọc được:
 
 Dùng: python tools/check_recover.py <fixture.pwv tạo bởi `cargo run --example make_fixture -- fixture.pwv "pässwörd" "mật khẩu mới"`>
 """
+import json
 import pathlib
+import subprocess
 import sys
+import tempfile
 import unicodedata
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -40,7 +43,7 @@ def check_v2(path: str) -> None:
     # v2: thời điểm sửa của từng trường; mật khẩu được đổi sau khi mục được tạo.
     ft = bank["field_times"]
     assert ft["password"] >= ft["title"] > 0 and ft["deleted"] == 0, ft
-    assert bank["updated_at"] == max(v for k, v in ft.items() if k != "deleted"), bank
+    assert bank["updated_at"] == max([bank["created_at"]] + [v for k, v in ft.items() if k != "deleted"]), bank
     assert [e["title"] for e in d["trash"]] == ["Trong thùng rác"], d["trash"]
     assert d["trash"][0]["field_times"]["deleted"] > 0
     assert d["tombstones"] == []
@@ -53,6 +56,32 @@ def check_v2(path: str) -> None:
     assert nfd != new_pw
     assert decrypt_vault(data, nfd)["entries"] == d["entries"]
     print("v2 OK:", path)
+    check_command_line(path, new_pw, d)
+
+
+def check_command_line(path: str, password: str, expected: dict) -> None:
+    """Chạy đúng lệnh mà README hướng dẫn (có -o) như một tiến trình riêng: trên Windows, tên và
+    mật khẩu có dấu / emoji phải ra file UTF-8 nguyên vẹn (bản cũ in ra stdout và hỏng ở bước này)."""
+    tool = pathlib.Path(__file__).resolve().parent / "pwv_recover.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = pathlib.Path(tmp) / "backup.json"
+        cmd = [sys.executable, "-I", str(tool), path, "-o", str(out), "--password-stdin"]
+        r = subprocess.run(cmd, input=(password + "\n").encode("utf-8"), capture_output=True)
+        assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+        got = json.loads(out.read_text(encoding="utf-8"))
+        want = {k: v for k, v in expected.items() if k != "old_keys"}
+        assert got == want, "JSON ghi ra file khác với dữ liệu đã giải mã"
+        assert "old_keys" not in got
+        # Không ghi đè file đã có.
+        r = subprocess.run(cmd, input=(password + "\n").encode("utf-8"), capture_output=True)
+        assert r.returncode == 1, "lẽ ra phải từ chối ghi đè file đã có"
+        # Sai mật khẩu: báo lỗi, không tạo file.
+        out2 = pathlib.Path(tmp) / "wrong.json"
+        r = subprocess.run(
+            [sys.executable, "-I", str(tool), path, "-o", str(out2), "--password-stdin"],
+            input="sai mật khẩu\n".encode("utf-8"), capture_output=True)
+        assert r.returncode == 1 and not out2.exists()
+    print("lệnh cứu hộ (-o) OK")
 
 
 def check_v1() -> None:
