@@ -111,7 +111,7 @@ mạnh hơn sau. Nếu mật khẩu đang dùng yếu (ngắn, có tên, ngày s
     đã bị đổi ở máy khác trong lúc đó, app nhắc kiểm tra lại trước khi lưu (lời nhắc còn đó cho tới khi
     bạn lưu hoặc bỏ thay đổi, kể cả qua nhiều lần khoá). Bấm sang mục khác khi đang
     sửa dở thì app hỏi *Tiếp tục sửa* / *Lưu* / *Bỏ thay đổi*.
-  - Trên máy tính, mỗi mật khẩu bạn sao chép hoặc bấm *Dùng* trong bộ tạo được ghi vào mục **"Mật khẩu
+  - Trên máy tính, mỗi mật khẩu bạn sao chép hoặc bấm *Dùng mật khẩu này* trong bộ tạo được ghi vào mục **"Mật khẩu
     vừa tạo gần đây"** của bộ tạo (tối đa 20, tự xoá sau 30 ngày; chỉ trên máy này, đã mã hoá bằng
     khoá kho). Bấm *Hiện* hoặc *Sao chép* để lấy lại, *Xoá danh sách* để xoá.
   - Ô mật khẩu để trống khi sửa nghĩa là **giữ nguyên** mật khẩu đang lưu; muốn xoá hẳn thì bấm *Xoá
@@ -213,8 +213,9 @@ dùng lần trước" — xem bảng bên dưới.)
 - **Đừng để bản sao khác của kho trong cùng thư mục** (ví dụ `vault - Copy.pwv`): app sẽ coi đó là
   bản xung đột, gộp vào và cất đi.
 - Chuyển kho sang thư mục khác: dùng nút **Chuyển kho** trong Cài đặt trên MỘT máy; ở máy còn lại
-  app sẽ báo không tìm thấy file kho — bấm *Chọn file kho…* (có trên cả màn hình mở khoá lẫn dải báo
-  lỗi khi kho đang mở) và trỏ tới vị trí mới.
+  app sẽ báo không tìm thấy file kho — bấm *Chọn file kho…* (có trên màn hình "Không tìm thấy file kho"
+  và trên dải báo lỗi khi kho đang mở; ở màn hình mở khoá bình thường thì là *Dùng kho khác*) và trỏ
+  tới vị trí mới.
 - Nếu bạn lỡ chọn một bản xung đột (ví dụ `vault (1).pwv`) làm file kho, app hỏi "Có vẻ là bản xung
   đột": bấm *Dùng «vault.pwv» (nên chọn)*; app sẽ tự gộp bản còn lại.
 
@@ -426,7 +427,7 @@ Hãy làm với một kho thử (vài mục giả) trước:
 7. Xoá một mục → lấy lại từ Thùng rác. Sửa một mục → lấy lại bản cũ ở *Sao lưu & khôi phục*.
 8. **Tự khoá khi đang sửa dở:** mở một mục, bấm *Sửa*, gõ thử vào ghi chú, rồi để yên cho tới khi app
    tự khoá (Cài đặt có thể đặt 1 phút cho lần thử). Mở khoá: form phải tự mở lại với đúng chữ vừa gõ.
-   Bấm *Bỏ thay đổi*.
+   Bấm *Huỷ* rồi *Bỏ thay đổi* trên thanh nhắc hiện ra.
 9. **Khôi phục trên màn hình mở khoá** (chỉ với KHO THỬ, ví dụ `thu.pwv`): khoá và đóng app; chép
    `thu.pwv` ra một chỗ khác để phòng hờ. Mở PowerShell tại thư mục của kho thử và gõ
    `Set-Content .\thu.pwv "hong"` (ghi đè file kho THỬ bằng chữ "hong"). Mở app, nhập mật khẩu → app báo

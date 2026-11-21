@@ -148,9 +148,11 @@ pub enum BackupKind {
     Merged,
     /// File kho bị hỏng đã được thay bằng bản tốt: `damaged-<ms>-<tên gốc>`.
     Damaged,
-    /// Một bản (file kho chính hoặc bản xung đột) chỉ mở được bằng khoá của mật khẩu chính CŨ, nên
-    /// KHÔNG được tự gộp: `oldkey-<ms>-<tên gốc>`. Nội dung đã được mã hoá lại bằng khoá hiện tại
-    /// (mật khẩu cũ không mở được nó nữa); chủ kho xem lại và lấy từng mục ra nếu muốn.
+    /// Một bản chỉ mở được bằng khoá của mật khẩu chính CŨ (hoặc mang dấu `pre_change`), nên KHÔNG
+    /// được tự gộp: `oldkey-<ms>-<tên gốc>`; chủ kho xem lại và lấy từng mục ra nếu muốn. File kho chính
+    /// / bản xung đột tìm thấy trong thư mục đồng bộ được cất NGUYÊN VĂN (vẫn mở được bằng mật khẩu cũ
+    /// của nó); bản riêng của máy này (bản cứu hộ, bản lưu riêng) được mã hoá lại bằng khoá hiện tại
+    /// kèm dấu `pre_change` (mật khẩu cũ không mở được).
     OldKey,
 }
 

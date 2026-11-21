@@ -80,8 +80,9 @@ pub enum LocalMerge {
     /// Chỉ mở được bằng khoá CŨ (hoặc mang dấu `pre_change`), và kho đã có mọi thứ trong đó: không
     /// làm gì. Người gọi xoá / ghi đè file được.
     RetiredNoNews,
-    /// Chỉ mở được bằng khoá CŨ và có thứ kho chưa có: KHÔNG gộp; đã chép nguyên văn vào thư mục sao
-    /// lưu dưới tên `oldkey-…` (đường dẫn này) để chủ kho xem lại từng mục.
+    /// Chỉ mở được bằng khoá CŨ và có thứ kho chưa có: KHÔNG gộp; nội dung đã được mã hoá lại bằng
+    /// khoá hiện tại kèm dấu `pre_change` và cất vào thư mục sao lưu dưới tên `oldkey-…` (đường dẫn
+    /// này) để chủ kho xem lại từng mục.
     RetiredArchived(PathBuf),
 }
 
@@ -109,8 +110,8 @@ pub struct SaveReport {
     /// Không tạo được bản sao lưu trước khi ghi (file kho vẫn được ghi an toàn).
     pub backup_failed: bool,
     /// File kho trên đĩa chỉ mở được bằng khoá của mật khẩu chính CŨ (máy chưa biết lần đổi mật
-    /// khẩu đã ghi đè nó, hoặc ai đó biết mật khẩu cũ đã thay nó). Nó KHÔNG được gộp mà được cất vào
-    /// thư mục sao lưu (`oldkey-…`, đã mã hoá lại bằng khoá hiện tại), rồi file kho được ghi lại.
+    /// khẩu đã ghi đè nó, hoặc ai đó biết mật khẩu cũ đã thay nó). Nó KHÔNG được gộp mà được cất
+    /// NGUYÊN VĂN vào thư mục sao lưu (`oldkey-…`), rồi file kho được ghi lại.
     pub old_key_archived: bool,
     /// Đã ghi file kho nhưng đọc lại không xác minh được là đúng những byte đó (ví dụ phần mềm
     /// diệt virus / dịch vụ đồng bộ giữ file lúc đọc lại). Thay đổi KHÔNG bị hoàn tác: bản trong RAM
