@@ -63,7 +63,7 @@
 |---|---|---|
 | Kẻ trộm lấy được file kho (từ ổ cứng, cloud, backup) | ✅ | AEAD + Argon2id; brute-force phải tốn rất nhiều RAM/CPU cho mỗi lần thử |
 | Mất laptop khi kho đang khoá | ✅ | Như trên; khoá ở trạng thái nghỉ |
-| Mất laptop khi kho đang mở | ⚠️ một phần | Tự khoá theo thời gian / khi khoá màn hình |
+| Mất laptop khi kho đang mở | ⚠️ một phần | Tự khoá khi không dùng (mặc định 5 phút), khi máy vừa thức dậy, khi đóng cửa sổ. **Không** khoá khi khoá màn hình Windows (Win+L) hay ngay trước khi máy ngủ — README dặn bấm Ctrl+L trước |
 | Ai đó sửa/hoán đổi file kho | ✅ | Mã hoá có xác thực (AEAD) + header được xác thực → phát hiện ngay |
 | Rò rỉ qua clipboard | ⚠️ một phần | Tự xoá clipboard, đánh dấu “sensitive” để clipboard history của OS bỏ qua |
 | Nhìn trộm màn hình | ⚠️ một phần | Ẩn mật khẩu mặc định, chặn chụp màn hình (nơi OS hỗ trợ) |
@@ -196,7 +196,7 @@ Trạng thái tại bản 0.2.0 (sau đợt rà soát ở mục 9):
 - [x] Fuzz bộ đọc file; file mẫu của bản 0.1.2 nằm trong repo và được test ở mỗi lần build; công cụ giải mã độc lập bằng Python được kiểm tra chéo trong CI.
 - [x] `cargo audit` cho cả lõi lẫn app + `npm audit`, chạy hằng tuần.
 - [ ] Bản phát hành được **ký số** (Authenticode cho Windows, khoá cố định cho APK) — chưa.
-- [x] Người dùng được cảnh báo rõ "quên master password = mất dữ liệu"; chính sách master password chặn mật khẩu dễ đoán.
+- [x] Người dùng được cảnh báo rõ "quên master password = mất dữ liệu"; chính sách master password chặn phần lớn mật khẩu dễ đoán (không phải tất cả — app không biết tên, ngày sinh của chủ kho; xem 9.2).
 - [ ] Một **tổ chức/người độc lập** có chuyên môn review phần `vault-core` — chưa (mới có đợt rà soát nội bộ ở mục 9).
 - [ ] Các bước kiểm tra trên thiết bị thật trong README (Windows + Android) — người dùng tự làm.
 
@@ -299,6 +299,63 @@ phần mềm khác giữ; và các đường "cứu hộ" (khôi phục từ sao
   tầng app.
 - Mọi điểm "còn để ngỏ" của lượt đầu (ký số, khoá khi khoá màn hình, ghim action theo commit, kiểm
   định độc lập) vẫn còn nguyên.
+
+### 9.2. Đợt rà cuối (fix2, 11/2026, trước khi phát hành 0.2.0)
+
+Đợt này soát lại chính các bản sửa của 9.1, đi theo đường của kẻ tấn công (người biết một mật khẩu cũ /
+có quyền ghi vào thư mục đồng bộ / dùng được máy đang mở khoá), đường nâng cấp từ 0.1.2 khi các máy chưa
+cập nhật cùng lúc, và đối chiếu từng lời hứa trong README với mã. Đặc tả mới: [docs/FORMAT.md](docs/FORMAT.md)
+mục 1, 2, 3, 5, 6 ("Mốc đã thấy", "Dữ liệu riêng của app"), 7.
+
+| Nhóm | Vấn đề tìm thấy | Cách sửa |
+|---|---|---|
+| Nâng cấp | File v1 có tombstone kèm một mục vẫn sống (0.1.2 giữ mục được sửa SAU lần xoá) ⇒ lần mở đầu tiên bằng 0.2 âm thầm xoá mục đó, cả trong mọi bản sao lưu | Đọc phần thân v1: bỏ tombstone mà mục cùng id được sửa sau lần xoá (đúng quy tắc 0.1.2), rồi mới đưa về dạng chuẩn |
+| Nâng cấp | Kho từng đổi mật khẩu bằng 0.1.x vẫn dùng chung khoá với các bản sao lưu cũ ⇒ mật khẩu CŨ mở được mọi thứ 0.2 ghi | Phát hiện (quét bản sao lưu, không tốn Argon2, nhớ kết quả theo khoá) và mời đổi master password một lần (app: dải thông báo; CLI: `pwv backups`). Đổi sang đúng mật khẩu đang dùng cũng được |
+| Lõi | Khôi phục chỉ còn bản `pre_change` làm mất khoá đã nghỉ ⇒ các file thời khoá cũ thành "hỏng" | Bản mang dấu mang theo mọi khoá trong `old_keys` |
+| Lõi | 500 file rác / 40 bản cũ chép lại làm hỏng hoặc làm cũ việc khôi phục | Gốc tính là một bản; bỏ giới hạn số file xét; bỏ bản trùng từng byte; giới hạn 40 chỉ tính bản thêm được gì |
+| Lõi | Gói khoá trong header file chính bị hỏng/sửa ⇒ mật khẩu đúng bị báo "sai", chủ kho không được mời khôi phục | Báo "file hỏng" khi CHỨNG MINH được (phần thân xác thực được bằng khoá của một bản sao lưu với header của bản đó); không chứng minh được thì vẫn là "sai mật khẩu" — để file tự làm bằng mật khẩu cũ không biến một lần gõ mật khẩu cũ thành "file hỏng" |
+| Lõi | Mật khẩu cũ chỉ mở được một bản `pre_change` bị phát lại ⇒ báo "mật khẩu đúng, các bản mới đã mất" | Kiểm tra "mật khẩu cũ" đi trước |
+| Lõi | Đổi mật khẩu lỗi ghi một bản sao lưu ⇒ âm thầm còn bản mở bằng mật khẩu cũ | Thử lại một lần; vẫn lỗi thì báo tên file (app, CLI) để chủ kho xoá |
+| Lõi | File `.pwv` rác cạnh kho đẩy bản xung đột thật ra khỏi 32 chỗ; file kho khổng lồ làm treo máy | Lọc theo header trước khi giới hạn; file > 64 MiB là "hỏng" / bị bỏ qua |
+| App | Cửa sổ treo khi đĩa / dịch vụ đồng bộ chậm, và khi đó tự khoá không chạy ⇒ bí mật nằm trên màn hình | Mọi lệnh chạy ngoài luồng giao diện; đồng hồ "không dùng" nằm ngoài khoá phiên; khoá được "đặt chờ" và trang xoá bí mật ngay, không đợi đĩa |
+| App | Tự khoá / đóng app khi đang sửa một mục ⇒ mất mật khẩu vừa tạo (đã đổi trên trang web chưa kịp lưu) | Bản nháp form và "Mật khẩu vừa tạo gần đây" được niêm phong bằng khoá kho, giữ trong thư mục riêng của app (30 ngày, 20 dòng); form mở lại sau khi mở khoá; rời form đang sửa phải xác nhận |
+| App | Một máy ghi đè file kho khi chưa đồng bộ ⇒ những gì máy này đã lưu biến mất không dấu vết | "Bản lưu riêng trên máy này" (`last-<id>.pwv`, ngoài thư mục đồng bộ), gộp lại ở mỗi lần mở khoá; dùng được khi không còn bản sao lưu; tạo lại file kho từ nó khi file mất |
+| App | Khôi phục có thể đưa kho về một bản CŨ hơn bản máy này đã thấy mà không báo | Dừng và hỏi (`older_than_seen`), chỉ làm tiếp khi chủ kho chọn rõ; CLI cũng hỏi (không bỏ qua được bằng `-y`) |
+| App | "Sai mật khẩu" / "định dạng mới hơn" là ngõ cụt khi file hỏng đúng chỗ đó | Sau 2 lần sai: gợi ý dựng lại từ sao lưu; định dạng mới hơn: đường dựng lại có xác nhận |
+| App | "Lưu sang chỗ khác" khi file kho có vấn đề vẫn đụng tới chỗ cũ; nút trong README không có trên màn hình đó; chọn nhầm bản xung đột làm file kho | Chỉ chép (không ghi/xoá gì ở chỗ cũ); nút "Chọn file kho…" ở cả hai màn hình; hỏi khi file chọn có vẻ là bản xung đột; báo khi máy 0.1.x vừa ghi file kho |
+| CLI | Dòng dán thừa sau ô mật khẩu chạy thành lệnh trong shell; `pwv recover` không so với mốc "đã thấy" ở mọi đường; `pwv passwd` không báo bản sao lưu ghi lỗi | Xoá dữ liệu gõ thừa sau mỗi lần hỏi và khi thoát; so mốc ở mọi đường, hỏi trước khi dựng lại kho cũ hơn; báo tên file, hỏi trước khi đổi khi đĩa có vấn đề |
+| Chính sách | README hứa "tên + năm sinh, tên ngân hàng… bị từ chối"; nhiều mật khẩu như vậy vẫn lọt | Thêm luật nhận diện tên người / ngân hàng / dịch vụ / địa danh tiếng Việt ghép với chữ số (xem mã ở `crates/generator`); README nói "thường bị từ chối", không "luôn"; thông báo "đạt" không còn gọi mật khẩu tự đặt là mạnh |
+| Tài liệu / phát hành | Đường "cứu hộ không cần app" không làm theo được từ một bản tải về; công cụ Python không cảnh báo bản `pre_change` | `pwv_recover.py` được đính kèm mỗi bản phát hành (có trong `SHA256SUMS.txt`), README hướng dẫn từng bước; công cụ in cảnh báo nổi bật với bản `pre_change` (CI kiểm tra) |
+
+**Cố ý KHÔNG làm** (đã cân nhắc):
+- **Không tự đổi khoá khi nâng cấp** (kể cả với kho từng đổi mật khẩu bằng 0.1.x): đổi khoá là một lần
+  đổi master password — mã hoá lại mọi bản sao lưu, các máy khác phải mở lại — nên phải do chủ kho làm,
+  ở MỘT máy, khi các máy khác đã khoá. App chỉ phát hiện và nhắc.
+- **Không đổi tên các bản sao lưu** để tránh việc 0.1.x dọn theo tên: tên cũ phải tiếp tục đọc được, và
+  lời giải đúng là không dùng 0.1.x nữa khi đã có máy chạy 0.2 (README, mục nâng cấp).
+- **Không làm tombstone có điều kiện** ở v2 (tombstone vẫn tuyệt đối); chỉ phần thân v1 được đọc theo
+  quy tắc của 0.1.2. Xoá vĩnh viễn ở máy 0.1.x vẫn thắng lần sửa mới hơn ở máy 0.2 khi gộp.
+- **Bản cứu hộ và bản lưu riêng được tin cho cả nội dung dưới khoá đã nghỉ**: chúng nằm trong thư mục
+  riêng của app, không đồng bộ — cùng mức tin cậy với chính app trên máy đang đăng nhập. Đây là ngoại
+  lệ duy nhất của "nội dung dưới mật khẩu cũ không bao giờ được tự gộp".
+- Không chặn mọi mật khẩu "tự đặt": chỉ chấp nhận cụm từ do app sinh sẽ chặn cả mật khẩu mạnh hợp lệ.
+
+**Vẫn còn (README "Giới hạn", FORMAT.md mục 7):**
+- Hai file đặt vào thư mục sao lưu với hai gói khoá giả và `key_changed_at` rất lớn dùng hết 2 lượt
+  Argon2 của bước mở khoá qua bản mới hơn: mật khẩu HIỆN TẠI bị báo sai (khi file kho đã bị một máy chưa
+  biết mật khẩu mới ghi đè), rồi khôi phục báo "mật khẩu cũ". Không mất dữ liệu, nhưng gây nhầm.
+- Bước quét "đổi mật khẩu bằng 0.1.x" giữ khoá phiên trong lúc đọc tối đa 300 bản sao lưu (bắt đầu
+  khoảng 4 giây sau khi mở khoá, một lần cho mỗi khoá): trên thư mục đồng bộ chậm, các lệnh khác phải chờ
+  (tự khoá thì không).
+- Chính sách master password không biết tên, ngày sinh, số điện thoại của chính chủ kho; vài kiểu ghép
+  ngắn vẫn lọt luật riêng và chỉ còn zxcvbn chặn. Cách an toàn là cụm từ ngẫu nhiên («Gợi ý»).
+- Bộ đếm 20 giây xoá clipboard trên Android có thể bị trễ khi pwv nằm nền (hệ thống "đóng băng" app nền).
+- Gõ trong form tới 0,4 giây trước khi đóng cửa sổ bằng nút X có thể chưa vào bản nháp.
+- Khoá màn hình Windows / máy ngủ không khoá pwv ngay; mọi điểm "còn để ngỏ" của 9 và 9.1 (ký số, ghim
+  action theo commit, kiểm định độc lập) vẫn còn nguyên.
+- Đường xoá dữ liệu gõ thừa của CLI trên Windows và luồng "không có cửa sổ dòng lệnh" mới chỉ được kiểm
+  tra kiểu, chưa chạy trên Windows thật; app chưa chạy trên Windows / Android thật — các bước kiểm tra
+  trong README là bắt buộc.
 
 ## Nguồn tham khảo
 - Bitwarden Security Whitepaper — https://bitwarden.com/help/bitwarden-security-white-paper/

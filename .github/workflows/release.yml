@@ -95,6 +95,11 @@ jobs:
           cp app/src-tauri/target/release/bundle/nsis/*.exe dist-release/
           cp app/src-tauri/target/release/bundle/msi/*.msi dist-release/
           cp target/release/pwv.exe dist-release/pwv.exe
+          # Công cụ cứu hộ không cần app (README "Cứu hộ dữ liệu không cần app"). Lấy đúng nội dung đã
+          # commit (git show không đổi kiểu xuống dòng như bản checkout trên Windows có thể làm), để
+          # SHA256SUMS.txt khớp với file trong repo.
+          git show "HEAD:tools/pwv_recover.py" > dist-release/pwv_recover.py
+          python -I -m py_compile dist-release/pwv_recover.py
 
       - uses: actions/upload-artifact@v4
         with:
@@ -148,6 +153,14 @@ jobs:
              trên máy còn chạy bản cũ sau đó sẽ không lưu được).
           2. Cài bản mới lần lượt trên từng máy tính và điện thoại.
           3. Máy chưa cập nhật sẽ báo "hãy cập nhật phần mềm" thay vì mở file — dữ liệu không bị ảnh hưởng.
+          4. Khi đã có một máy dùng bản mới, **đừng dùng bản 0.1.x ở bất kỳ máy nào nữa** (kể cả \`pwv.exe\` cũ): xem mục
+             *Khi nâng cấp lên 0.2.0* trong README.
+
+          ## Cứu hộ dữ liệu không cần app
+          \`pwv_recover.py\` là công cụ Python độc lập (không dùng chung mã với app) để giải mã file kho hoặc một bản
+          sao lưu ra JSON khi app không mở được kho. Cách dùng (cài Python, \`py -m pip install pynacl argon2-cffi\`,
+          \`py pwv_recover.py …\`) nằm ở mục *Cứu hộ dữ liệu không cần app* trong README. Nên tải sẵn một bản
+          và giữ nó (cùng file này) trên máy hoặc USB, phòng khi cần mà không vào được trang này.
 
           ## Kiểm tra file tải về
           \`SHA256SUMS.txt\` chỉ giúp phát hiện file tải bị LỖI (so bằng PowerShell:
