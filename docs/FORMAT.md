@@ -180,7 +180,14 @@ Mỗi trường của một mục là một ô "ghi-sau-thắng": cặp *(thời
      kho, điện thoại tải lại, bản lưu riêng / bản cứu hộ): bỏ mọi tombstone của file v1 mà trong kho
      ĐÍCH có một mục (đang dùng hoặc trong thùng rác) cùng id được sửa sau lần xoá. Khi khôi phục, các
      tombstone của mọi file v1 (kể cả gốc) được gom lại và lọc một lần với kết quả gộp cuối cùng, nên
-     thứ tự gộp không ảnh hưởng.
+     thứ tự gộp không ảnh hưởng;
+   - khi tombstone v1 đã vào RAM (file kho chính v1 lúc mở, một lần gộp v1 trước đó) mà CHƯA được ghi
+     vào một file v2: `Vault` nhớ id của chúng (chỉ trong RAM, không bao giờ lưu); ở mỗi lần gộp sau đó
+     (file v1 hay v2), tombstone như vậy bị bỏ nếu file đến có mục cùng id (đang dùng hoặc trong thùng
+     rác) được sửa sau lần xoá — nên kết quả không phụ thuộc file nào được dịch vụ đồng bộ chọn làm file
+     chính, và một phiên mở lâu cho cùng kết quả với một lần mở mới. Danh sách được xoá sau mỗi lần ghi
+     file kho chính (v2) đã xác minh; tombstone đến từ file v2 hay lệnh xoá vĩnh viễn trên máy này không
+     bao giờ bị bỏ; giao dịch bị hoàn tác thì danh sách cũng được trả về như trước.
    Mục còn sống không bị chuyển vào thùng rác; tombstone còn lại (mục cũ hơn hoặc bằng lần xoá, hay id
    không có trong kho) được giữ và từ đó là tuyệt đối. **Hệ quả còn lại:** khi một tombstone v1 đã được
    ghi vào một file v2 thì nó tuyệt đối — một máy 0.2 đã áp nó lên một bản CŨ của mục sẽ vẫn xoá một lần
@@ -435,7 +442,7 @@ App máy tính giữ một thư mục riêng, **không đồng bộ**: `<app_loc
 
 | File | Nội dung | Khi nào ghi | Dùng thế nào |
 |---|---|---|---|
-| `<vault_id>-<ms>.pwv` | **Bản cứu hộ**: toàn bộ kho trong RAM, định dạng `.pwv` bình thường (mục 1–4), mã hoá như file kho | Khi phải khoá (hết giờ, đóng cửa sổ) mà còn thay đổi chưa ghi được ra file kho | Gộp ở lần mở khoá sau (và khi khôi phục); chỉ xoá sau khi đã xử lý xong (gộp, hoặc cất thành `oldkey-…`) VÀ kho đã ghi thành công |
+| `<vault_id>-<ms>.pwv` | **Bản cứu hộ**: toàn bộ kho trong RAM, định dạng `.pwv` bình thường (mục 1–4), mã hoá như file kho | Khi phải khoá (hết giờ, đóng cửa sổ) mà còn thay đổi chưa ghi được ra file kho | Gộp ở lần mở khoá sau (và khi khôi phục); bản gộp được chỉ bị xoá sau khi kho đã ghi thành công; bản ghi bằng khoá đã nghỉ bị xoá ngay sau khi đã cất (hoặc không có gì mới) |
 | `last-<vault_id>.pwv` | **Bản lưu riêng**: bản sao toàn bộ kho, định dạng `.pwv` bình thường | Sau mỗi lần đọc/ghi thành công và khi khoá — khi một trong (`vault_id`, SHA-256 của file kho trên đĩa, dấu khoá, `modified_at`, số mục, số mục trong thùng rác) đổi, và luôn khi còn thay đổi chưa ghi hoặc lần ghi gần nhất chưa xác minh | Gộp ở mỗi lần mở khoá (trước bản cứu hộ); khôi phục khi không còn bản sao lưu nào dùng được hoặc chỉ còn bản `pre_change`; nút "Tạo lại file kho từ bản lưu riêng" khi file kho mất |
 | `stash-<vault_id>.bin` | Khối niêm phong `"stash"`: bản nháp form đang sửa dở + danh sách "mật khẩu vừa tạo gần đây" (tối đa 20, mỗi dòng giữ tối đa 30 ngày) | Bản nháp: ~0,4 giây sau mỗi thay đổi trong form, khi cửa sổ bị ẩn / mất tiêu điểm, trước khi bấm khoá; xoá khi lưu hoặc bỏ thay đổi. Mật khẩu vừa tạo: khi bấm sao chép / "Dùng" trong bộ tạo | Mở lại form sau khi mở khoá; mục "Mật khẩu vừa tạo gần đây" |
 
@@ -446,10 +453,16 @@ App máy tính giữ một thư mục riêng, **không đồng bộ**: `<app_loc
   - giải mã được bằng **khoá hiện tại** và không mang `pre_change` ⇒ gộp (phép hợp của mục 5: không làm
     sống lại mục đã xoá vĩnh viễn, không đè lên thay đổi mới hơn);
   - chỉ mở được bằng **khoá đã nghỉ**, hoặc mang `pre_change` ⇒ **không bao giờ gộp**. Lõi thử gộp
-    trong RAM: nếu nó có thêm gì so với kho, file được cất **nguyên văn** vào thư mục sao lưu thành
-    `oldkey-<ms>-<tên file>` (nhãn "ghi bằng mật khẩu cũ", giữ lại như các bản `oldkey-` khác) và app báo
-    cho chủ kho; nếu không có gì mới thì bỏ qua. Cất không được ⇒ lỗi (file được giữ). Sau khi cất xong
-    (và kho đã ghi), app xoá file trong thư mục riêng.
+    trong RAM: nếu nó có thêm gì so với kho, nội dung của nó được **mã hoá lại bằng khoá HIỆN TẠI** với
+    dấu `pre_change` (kèm `old_keys` của kho — đúng dạng các bản sao lưu được mã hoá lại lúc đổi mật
+    khẩu) và cất vào thư mục sao lưu thành `oldkey-<ms>-<tên file>` (nhãn "ghi bằng mật khẩu cũ", giữ lại
+    như các bản `oldkey-` khác); app báo cho chủ kho. KHÔNG cất nguyên văn: bản cứu hộ thường chứa đúng
+    những gì chưa lên được thư mục đồng bộ, cất nguyên văn vào đó sẽ để mật khẩu cũ đọc được. Nội dung
+    trùng với một bản `oldkey-` đã có thì không cất thêm (trả về bản đã có). Nếu không có gì mới thì
+    không cất gì. Cất không được ⇒ lỗi (file được giữ). Bản ghi bằng khoá đã nghỉ (đã cất, hoặc không có
+    gì mới) được app xoá khỏi thư mục riêng ngay, không chờ kho ghi xong.
+    (File ghi bằng khoá đã nghỉ tìm thấy TRONG thư mục đồng bộ — bản xung đột, file kho chính — vẫn được
+    cất nguyên văn như mục 6.3: các byte đó vốn đã ở đó.)
   (Bản 0.2.0 trước đợt soát fix3 từng gộp cả nội dung dưới khoá đã nghỉ từ thư mục này; đã bỏ: ai dùng
   được tài khoản Windows và biết một mật khẩu cũ đặt được file vào đó.)
 - Bản **không mở được** (khoá mà kho hiện tại không biết — ví dụ ghi bằng một master password MỚI HƠN

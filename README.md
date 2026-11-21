@@ -266,10 +266,11 @@ Ngoài thư mục sao lưu (nằm trong thư mục đồng bộ), app trên máy
 Gộp hai loại `.pwv` trên là phép gộp an toàn: không làm sống lại mục đã xoá vĩnh viễn, không đè lên
 thay đổi mới hơn. Chỉ bản ghi bằng **khoá hiện tại** của kho mới được gộp. Bản được ghi bằng một master
 password **CŨ** (ví dụ ngay trước khi mật khẩu được đổi ở máy khác) **không bao giờ được gộp**, như mọi
-file khác: nếu nó có nội dung mà kho không có, app cất nguyên văn nó vào thư mục sao lưu với nhãn **"ghi
-bằng mật khẩu cũ"** (xoá bản trong thư mục riêng) và báo "Bản lưu riêng trên máy này được ghi bằng mật
-khẩu chính CŨ…" — mở *Cài đặt → Sao lưu & khôi phục* để xem và lấy lại từng mục **nếu chắc đó là thay đổi
-của bạn**. Nếu nó không có gì mới thì app bỏ qua.
+file khác: nếu nó có nội dung mà kho không có, app **mã hoá lại nội dung đó bằng khoá hiện tại** (mật
+khẩu cũ không mở được bản cất này) rồi cất vào thư mục sao lưu với nhãn **"ghi bằng mật khẩu cũ"**, xoá
+bản trong thư mục riêng, và báo "Bản lưu riêng trên máy này được ghi bằng mật khẩu chính CŨ…" — mở
+*Cài đặt → Sao lưu & khôi phục* để xem và lấy lại từng mục **nếu chắc đó là thay đổi của bạn**. Nếu nó
+không có gì mới thì app chỉ xoá nó đi.
 
 Bản nào **không gộp được** vì kho hiện tại không biết khoá của nó (ví dụ nó được ghi bằng một master
 password MỚI HƠN hoặc khác hẳn — chẳng hạn bạn vừa khôi phục kho về một mật khẩu cũ) hoặc vì file bị

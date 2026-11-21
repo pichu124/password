@@ -381,6 +381,22 @@ Một người rà soát độc lập đọc lại toàn bộ đợt 9.2 (mã v�
 - `pwv.exe` không có bản lưu riêng / bản nháp / danh sách mật khẩu vừa tạo.
 - Bước quét "đổi mật khẩu bằng 0.1.x" vẫn giữ khoá phiên trong lúc quét.
 
+### 9.4. Rà lại đợt fix3 và sửa nốt (fix4, 11/2026)
+
+Rà lại độc lập phần sửa 9.3 (lõi, backend app, giao diện, dòng lệnh, tài liệu). **Xác nhận** (đã sửa):
+
+| Nhóm | Vấn đề | Cách sửa |
+|---|---|---|
+| Lõi | Bản cứu hộ / bản lưu riêng ghi bằng mật khẩu cũ được cất NGUYÊN VĂN vào thư mục sao lưu — tức là vào thư mục đồng bộ — nên ai có mật khẩu cũ và file trên cloud đọc được những gì chưa từng lên cloud | Nội dung được mã hoá lại bằng khoá hiện tại với dấu `pre_change` trước khi cất (vẫn không bao giờ tự gộp); không cất trùng |
+| Nâng cấp | Tombstone v1 đã vào RAM (file chính v1) vẫn xoá một lần sửa mới hơn đến từ bản xung đột v1 ⇒ kết quả phụ thuộc file nào là file chính | Nhớ (chỉ trong RAM) các tombstone v1 chưa ghi vào file v2 và áp quy tắc 0.1.2 cho chúng ở mọi lần gộp |
+| App | Nút khoá không chờ đĩa nữa, nhưng bản nháp đang xếp hàng sau một thao tác chậm thì bị bỏ (lệnh lưu bản nháp chạy SAU lệnh khoá) | Bản nháp và mật khẩu vừa tạo đi qua một hàng chờ ngoài khoá phiên, được ghi vào kho trước khi khoá |
+| Chính sách / tài liệu | Chữ "Ð" (U+00D0) giống "Đ" lọt luật tên riêng; vài câu chữ không khớp mã | Gộp "Ð" như "Đ"; sửa câu chữ |
+
+**Vẫn còn** (như 9.3): tombstone v1 đã ghi vào file v2 là tuyệt đối; file rác mang đúng `vault_id`
+chiếm được 32 chỗ xét bản xung đột; hai gói khoá giả dùng hết 2 lượt Argon2 ở bước mở khoá qua bản mới
+hơn; tên người ghép với một từ thường ("yêu", "mẹ"…) và ngày sinh vẫn có thể được chấp nhận — app không
+biết tên và ngày sinh của chính chủ kho.
+
 ## Nguồn tham khảo
 - Bitwarden Security Whitepaper — https://bitwarden.com/help/bitwarden-security-white-paper/
 - 1Password Security Design — https://agilebits.github.io/security-design/1Password_Security_Design.pdf
