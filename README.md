@@ -42,16 +42,22 @@ Xem mục *Phát hành* để tạo khoá ký cố định.
 được. Làm theo thứ tự:
 1. **Mở kho trên từng máy và chờ đồng bộ xong**, rồi **khoá hoặc đóng pwv trên tất cả các máy**.
 2. Cài 0.2.0 lần lượt trên từng máy tính và điện thoại, mở kho bình thường.
-3. Máy nào chưa cập nhật sẽ báo "hãy cập nhật phần mềm" thay vì mở file — dữ liệu trong file không
-   bị ảnh hưởng, chỉ cần cài bản mới. Những gì bạn thêm/sửa trên máy đó sau thời điểm này không lưu
-   được.
+3. Mở kho trên máy 0.2.0 thôi thì CHƯA đổi gì: file kho chỉ chuyển sang định dạng mới khi một máy đã
+   cập nhật **lưu một thay đổi** (thêm/sửa/xoá một mục). Trước lúc đó, máy chưa cập nhật vẫn mở và lưu
+   bình thường — và những gì nó lưu sẽ được gộp vào sau theo kiểu "cả mục" (xem bên dưới). Từ khi máy
+   đã cập nhật lưu một thay đổi, máy chưa cập nhật sẽ báo "hãy cập nhật phần mềm" thay vì mở file — dữ
+   liệu trong file không bị ảnh hưởng, chỉ cần cài bản mới; nó không lưu được gì nữa cho tới khi cập
+   nhật.
 
 **Từ khi đã có một máy chạy 0.2.0, đừng dùng bản 0.1.x ở bất kỳ máy nào nữa** (kể cả `pwv.exe` cũ):
 - Một mục được sửa trên máy còn chạy 0.1.x (ví dụ khi máy đó đang mất mạng), khi file của nó đồng bộ
   về và được gộp, sẽ **thay CẢ mục** — kể cả những trường bạn đã sửa sau đó trên máy 0.2.0. Ví dụ: bạn
   đặt mật khẩu ngân hàng mới trên máy đã cập nhật, rồi máy cũ chỉ sửa ghi chú của mục đó ⇒ mục quay về
-  mật khẩu CŨ (mật khẩu mới vẫn nằm trong *Lịch sử* của mục). Xoá vĩnh viễn trên máy cũ cũng thắng mọi
-  lần sửa trên máy mới.
+  mật khẩu CŨ (mật khẩu mới vẫn nằm trong *Lịch sử* của mục).
+- Xoá vĩnh viễn: app áp dụng đúng quy tắc của 0.1.x (một lần xoá không xoá mục đã được sửa SAU lần xoá
+  đó), cả khi file của máy cũ đến muộn (bản xung đột, bản sao lưu). Nhưng khi một lần xoá đã được ghi
+  vào file định dạng mới thì nó là tuyệt đối: một mục bị xoá ở máy này rồi được sửa muộn hơn trên một
+  máy vẫn chạy 0.1.x vẫn có thể biến mất (nó còn trong các bản sao lưu).
 - Nếu file kho bị thay lại bằng file của máy 0.1.x, mỗi lần lưu trên máy đó **xoá dần các bản sao lưu**
   của 0.2.0 trong thư mục sao lưu. Khi mở kho, máy 0.2.0 đã từng mở kho này sẽ báo "File kho vừa được
   một máy còn chạy bản 0.1.x ghi lại" — hãy cập nhật máy đó ngay.
@@ -60,13 +66,20 @@ Xem mục *Phát hành* để tạo khoá ký cố định.
 
 Hai trường hợp cần làm thêm một lần:
 - **Master password có dấu tiếng Việt, đặt từ bản 0.1.x:** lúc đầu hãy gõ nó bằng đúng bàn phím / bộ
-  gõ như trước (cùng một chữ có dấu có thể được gõ ra theo nhiều cách khác nhau). Sau khi đổi master
-  password một lần trên 0.2.0 (có thể đặt lại đúng mật khẩu cũ), nó mở được trên mọi máy dù gõ kiểu nào.
+  gõ như trước (cùng một chữ có dấu có thể được gõ ra theo nhiều cách khác nhau). Sau khi "đổi" master
+  password một lần trên 0.2.0 — nhập lại đúng mật khẩu đó cũng được — nó mở được trên mọi máy dù gõ
+  kiểu nào.
 - **Đã từng đổi master password khi còn dùng 0.1.x:** bản đó chỉ đổi mật khẩu chứ không đổi khoá mã
   hoá, nên ai biết mật khẩu CŨ và có một bản sao lưu cũ vẫn mở được dữ liệu mới. Hãy **đổi master
-  password một lần nữa trên 0.2.0** (trên MỘT máy, khi các máy khác đã khoá app; có thể nhập lại đúng
-  mật khẩu đang dùng nếu nó vẫn an toàn). App tự phát hiện trường hợp này và hiện dải thông báo "Kho này
-  từng được đổi mật khẩu chính bằng bản 0.1.x" với nút *Đổi mật khẩu chính…*; `pwv backups` cũng nhắc.
+  password một lần nữa trên 0.2.0** (trên MỘT máy, khi các máy khác đã khoá app). App tự phát hiện
+  trường hợp này và hiện dải thông báo "Kho này từng được đổi mật khẩu chính bằng bản 0.1.x" với nút
+  *Đổi mật khẩu chính…*; `pwv backups` cũng nhắc.
+
+Về việc **nhập lại đúng master password đang dùng** (app và `pwv passwd` đều cho phép): khi đó mật khẩu
+giữ nguyên, chỉ khoá mã hoá được thay mới ("Giữ nguyên mật khẩu — chỉ thay khoá mã hoá."), kể cả khi
+mật khẩu đó không đạt chính sách mới của 0.2.0 — app / pwv chỉ cảnh báo và nhắc bạn đổi sang mật khẩu
+mạnh hơn sau. Nếu mật khẩu đang dùng yếu (ngắn, có tên, ngày sinh…), tốt hơn là đổi hẳn: bấm **Gợi ý**,
+**viết cụm từ mới ra giấy TRƯỚC khi bấm đổi**, rồi mới đổi.
 
 ## Dùng app
 
@@ -84,15 +97,19 @@ Hai trường hợp cần làm thêm một lần:
     biến, và **không biết tên, ngày sinh, số điện thoại, biển số xe… của chính bạn** hay người thân. Ghép
     chúng với một từ bình thường có thể vẫn được báo "✓ Đạt yêu cầu tối thiểu" — "đạt" không có nghĩa là
     an toàn. Đừng dùng thông tin cá nhân; dùng **Gợi ý**.
-  - Chính sách chỉ được kiểm tra khi tạo kho và khi đổi master password, không bao giờ khi mở kho:
-    mật khẩu đang dùng không bị khoá ngoài vì chính sách mới.
+  - Chính sách chỉ được kiểm tra khi tạo kho và khi đổi sang một master password KHÁC, không bao giờ khi
+    mở kho: mật khẩu đang dùng không bị khoá ngoài vì chính sách mới. Nhập lại đúng mật khẩu đang dùng
+    (để chỉ thay khoá mã hoá) cũng không bị chặn — app chỉ cảnh báo nếu nó không còn đạt.
+  - Tên dịch vụ trùng từ tiếng Anh (Google, Facebook, Yahoo, Banking…) cũng tính là thông tin cá nhân;
+    chữ có dấu gõ theo kiểu nào cũng được xét như nhau.
 - **Danh sách + tìm kiếm** (Ctrl+F), thêm (Ctrl+N), khoá (Ctrl+L), yêu thích, nhóm.
 - **Bộ tạo mật khẩu / cụm từ**, thanh độ mạnh, **lịch sử mật khẩu** của từng mục (20 bản gần nhất).
 - **Đổi mật khẩu một trang web — đúng thứ tự:** mở mục → *Sửa* → *Tạo* → bấm **Lưu** → rồi mới đổi
   mật khẩu trên trang web (mật khẩu cũ vẫn nằm trong *Lịch sử* của mục). Nếu lỡ quên lưu:
   - Form đang sửa dở được giữ thành **bản nháp** trên máy này (đã mã hoá bằng khoá kho): kho có tự
     khoá hay app bị đóng thì lần mở khoá sau form tự mở lại ("Đã khôi phục mục đang sửa dở…"). Nếu mục
-    đã bị đổi ở máy khác trong lúc đó, app nhắc kiểm tra lại trước khi lưu. Bấm sang mục khác khi đang
+    đã bị đổi ở máy khác trong lúc đó, app nhắc kiểm tra lại trước khi lưu (lời nhắc còn đó cho tới khi
+    bạn lưu hoặc bỏ thay đổi, kể cả qua nhiều lần khoá). Bấm sang mục khác khi đang
     sửa dở thì app hỏi *Tiếp tục sửa* / *Lưu* / *Bỏ thay đổi*.
   - Trên máy tính, mỗi mật khẩu bạn sao chép hoặc bấm *Dùng* trong bộ tạo được ghi vào mục **"Mật khẩu
     vừa tạo gần đây"** của bộ tạo (tối đa 20, tự xoá sau 30 ngày; chỉ trên máy này, đã mã hoá bằng
@@ -117,8 +134,9 @@ Hai trường hợp cần làm thêm một lần:
   LastPass, Dashlane, Safari. Không dòng nào bị bỏ trừ khi trống hoặc giống hệt mục đã có. Sau khi
   nhập, hãy xoá file CSV (app có nút) **và dọn thùng rác**, kể cả thùng rác trên cloud nếu file nằm
   trong thư mục đồng bộ; rồi xoá mật khẩu đã lưu trong trình duyệt.
-- **Tự khoá** khi không dùng (mặc định 5 phút), khi máy vừa ngủ dậy và khi đóng cửa sổ — kể cả khi
-  ổ đĩa / dịch vụ đồng bộ đang chậm (trang trong app xoá dữ liệu đang hiện ngay, không chờ đĩa). Khoá
+- **Tự khoá** khi không dùng (mặc định 5 phút), khi máy vừa ngủ dậy và khi đóng cửa sổ. Tự khoá, nút
+  khoá và Ctrl+L không bao giờ phải chờ ổ đĩa / dịch vụ đồng bộ đang chậm: màn hình được xoá trước, việc
+  lưu làm sau. Khoá
   màn hình Windows (Win+L) thì **không** khoá pwv: bấm **Ctrl+L** trước khi rời máy. **Tự xoá
   clipboard** sau 20 giây — kể cả khi bạn đã khoá hoặc đóng app trong lúc đó (app chạy ẩn cho tới
   khi xoá xong rồi mới thoát hẳn). Trên Windows, thứ bạn sao chép từ app không vào lịch sử clipboard
@@ -131,12 +149,14 @@ Hai trường hợp cần làm thêm một lần:
 - Cửa sổ app được loại khỏi ảnh chụp / quay màn hình (Windows 10 2004 trở lên; Android chặn chụp màn hình).
 
 ### Đổi master password
-Đổi mật khẩu cũng **đổi luôn khoá mã hoá** của kho và mã hoá lại các bản sao lưu trên máy. Trước khi
-đổi, app đồng bộ một lần; nếu file kho đang có vấn đề (hỏng, chưa tải xong…) thì app báo lỗi và
+**Trước khi đổi: khoá hoặc đóng pwv trên CÁC MÁY KHÁC** (một máy để mở khoá sẽ tiếp tục tin các file
+ghi bằng mật khẩu cũ cho tới khi nó biết về lần đổi), và giữ an toàn tài khoản cloud (mật khẩu mạnh,
+xác thực hai bước). Đổi mật khẩu cũng **đổi luôn khoá mã hoá** của kho và mã hoá lại các bản sao lưu
+trên máy. Trước khi đổi, app đồng bộ một lần; nếu file kho đang có vấn đề (hỏng, chưa tải xong…) thì app báo lỗi và
 **chưa đổi gì**. Các thiết bị khác sẽ hỏi mật khẩu mới ở lần mở tới. Nhập lại đúng mật khẩu đang dùng
-cũng được: khoá mã hoá vẫn được thay mới. Nếu bản sao lưu nào không mã hoá lại được (đĩa đầy, file bị
-chương trình khác giữ), app ghi rõ tên các file đó: chúng **vẫn mở được bằng mật khẩu CŨ** — nếu mật
-khẩu cũ có thể đã lộ, hãy xoá chúng khỏi thư mục sao lưu.
+cũng được: khoá mã hoá vẫn được thay mới. Nếu bản sao lưu nào không đọc hoặc không ghi lại được (đĩa đầy,
+file bị chương trình khác giữ), app ghi rõ tên các file đó: chúng **có thể vẫn mở được bằng mật khẩu
+CŨ** — nếu mật khẩu cũ có thể đã lộ, hãy xoá chúng khỏi thư mục sao lưu.
 
 **Đổi mật khẩu bảo vệ được gì:**
 - Người chỉ biết mật khẩu CŨ không đọc được những gì app ghi ra sau lần đổi (file kho, bản sao lưu) —
@@ -144,8 +164,8 @@ khẩu cũ có thể đã lộ, hãy xoá chúng khỏi thư mục sao lưu.
   cất chúng thành bản "ghi bằng mật khẩu cũ": bản cất được giữ nguyên văn, nên vẫn mở được bằng mật
   khẩu cũ).
 - Từ đó về sau, **mọi thứ trong thư mục đồng bộ được ghi bằng mật khẩu cũ không bao giờ được gộp tự
-  động vào kho** (ngoại lệ duy nhất: bản cứu hộ / bản lưu riêng của chính máy này, xem *Bản cứu hộ và
-  bản lưu riêng* bên dưới). Nếu app gặp một bản như vậy (ví dụ một máy chưa nhận mật khẩu mới vẫn tiếp tục lưu, hoặc dịch vụ đồng bộ đặt
+  động vào kho** — kể cả bản cứu hộ / bản lưu riêng trong thư mục riêng của app trên máy này. Nếu app
+  gặp một bản như vậy (ví dụ một máy chưa nhận mật khẩu mới vẫn tiếp tục lưu, hoặc dịch vụ đồng bộ đặt
   lại một bản cũ), nó cất bản đó vào *Cài đặt → Sao lưu & khôi phục* với nhãn **"ghi bằng mật khẩu
   cũ"** và báo cho bạn. Ở đó bạn xem được mục nào khác với kho hiện tại và lấy lại từng mục — **chỉ làm
   vậy khi bạn biết chắc những thay đổi đó là của mình**, vì ai biết mật khẩu cũ cũng làm ra được một
@@ -171,7 +191,8 @@ dùng lần trước" — xem bảng bên dưới.)
 **Nếu mật khẩu cũ có thể đã bị lộ**, làm theo đúng thứ tự:
 1. **Đổi mật khẩu tài khoản cloud** (Google / Dropbox / Microsoft) và **đăng xuất mọi phiên đăng nhập
    khác** của tài khoản đó — để người kia không còn đọc/ghi được thư mục đồng bộ.
-2. **Đổi master password** trong pwv.
+2. **Khoá hoặc đóng pwv trên mọi máy khác**, rồi **đổi master password** trong pwv trên MỘT máy (bấm
+   **Gợi ý**, viết cụm từ mới ra giấy trước).
 3. **Xem lại các mục vừa thay đổi gần đây** (địa chỉ trang web, tên đăng nhập, mật khẩu): trước khi
    đổi, app gộp mọi thứ đang có trong thư mục đồng bộ — nếu người kia đã sửa kho bằng mật khẩu cũ
    trước lúc bạn đổi, những sửa đổi đó đã được gộp vào và vẫn còn sau khi đổi.
@@ -202,7 +223,7 @@ dùng lần trước" — xem bảng bên dưới.)
 | App báo | Nghĩa là | Việc cần làm |
 |---|---|---|
 | Mật khẩu chính đã được đổi trên thiết bị khác | Máy kia đã đổi master password | Nhập mật khẩu mới |
-| File kho trên đĩa bị hỏng hoặc chưa tải xong (khi kho đang mở) | Dịch vụ đồng bộ đang tải dở, hoặc file bị hỏng | Chờ rồi bấm *Thử lại*. Nếu vẫn vậy: *Ghi đè bằng bản đang mở* (file hỏng được cất vào thư mục sao lưu, không bị xoá), hoặc *Lưu sang chỗ khác…* (chỉ chép bản đang mở ra file mới, không đụng gì tới chỗ cũ) |
+| File kho trên đĩa bị hỏng hoặc chưa tải xong (khi kho đang mở) | Dịch vụ đồng bộ đang tải dở, hoặc file bị hỏng | Chờ rồi bấm *Thử lại*. Nếu vẫn vậy: *Ghi đè bằng bản đang mở* (file hỏng được cất vào thư mục sao lưu, không bị xoá), hoặc *Lưu sang chỗ khác…* (chỉ chép bản đang mở ra file mới, không đụng gì tới chỗ cũ; phải chọn một thư mục KHÁC thư mục của file kho, ví dụ Documents; app từ chối nếu master password vừa được đổi ở máy khác) |
 | File kho không còn ở vị trí cũ (khi kho đang mở) | File bị chuyển/xoá, hoặc chưa đồng bộ về | Chờ rồi *Thử lại*; *Chọn file kho…* nếu kho đã được chuyển chỗ ở máy khác; *Tạo lại file ở đây* nếu bị xoá nhầm; hoặc *Lưu sang chỗ khác…* |
 | Không tìm thấy file kho (màn hình mở khoá) | Như trên, khi kho đang khoá | *Thử lại*; *Chọn file kho…* nếu đã chuyển chỗ; *Khôi phục từ bản sao lưu…* nếu file bị xoá/hỏng; nếu app báo "Máy này còn giữ một bản lưu riêng của kho": *Tạo lại file kho từ bản lưu riêng* (không bao giờ ghi đè file đã có). Đừng bấm *Tạo kho mới ở vị trí khác* nếu bạn đã có kho |
 | File kho cũ hơn bản máy này từng thấy | Dịch vụ đồng bộ khôi phục bản cũ, hoặc có người chép đè | Kiểm tra các mục mới thêm gần đây; dùng *Sao lưu & khôi phục* nếu thiếu |
@@ -212,13 +233,14 @@ dùng lần trước" — xem bảng bên dưới.)
 | Bản dựng lại được cũ hơn dữ liệu máy này từng thấy (khi khôi phục) | Các bản sao lưu mới hơn chưa đồng bộ về máy này, hoặc đã bị xoá. Chưa có gì được ghi | Chờ đồng bộ xong, xem máy còn lại, hoặc lịch sử phiên bản của dịch vụ đồng bộ. Chỉ khi không còn bản nào mới hơn: *Vẫn khôi phục bản cũ hơn này* |
 | File kho vừa mở thiếu một số thay đổi mà máy này đã lưu trước đó … đã gộp lại từ bản lưu riêng | Một máy khác ghi đè file kho khi chưa đồng bộ xong | Không cần làm gì (app đã gộp lại và ghi file); xem lại các mục vừa sửa gần đây |
 | File kho vừa được một máy còn chạy bản 0.1.x ghi lại | Còn máy chưa cập nhật | Cập nhật app trên máy đó ngay (xem *Khi nâng cấp lên 0.2.0*) |
-| Kho này từng được đổi mật khẩu chính bằng bản 0.1.x | Mật khẩu CŨ (của thời 0.1.x) vẫn mở được dữ liệu mới từ các bản sao lưu cũ | Bấm *Đổi mật khẩu chính…* và đổi một lần (có thể nhập lại đúng mật khẩu đang dùng), trên MỘT máy, khi các máy khác đã khoá app |
-| N bản sao lưu chưa mã hoá lại được (sau khi đổi mật khẩu chính) | Đĩa đầy, hoặc file bị chương trình đồng bộ / diệt virus giữ | Các file được nêu tên vẫn mở được bằng mật khẩu CŨ: nếu mật khẩu cũ có thể đã lộ, xoá chúng khỏi thư mục sao lưu |
+| Kho này từng được đổi mật khẩu chính bằng bản 0.1.x | Mật khẩu CŨ (của thời 0.1.x) vẫn mở được dữ liệu mới từ các bản sao lưu cũ | Bấm *Đổi mật khẩu chính…* và đổi một lần, trên MỘT máy, khi các máy khác đã khoá app. Nhập lại đúng mật khẩu đang dùng cũng được (chỉ thay khoá — app cảnh báo nếu mật khẩu đó không còn đạt); nếu nó yếu, tốt hơn là lấy cụm từ **Gợi ý**, viết ra giấy trước rồi mới đổi |
+| N bản sao lưu chưa mã hoá lại được (sau khi đổi mật khẩu chính) | Không đọc hoặc không ghi lại được: đĩa đầy, hoặc file bị chương trình đồng bộ / diệt virus giữ | Các file được nêu tên có thể vẫn mở được bằng mật khẩu CŨ: nếu mật khẩu cũ có thể đã lộ, xoá chúng khỏi thư mục sao lưu |
+| Bản lưu riêng trên máy này được ghi bằng mật khẩu chính CŨ và có nội dung mà kho hiện tại không có | Một bản cứu hộ / bản lưu riêng của máy này được ghi trước một lần đổi master password. App không gộp nó; đã cất vào thư mục sao lưu với nhãn "ghi bằng mật khẩu cũ" | Mở *Cài đặt → Sao lưu & khôi phục*, chọn bản đó, xem khác biệt; chỉ lấy lại mục nào bạn chắc là thay đổi của mình |
 | Mục này vừa thay đổi … hãy bấm sao chép lại | Mục vừa được đồng bộ về bản mới trong lúc bạn đang xem | Bấm sao chép lại (app không chép giá trị cũ) |
 | Tìm thấy bản của kho được ghi bằng mật khẩu chính CŨ | Sau lần đổi master password, một thiết bị chưa nhận mật khẩu mới vẫn ghi, hoặc dịch vụ đồng bộ đặt lại bản cũ — hiếm hơn, người biết mật khẩu cũ. App **không gộp** bản đó | Bấm *Mở Sao lưu & khôi phục*, chọn bản có nhãn "ghi bằng mật khẩu cũ", xem khác biệt. Chỉ khôi phục mục nào bạn chắc chắn là thay đổi của mình. Mở kho bằng mật khẩu MỚI trên thiết bị kia |
 | Bản này được ghi bằng một mật khẩu chính khác (mới hơn) | Một bản cạnh file kho dùng mật khẩu mà máy này không có — thường là bạn vừa đổi master password ở máy khác | Khoá app rồi mở lại bằng mật khẩu MỚI. Nếu bạn không hề đổi mật khẩu: xoá file được nêu tên (app không đụng tới nó, việc đồng bộ vẫn chạy bình thường) |
 | Mật khẩu này có vẻ là một mật khẩu chính cũ (khi khôi phục) | Bạn vừa gõ một master password CŨ; khôi phục bằng nó sẽ đưa kho về mật khẩu đó và mất mọi thay đổi sau lần đổi. (Hiếm hơn: trong thư mục sao lưu có file lạ tự nhận là "mới hơn") | Gõ master password HIỆN TẠI (mật khẩu đặt gần nhất) rồi khôi phục lại. Chỉ chọn *Vẫn khôi phục bằng mật khẩu này* khi bạn thật sự không còn mật khẩu mới hơn, hoặc chắc chắn đây chính là mật khẩu hiện tại |
-| Chỉ còn các bản sao lưu có từ trước lần đổi mật khẩu (khi khôi phục) | Mật khẩu đúng, nhưng mọi bản sao lưu ghi sau lần đổi master password đã mất | Thử tìm bản mới hơn trước (lịch sử phiên bản / thùng rác của dịch vụ đồng bộ, thiết bị khác). Nếu không có: bấm *Vẫn khôi phục từ các bản cũ này*, rồi kiểm tra lại địa chỉ trang web và mật khẩu của các tài khoản quan trọng |
+| Chỉ còn các bản sao lưu có từ trước lần đổi mật khẩu (khi khôi phục) | Mật khẩu đúng, nhưng mọi bản sao lưu ghi sau lần đổi master password đã mất — và máy này cũng không còn bản lưu riêng dùng được (nếu còn, app đã tự dựng lại từ nó) | Thử tìm bản mới hơn trước (lịch sử phiên bản / thùng rác của dịch vụ đồng bộ, thiết bị khác). Nếu không có: bấm *Vẫn khôi phục từ các bản cũ này*, rồi kiểm tra lại địa chỉ trang web và mật khẩu của các tài khoản quan trọng |
 | Không có bản sao lưu nào dùng được (khi khôi phục) | Thư mục sao lưu trống / hỏng / không có bản nào mở được bằng mật khẩu này | Tìm bản khác: lịch sử phiên bản / thùng rác trên trang web của Drive-Dropbox-OneDrive, một máy khác, bản xem ngoại tuyến trên điện thoại, hoặc *Cứu hộ dữ liệu không cần app* bên dưới. Đừng tạo kho mới đè lên |
 | Kho vừa mở KHÔNG phải là phần tiếp nối của kho máy này dùng lần trước | Bạn vừa mở bằng một master password CŨ, hoặc file kho đã bị thay bằng file do người biết mật khẩu cũ làm ra | Bấm *Khoá lại* và mở bằng master password HIỆN TẠI. Đừng tin địa chỉ trang web / mật khẩu đang hiện cho tới khi kiểm tra xong. Chỉ bấm *Đã hiểu, vẫn dùng kho này* nếu bạn biết rõ vì sao (ví dụ chính bạn vừa khôi phục kho từ một bản cũ) |
 | Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi | File đã được ghi, nhưng lúc đọc lại để kiểm tra thì bị chương trình đồng bộ / diệt virus giữ | Không cần làm gì: thay đổi vẫn còn trong app, lần đồng bộ tới app tự kiểm tra và ghi lại nếu cần. Nếu lần nào cũng báo, hãy cho thư mục kho vào danh sách loại trừ của phần mềm diệt virus |
@@ -235,24 +257,29 @@ Ngoài thư mục sao lưu (nằm trong thư mục đồng bộ), app trên máy
   app chép toàn bộ kho vào đây. Lần mở khoá sau, app gộp nó vào kho: nếu một máy khác đã ghi đè file
   kho khi chưa đồng bộ xong, những gì máy này đã lưu được lấy lại (app báo "File kho vừa mở thiếu một
   số thay đổi… đã gộp lại từ bản lưu riêng"). Nó cũng được dùng khi **khôi phục** mà thư mục sao lưu
-  không còn bản nào dùng được, và cho nút *Tạo lại file kho từ bản lưu riêng* khi file kho biến mất.
+  không còn bản nào dùng được (hoặc chỉ còn các bản có từ trước lần đổi mật khẩu), và cho nút *Tạo lại file kho từ bản lưu riêng* khi file kho biến mất.
 - **Bản cứu hộ** (`<mã kho>-<thời điểm>.pwv`): nếu app phải khoá (hết giờ, đóng cửa sổ) trong lúc file
   kho đang có vấn đề và còn thay đổi chưa ghi được, nó để lại một bản cứu hộ và tự gộp lại ở lần mở
   khoá sau — bạn không phải làm gì.
 - **Bản nháp** và **mật khẩu vừa tạo gần đây** (`stash-<mã kho>.bin`, mã hoá bằng khoá kho).
 
 Gộp hai loại `.pwv` trên là phép gộp an toàn: không làm sống lại mục đã xoá vĩnh viễn, không đè lên
-thay đổi mới hơn. **Ngoại lệ có chủ đích:** chúng được gộp **kể cả khi được ghi trước một lần đổi
-master password** (ví dụ ghi bằng mật khẩu cũ ngay trước khi bạn đổi mật khẩu ở máy khác) — khác với
-mọi file trong thư mục đồng bộ — vì thư mục này không đồng bộ, chỉ ai dùng được tài khoản Windows của
-bạn mới đặt được file vào đó.
+thay đổi mới hơn. Chỉ bản ghi bằng **khoá hiện tại** của kho mới được gộp. Bản được ghi bằng một master
+password **CŨ** (ví dụ ngay trước khi mật khẩu được đổi ở máy khác) **không bao giờ được gộp**, như mọi
+file khác: nếu nó có nội dung mà kho không có, app cất nguyên văn nó vào thư mục sao lưu với nhãn **"ghi
+bằng mật khẩu cũ"** (xoá bản trong thư mục riêng) và báo "Bản lưu riêng trên máy này được ghi bằng mật
+khẩu chính CŨ…" — mở *Cài đặt → Sao lưu & khôi phục* để xem và lấy lại từng mục **nếu chắc đó là thay đổi
+của bạn**. Nếu nó không có gì mới thì app bỏ qua.
 
-Bản nào **không gộp được** (ví dụ nó được ghi bằng một master password MỚI HƠN hoặc khác hẳn mà kho
-hiện tại không biết — chẳng hạn bạn vừa khôi phục kho về một mật khẩu cũ — hoặc file bị hỏng) **không
-bị xoá**: app báo "N bản cứu hộ chưa gộp được… vẫn được giữ lại" và thử lại ở lần mở khoá sau. Trong app
-không có nút mở chúng; muốn xem, dùng công cụ ở mục *Cứu hộ dữ liệu không cần app* với **master password
-của lúc bản đó được ghi**, ví dụ:
+Bản nào **không gộp được** vì kho hiện tại không biết khoá của nó (ví dụ nó được ghi bằng một master
+password MỚI HƠN hoặc khác hẳn — chẳng hạn bạn vừa khôi phục kho về một mật khẩu cũ) hoặc vì file bị
+hỏng **không bị xoá**: app báo "N bản cứu hộ chưa gộp được… vẫn được giữ lại" và thử lại ở lần mở khoá
+sau. Trong app không có nút mở chúng; muốn xem, dùng công cụ ở mục *Cứu hộ dữ liệu không cần app* với
+**master password của lúc bản đó được ghi**, ví dụ:
 `py pwv_recover.py "$env:LOCALAPPDATA\vn.pwv.vault\rescue\<tên file>.pwv" -o cuuho.json`.
+
+Các file này chỉ do **app trên máy tính** ghi. Công cụ dòng lệnh `pwv.exe` không ghi bản lưu riêng, bản
+nháp hay danh sách mật khẩu vừa tạo (xem mục dưới).
 
 ## Công cụ dòng lệnh `pwv.exe` (tuỳ chọn)
 
@@ -296,7 +323,13 @@ máy này từng thấy, hoặc bằng một mật khẩu có vẻ là mật kh�
 lưu đang có vấn đề. `pwv backups` nhắc đổi master password một lần nếu kho từng đổi mật khẩu bằng 0.1.x.
 Lỡ dán nhiều dòng vào ô hỏi mật khẩu thì các dòng thừa bị bỏ đi, không chạy thành lệnh. pwv cần một
 cửa sổ dòng lệnh (PowerShell / Terminal) để hỏi master password; nó không nhận mật khẩu qua đường ống
-hay file.
+hay file. `pwv passwd` nhập lại đúng mật khẩu đang dùng thì chỉ thay khoá mã hoá (có cảnh báo nếu mật
+khẩu đó không đạt chính sách).
+
+**`pwv.exe` không có các lưới an toàn của app:** nó không ghi bản lưu riêng trên máy, không giữ bản nháp
+và không có danh sách "mật khẩu vừa tạo gần đây". Sau khi đổi mật khẩu một mục bằng dòng lệnh (ví dụ
+`pwv edit … -g`), hãy kiểm tra mục đó trên một máy khác (hoặc trong app) TRƯỚC khi đổi mật khẩu trên trang
+web.
 
 ## Cứu hộ dữ liệu không cần app
 
@@ -310,6 +343,8 @@ sẵn (bước 1–2) từ bây giờ, khi mọi thứ còn chạy tốt.
    ví dụ `C:\CuuHo`.
 2. **Cài Python** (một lần): tải bộ cài Windows từ [python.org](https://www.python.org/downloads/),
    chạy, và **đánh dấu ô "Add python.exe to PATH"** ở màn hình đầu tiên trước khi bấm *Install Now*.
+   Bộ cài mới ("Python install manager") không có ô này: cứ cài bình thường — lệnh `py` ở dưới vẫn dùng
+   được.
 3. Mở thư mục `C:\CuuHo` trong File Explorer, **giữ Shift + bấm chuột phải** vào chỗ trống → *Open
    PowerShell window here* (Windows 11: chuột phải → *Open in Terminal*). Cài hai thư viện (một lần, cần
    mạng):
@@ -338,9 +373,7 @@ quan trọng.
 - **Mã độc / keylogger đang chạy trên máy** khi bạn mở kho: không phần mềm quản lý mật khẩu nào chống được.
 - **Máy đang mở khoá kho mà bị người khác dùng.** Hãy khoá app (Ctrl+L) khi rời máy; đừng tắt tự khoá.
   **Khoá màn hình Windows (Win+L) hoặc cho máy ngủ KHÔNG khoá pwv ngay** — bấm Ctrl+L trước. (Máy ngủ
-  dậy thì app khoá, nhưng trong lúc ngủ kho vẫn đang mở trong bộ nhớ.) Ai dùng được tài khoản Windows
-  của bạn — và biết một master password cũ, có một bản sao cũ của kho — cũng đặt được file vào thư mục
-  riêng của app để nó được gộp ở lần mở khoá sau (xem *Bản cứu hộ và bản lưu riêng*).
+  dậy thì app khoá, nhưng trong lúc ngủ kho vẫn đang mở trong bộ nhớ.)
 - **Ổ đĩa không mã hoá:** khi kho đang mở, hệ điều hành có thể ghi một phần bộ nhớ xuống đĩa (pagefile,
   file ngủ đông). Hãy bật **mã hoá ổ đĩa** (BitLocker / "Device encryption" trên Windows; điện thoại
   Android đời mới đã bật sẵn).
@@ -403,8 +436,9 @@ Hãy làm với một kho thử (vài mục giả) trước:
 11. **Công cụ cứu hộ:** làm theo *Cứu hộ dữ liệu không cần app* với file kho thử và với MỘT file trong
     thư mục sao lưu của nó (dùng `-o`): mở `backup.json` bằng Notepad, chữ có dấu phải hiện đúng. Xoá
     `backup.json`.
-12. **Trong lúc nâng cấp lên 0.2.0:** sau khi đã cập nhật máy đầu tiên, mở kho trên một máy CHƯA cập
-    nhật: nó phải báo "hãy cập nhật phần mềm" (chứ không mở hay sửa được file). Rồi cập nhật máy đó.
+12. **Trong lúc nâng cấp lên 0.2.0:** sau khi đã cập nhật máy đầu tiên, trên máy đó **sửa và lưu một
+    mục thử** (chỉ mở kho thì file chưa đổi định dạng). Rồi mở kho trên một máy CHƯA cập nhật: nó phải
+    báo "hãy cập nhật phần mềm" (chứ không mở hay sửa được file). Rồi cập nhật máy đó.
 
 **Android**
 1. Cài APK, chọn file kho từ Drive/Dropbox/OneDrive, mở khoá (mất 1–3 giây; nếu app báo không đủ bộ

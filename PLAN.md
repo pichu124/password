@@ -335,9 +335,8 @@ mục 1, 2, 3, 5, 6 ("Mốc đã thấy", "Dữ liệu riêng của app"), 7.
   lời giải đúng là không dùng 0.1.x nữa khi đã có máy chạy 0.2 (README, mục nâng cấp).
 - **Không làm tombstone có điều kiện** ở v2 (tombstone vẫn tuyệt đối); chỉ phần thân v1 được đọc theo
   quy tắc của 0.1.2. Xoá vĩnh viễn ở máy 0.1.x vẫn thắng lần sửa mới hơn ở máy 0.2 khi gộp.
-- **Bản cứu hộ và bản lưu riêng được tin cho cả nội dung dưới khoá đã nghỉ**: chúng nằm trong thư mục
-  riêng của app, không đồng bộ — cùng mức tin cậy với chính app trên máy đang đăng nhập. Đây là ngoại
-  lệ duy nhất của "nội dung dưới mật khẩu cũ không bao giờ được tự gộp".
+- ~~Bản cứu hộ và bản lưu riêng được tin cho cả nội dung dưới khoá đã nghỉ~~ — quyết định này bị đảo lại
+  ở 9.3: không còn ngoại lệ nào cho nội dung dưới mật khẩu cũ.
 - Không chặn mọi mật khẩu "tự đặt": chỉ chấp nhận cụm từ do app sinh sẽ chặn cả mật khẩu mạnh hợp lệ.
 
 **Vẫn còn (README "Giới hạn", FORMAT.md mục 7):**
@@ -356,6 +355,30 @@ mục 1, 2, 3, 5, 6 ("Mốc đã thấy", "Dữ liệu riêng của app"), 7.
 - Đường xoá dữ liệu gõ thừa của CLI trên Windows và luồng "không có cửa sổ dòng lệnh" mới chỉ được kiểm
   tra kiểu, chưa chạy trên Windows thật; app chưa chạy trên Windows / Android thật — các bước kiểm tra
   trong README là bắt buộc.
+
+### 9.3. Soát chéo đợt fix2 và sửa tiếp (fix3, 11/2026)
+
+Một người rà soát độc lập đọc lại toàn bộ đợt 9.2 (mã và tài liệu). **Xác nhận** (đã sửa):
+
+| Nhóm | Vấn đề | Cách sửa |
+|---|---|---|
+| Phát hành | Bước kiểm tra `pwv_recover.py` bằng `py_compile` để lại `__pycache__/` trong artifact ⇒ bước publish (`cp` không có `-r`) hỏng, không phát hành được | Kiểm tra cú pháp bằng `ast.parse` (không ghi gì); bước publish chỉ chép file thường |
+| Lõi / app | Bản cứu hộ / bản lưu riêng ghi bằng mật khẩu CŨ vẫn được gộp ⇒ ai dùng được tài khoản Windows và biết mật khẩu cũ "rửa" được nội dung vào kho | Bỏ ngoại lệ: nội dung chỉ mở được bằng khoá đã nghỉ (hoặc mang `pre_change`) không bao giờ được gộp; có gì mới thì được cất nguyên văn thành `oldkey-…` để chủ kho tự xem, và app báo |
+| Nâng cấp | Tombstone v1 chỉ được xét trong chính file v1; một bản xung đột / bản sao lưu v1 đến muộn vẫn xoá mục được sửa sau lần xoá | Quy tắc 0.1.2 được áp cả khi gộp file v1 vào kho (và khi khôi phục: lọc một lần với kết quả gộp cuối) |
+| Lõi | Khôi phục vẫn có giới hạn 40 bản gộp (bị các bản cũ khác nhau chép lại chiếm chỗ); quét "đổi mật khẩu bằng 0.1.x" báo "sạch" khi quét không trọn; vài chỗ đọc file không giới hạn kích thước; đổi mật khẩu không báo bản không ĐỌC được; "lưu sang chỗ khác" tạo được một kho tách riêng dùng mật khẩu cũ | Bỏ giới hạn số bản gộp; quét không trọn ⇒ lỗi, không ghi nhớ; mọi lần đọc file của kho ≤ 64 MiB; nêu tên cả bản không đọc được; `copy_to` từ chối khi mật khẩu đã đổi ở máy khác, và app từ chối lưu vào chính thư mục của file kho |
+| App | Tự khoá có thể nạp lại trang trước khi khoá thật; nút khoá chờ đĩa; bản lưu riêng có thể không được ghi lại sau một lần đọc mang nội dung mới; vài lỗ nhỏ của bản nháp | Quyết định + khoá cùng một lần giữ khoá phiên; nút khoá không chờ; dấu nhận biết bản lưu riêng theo SHA-256 file trên đĩa; lời nhắc "mục đã đổi" giữ tới khi lưu / bỏ |
+| Chính sách | Nhập lại đúng mật khẩu đang dùng (lời khuyên cho kho từng đổi mật khẩu bằng 0.1.x) bị chính sách mới chặn; mật khẩu gõ kiểu Unicode tổ hợp, tên dịch vụ trùng từ tiếng Anh (Google, Facebook…) lọt luật riêng | Nhập lại đúng mật khẩu = chỉ thay khoá, không áp chính sách (có cảnh báo); chính sách xét dạng NFC; tên dịch vụ trùng từ EFF vẫn tính là thông tin cá nhân |
+| Tài liệu | Ghi chú nâng cấp nói máy 0.1.x báo "cập nhật" ngay — thật ra chỉ sau khi một máy 0.2 LƯU một thay đổi; CLI không có bản lưu riêng / bản nháp mà README không nói; bộ cài Python mới không có ô "Add to PATH" | README, ghi chú phát hành và bài kiểm tra 12 sửa theo; ghi rõ giới hạn của CLI; hướng dẫn cho bộ cài mới |
+
+**Vẫn còn:**
+- Tombstone v1 đã được ghi vào file v2 là tuyệt đối: dùng lẫn hai phiên bản, một mục bị xoá ở máy này
+  rồi được sửa muộn hơn ở một máy 0.1.x vẫn có thể biến mất (còn trong bản sao lưu).
+- File rác mang đúng `vault_id` của kho vẫn chiếm được 32 chỗ xét bản xung đột (thấy được, không phá
+  dữ liệu); hai gói khoá giả vẫn dùng hết 2 lượt Argon2 của bước mở khoá qua bản mới hơn (9.2).
+- Máy còn mở khoá trong lúc đổi master password ở máy khác vẫn tin file ghi bằng mật khẩu cũ tới khi
+  biết về lần đổi ⇒ README dặn khoá các máy khác trước khi đổi.
+- `pwv.exe` không có bản lưu riêng / bản nháp / danh sách mật khẩu vừa tạo.
+- Bước quét "đổi mật khẩu bằng 0.1.x" vẫn giữ khoá phiên trong lúc quét.
 
 ## Nguồn tham khảo
 - Bitwarden Security Whitepaper — https://bitwarden.com/help/bitwarden-security-white-paper/

@@ -28,8 +28,9 @@ bản 2 sẽ báo "hãy cập nhật phần mềm" và không đụng vào file.
 **AAD của body** = toàn bộ `bytes[0 .. 10+N]` (magic + version + độ dài + header).
 ⇒ sửa bất kỳ byte nào của header, kể cả số phiên bản hay tham số KDF, đều làm giải mã thất bại.
 
-**Kích thước.** App không đọc file kho chính (hay bản cạnh kho / bản sao lưu) lớn hơn **64 MiB**: kiểm
-tra kích thước trước, rồi đọc tối đa 64 MiB + 1 byte. File kho chính quá cỡ được coi là **file hỏng**
+**Kích thước.** Lõi không đọc bất kỳ file nào của kho (file kho chính, bản cạnh kho, bản sao lưu, bản
+cứu hộ / bản lưu riêng, đọc lại sau khi ghi) lớn hơn **64 MiB**: kiểm tra kích thước trước, rồi đọc tối
+đa 64 MiB + 1 byte. File kho chính quá cỡ được coi là **file hỏng**
 (mục 6.4: không tự ghi đè; "ghi đè" có xác nhận thì cất nó thành `damaged-…`); bản cạnh kho / bản sao
 lưu quá cỡ bị bỏ qua.
 
@@ -80,10 +81,8 @@ vault_key  = XChaCha20-Poly1305-Decrypt(key = KEK, nonce = key_nonce,
     lần đổi tiếp tục ghi bằng khoá cũ (file kho, bản sao lưu của chính nó) cho tới khi nó mở khoá
     bằng mật khẩu mới — kể cả khi app đã cất chúng thành `oldkey-…` (bản cất giữ nguyên văn, mục 6.3);
   - **không ghi được vào kho**: file chỉ mở được bằng khoá đã nghỉ không bao giờ được tự gộp (mục 6.3),
-    và mọi thứ có từ TRƯỚC lần đổi cũng vậy (dấu `pre_change`). **Ngoại lệ có chủ đích:** bản cứu hộ
-    và bản lưu riêng mà app ghi trong thư mục RIÊNG của nó trên máy (mục 6, "Dữ liệu riêng của app")
-    được gộp kể cả khi chúng chỉ mở được bằng khoá đã nghỉ — thư mục đó không đồng bộ, nên không ai
-    chỉ có quyền ghi vào thư mục đồng bộ đặt được file vào đó.
+    và mọi thứ có từ TRƯỚC lần đổi cũng vậy (dấu `pre_change`). Không có ngoại lệ: cả bản cứu hộ và
+    bản lưu riêng trong thư mục RIÊNG của app (mục 6, "Dữ liệu riêng của app") cũng theo quy tắc này.
 - **`pre_change`** (trường tuỳ chọn của header, kiểu bool; vắng mặt = `false`): `true` nghĩa là file này
   là một bản sao lưu có từ trước lần đổi master password gần nhất, đã được mã hoá lại bằng khoá mới
   (nên mở được bằng mật khẩu MỚI, và phần thân của nó mang cả các khoá đã nghỉ trong `old_keys`).
@@ -172,13 +171,20 @@ Mỗi trường của một mục là một ô "ghi-sau-thắng": cặp *(thời
    được đặt.
 3. **Tombstone:** một id đã có tombstone thì mục đó bị loại ở mọi nơi, bất kể thời điểm. (Muốn lấy lại
    phải khôi phục từ bản sao lưu — khi đó nó là một mục mới với id mới.)
-   **Đọc file v1:** bản 0.1.x coi tombstone là tương đối — nó giữ một mục được sửa SAU lần xoá, và
-   tombstone vẫn nằm trong file. Vì vậy, khi giải mã một phần thân **v1** (mở kho, đồng bộ, đọc bản
-   sao lưu, khôi phục), TRƯỚC khi đưa về dạng chuẩn, app bỏ mọi tombstone mà trong CHÍNH file đó còn
-   một mục sống cùng id với `deleted_at < updated_at` (so sánh chặt, đúng quy tắc của 0.1.2). Mục đó
-   vẫn sống (không bị chuyển vào thùng rác); các tombstone khác giữ nguyên và từ đó là tuyệt đối. Hệ
-   quả còn lại: tombstone của một file v1 (máy 0.1.x xoá vĩnh viễn) vẫn thắng một lần sửa MỚI HƠN ở
-   máy 0.2 khi hai bên được gộp.
+   **Tombstone của file v1:** bản 0.1.x coi tombstone là tương đối — nó giữ một mục được sửa SAU lần
+   xoá, và tombstone vẫn nằm trong file. App áp dụng đúng quy tắc đó (so sánh chặt `deleted_at <
+   updated_at`, như 0.1.2) ở hai chỗ:
+   - khi giải mã một phần thân **v1** (mở kho, đồng bộ, đọc bản sao lưu, khôi phục), TRƯỚC khi đưa về
+     dạng chuẩn: bỏ mọi tombstone mà trong CHÍNH file đó còn một mục sống cùng id được sửa sau lần xoá;
+   - khi **gộp** một file v1 vào kho (file kho chính, bản xung đột, bản sao lưu khi khôi phục, chuyển
+     kho, điện thoại tải lại, bản lưu riêng / bản cứu hộ): bỏ mọi tombstone của file v1 mà trong kho
+     ĐÍCH có một mục (đang dùng hoặc trong thùng rác) cùng id được sửa sau lần xoá. Khi khôi phục, các
+     tombstone của mọi file v1 (kể cả gốc) được gom lại và lọc một lần với kết quả gộp cuối cùng, nên
+     thứ tự gộp không ảnh hưởng.
+   Mục còn sống không bị chuyển vào thùng rác; tombstone còn lại (mục cũ hơn hoặc bằng lần xoá, hay id
+   không có trong kho) được giữ và từ đó là tuyệt đối. **Hệ quả còn lại:** khi một tombstone v1 đã được
+   ghi vào một file v2 thì nó tuyệt đối — một máy 0.2 đã áp nó lên một bản CŨ của mục sẽ vẫn xoá một lần
+   sửa mới hơn đến muộn từ một máy 0.1.x chưa đồng bộ (mục đó vẫn còn trong các bản sao lưu).
 4. `created_at` lấy giá trị nhỏ nhất, bỏ qua 0 (= chưa biết); `modified_at` lớn nhất; `old_keys`
    lấy hợp, mỗi khoá giữ `retired_at` lớn nhất, xếp `retired_at` giảm dần, giữ tối đa 16.
 5. Kết quả được đưa về **dạng chuẩn**: mục xếp theo `(created_at, id)`, tombstone theo `id`, lịch sử
@@ -205,8 +211,8 @@ Hệ quả thực tế:
 - **Ngoại lệ khi còn máy chạy 0.1.x:** mục của file v1 không có `field_times`, nên mọi trường của nó
   mang thời điểm `updated_at` (mục 4). Một lần sửa bất kỳ ở máy 0.1.x (ví dụ chỉ sửa ghi chú) khi
   được gộp vào sẽ thay **cả mục**, kể cả các trường máy 0.2 sửa trước đó nhưng sớm hơn lần sửa kia
-  (mật khẩu mới thua vẫn nằm trong `password_history`). Xoá vĩnh viễn ở máy 0.1.x thắng mọi lần sửa
-  (bước 3).
+  (mật khẩu mới thua vẫn nằm trong `password_history`). Xoá vĩnh viễn ở máy 0.1.x không xoá một mục
+  được sửa sau lần xoá đó (bước 3), trừ trường hợp còn lại nêu ở bước 3.
 
 Giả định: đồng hồ các máy lệch nhau không quá vài giây (Windows và Android tự đồng bộ giờ qua
 Internet). Đồng hồ sai nhiều có thể làm bản sửa "cũ" thắng bản sửa "mới" của cùng một trường — mật
@@ -224,8 +230,8 @@ khẩu thua vẫn nằm trong lịch sử.
      ≤ 0.1.2 ở máy khác đã đổi mật khẩu theo kiểu cũ (cùng khoá) ⇒ nhận header đó (nó đã được xác thực:
      header nằm trong AAD của phần thân).
    - **Chỉ một khoá đã nghỉ mở được**, hoặc khoá hiện tại mở được nhưng header mang dấu `pre_change`
-     (mục 3) ("bản khoá cũ") ⇒ **KHÔNG BAO GIỜ tự gộp** (trừ bản cứu hộ / bản lưu riêng trong thư mục
-     riêng của app, xem "Dữ liệu riêng của app" bên dưới) — một máy chưa biết lần đổi mật khẩu ghi ra
+     (mục 3) ("bản khoá cũ") ⇒ **KHÔNG BAO GIỜ tự gộp** (kể cả bản cứu hộ / bản lưu riêng trong thư
+     mục riêng của app, xem "Dữ liệu riêng của app" bên dưới) — một máy chưa biết lần đổi mật khẩu ghi ra
      được file như vậy, nhưng người biết mật khẩu cũ và giữ một bản sao cũ cũng làm được. File được cất **nguyên văn** (đúng từng byte) vào thư mục sao lưu dưới tên
      `oldkey-<ms>-<tên gốc>`; chủ kho xem lại và lấy từng mục ra bằng chức năng khôi phục từ bản sao
      lưu. KHÔNG được mã hoá lại nó bằng khoá hiện tại: khi đó chỉ còn TÊN FILE phân biệt nó với một bản
@@ -256,8 +262,11 @@ khẩu thua vẫn nằm trong lịch sử.
    `vault (… conflicted copy …).pwv`, OneDrive `vault-TÊN-MÁY.pwv`…) được nhận diện **theo nội dung**:
    các file khác trong cùng thư mục có cùng phần mở rộng với file kho (không phân biệt hoa/thường),
    không phải file ẩn (tên bắt đầu bằng `.`), ≤ 64 MiB, và có cùng `vault_id` trong header — lọc theo
-   header TRƯỚC, rồi mới lấy tối đa 32 file đầu tiên theo thứ tự tên (file `.pwv` rác, dù nhiều bao
-   nhiêu, không đẩy được bản xung đột thật ra ngoài). Xử lý theo mục 6.3: bản khoá hiện tại được gộp, rồi chỉ SAU KHI kho đã được ghi
+   header TRƯỚC, rồi mới lấy tối đa 32 file đầu tiên theo thứ tự tên (file `.pwv` rác KHÔNG mang
+   `vault_id` của kho, dù nhiều bao nhiêu, không chiếm chỗ). File rác mang ĐÚNG `vault_id` của kho (header
+   chép từ file thật) thì VẪN chiếm được 32 chỗ: khi đó bản xung đột thật xếp sau không được xét ở lần
+   đồng bộ đó (nó được để nguyên, không bị xoá), và các file rác hiện ra như 32 bản không mở được ở mọi
+   lần đồng bộ. Ít hơn 32 file như vậy thì bản thật vẫn được gộp. Xử lý theo mục 6.3: bản khoá hiện tại được gộp, rồi chỉ SAU KHI kho đã được ghi
    thành công, và chỉ nếu file vẫn giống từng byte với bản đã gộp, mới được chuyển vào thư mục sao lưu
    (`merged-<ms>-<tên gốc>`; nếu đã đổi thì để lần đồng bộ sau). Bản khoá cũ được chuyển nguyên văn
    vào thư mục sao lưu (`oldkey-…`) — chỉ nếu nó không đổi từ lúc đọc.
@@ -300,15 +309,18 @@ khẩu thua vẫn nằm trong lịch sử.
    sau đó chúng chỉ còn là bản khoá cũ); lỗi ⇒ không đổi. Hệ quả: mọi thứ người biết mật khẩu hiện tại
    (sắp thành cũ) ghi vào file kho / bản cạnh kho TRƯỚC lần đổi đều đã được gộp và đi theo sang kho
    mới — đổi mật khẩu không gỡ chúng ra; chủ kho nghi bị lộ nên xem lại các mục vừa đổi gần đây. Đổi
-   sang đúng mật khẩu đang dùng được chấp nhận và vẫn sinh `vault_key` mới.
+   sang đúng mật khẩu đang dùng được chấp nhận và vẫn sinh `vault_key` mới (app và CLI không áp chính
+   sách mật khẩu khi đó, chỉ cảnh báo nếu mật khẩu không còn đạt).
 10. **Chuyển kho sang thư mục khác**: đồng bộ ở chỗ cũ → ghi chỗ mới → đọc lại, giải mã thử → chuyển
     thư mục sao lưu → xoá file cũ chỉ khi nó vẫn đúng là bản đã đồng bộ (máy khác ghi vào giữa chừng
     ⇒ gộp nó vào chỗ mới trước, không gộp được ⇒ để nguyên). Chỉ khi file ở chỗ cũ hỏng / biến mất /
     thuộc kho khác / do bản app mới hơn ghi thì mới "cứu" bản đang mở sang chỗ mới và để nguyên chỗ cũ;
     lỗi khác (đọc/ghi tạm thời, đĩa đầy, mật khẩu đã đổi) ⇒ huỷ chuyển.
     **"Lưu sang chỗ khác" (chỉ chép, `Vault::copy_to`)** — nút trên dải báo lỗi file kho của app: chỉ
-    ĐỌC chỗ cũ (gộp nếu đọc được, lỗi gì cũng bỏ qua), ghi bản trong RAM ra chỗ mới (không ghi đè file
-    đã có), đọc lại kiểm tra rồi dùng chỗ mới. Không bao giờ ghi, xoá hay chuyển gì ở chỗ cũ (file kho,
+    ĐỌC chỗ cũ (gộp nếu đọc được; lỗi đọc khác bỏ qua), ghi bản trong RAM ra chỗ mới (không ghi đè file
+    đã có), đọc lại kiểm tra rồi dùng chỗ mới. Nếu file ở chỗ cũ cho thấy master password đã được đổi ở
+    máy khác ⇒ từ chối, không ghi gì (bản mới sẽ là một kho tách riêng dùng mật khẩu CŨ). App còn từ chối
+    chỗ mới nằm trong chính thư mục của file kho (file mới sẽ bị coi là bản xung đột của nó). Không bao giờ ghi, xoá hay chuyển gì ở chỗ cũ (file kho,
     bản xung đột, thư mục sao lưu); file ở chỗ cũ có thể còn giữ thay đổi mới hơn của máy khác.
 
 ### Thư mục sao lưu `<tên file kho>.backups/`
@@ -333,9 +345,12 @@ khẩu thua vẫn nằm trong lịch sử.
   cho tới lúc đổi) được mã hoá lại tại chỗ bằng khoá mới **và gắn dấu `pre_change`** (mục 3): từ đó
   chúng là "lịch sử để xem", không bao giờ được tự dùng. Phần thân của mỗi bản được mã hoá lại nhận
   thêm MỌI khoá trong `old_keys` của kho (kể cả khoá vừa bị thay), để một kho dựng lại chỉ từ các bản
-  này vẫn đọc được file của thời khoá cũ. File nào ghi lỗi được thử lại một lần ở cuối; vẫn lỗi ⇒ tên
-  nó được báo cho chủ kho (app và `pwv passwd`): file đó VẪN mở được bằng mật khẩu vừa bị thay, nên xoá
-  đi nếu mật khẩu cũ có thể đã lộ. File chỉ mở được bằng một khoá đã nghỉ từ
+  này vẫn đọc được file của thời khoá cũ. File nào không ĐỌC được hoặc không GHI lại được được thử lại
+  một lần ở cuối; vẫn lỗi ⇒ tên nó được báo cho chủ kho (app và `pwv passwd`): file đó có thể VẪN mở
+  được bằng mật khẩu vừa bị thay, nên xoá đi nếu mật khẩu cũ có thể đã lộ (file không đọc được thì không
+  phân loại được, nên có thể cả một bản đã dùng mật khẩu mới cũng bị nêu tên). File đọc được nhưng không
+  phải bản của kho / quá 64 MiB / chỉ mở được bằng một khoá cũ hơn nữa được để nguyên và chỉ được đếm.
+  `damaged-…` bị bỏ qua mà không đọc. File chỉ mở được bằng một khoá đã nghỉ từ
   TRƯỚC đó thì để nguyên và không bao giờ được mã hoá lại ở bất cứ đâu: thư mục sao lưu nằm trong thư
   mục đồng bộ, nên người biết một mật khẩu cũ có thể đặt vào đó file do họ tự mã hoá bằng khoá cũ; mã
   hoá lại file ấy bằng khoá hiện tại là biến nó thành "bản sao lưu đáng tin". Hệ quả: nếu lần đổi mật
@@ -354,10 +369,11 @@ khẩu thua vẫn nằm trong lịch sử.
   KHÔNG mang dấu `pre_change` (không giới hạn số file xét trong gói: file rác mang tên "mới nhất" không
   đẩy được bản thật ra): phần thân nhận header làm dữ liệu xác thực, nên header của kho dựng lại (kể
   cả `key_changed_at`) là header thật. Sau đó gộp thêm các bản giải mã được bằng ĐÚNG khoá của gốc và
-  không mang dấu: bỏ qua bản trùng từng byte (SHA-256) với bản đã gộp; giới hạn **40 bản** chỉ tính
-  những bản THÊM được gì đó vào kết quả (gốc tính là một), nên file rác (không giải mã được), bản trùng
-  hay bản cũ bị chép ra nhiều tên "mới nhất" không chiếm chỗ của bản thật — không còn giới hạn số file
-  xét. Bản chỉ mở được bằng khoá khác (khoá đã nghỉ) không bao giờ được gộp. Nếu có bản của cùng kho,
+  không mang dấu: MỌI bản như vậy đều được gộp (không còn giới hạn số bản gộp hay số file xét), bỏ qua
+  bản trùng từng byte (SHA-256) với bản đã gộp; số "bản đã dùng" báo cho chủ kho chỉ tính bản THÊM được
+  gì đó (gốc tính là một). Những gì còn bị chặn: tối đa 5 gói khoá (5 lượt Argon2), mỗi file ≤ 64 MiB, và
+  thời điểm "bản mới nhất được dùng" không vượt đồng hồ của máy (tên file "tương lai" bị cắt về hiện
+  tại). Bản chỉ mở được bằng khoá khác (khoá đã nghỉ) không bao giờ được gộp. Nếu có bản của cùng kho,
   dùng gói khoá KHÁC, tự khai `key_changed_at` mới hơn gốc (rất có thể mật khẩu vừa nhập là mật khẩu
   CŨ; con số này không xác thực được nên đây chỉ là lý do để dừng và hỏi lại) ⇒ lỗi "mật khẩu cũ" —
   kiểm tra này đi TRƯỚC: nếu gói khoá mở được mà chỉ còn các bản mang dấu `pre_change` và có gói khác
@@ -390,8 +406,10 @@ Hai trường phụ (không bí mật, vắng mặt = mặc định):
   tối đa 300 bản tự động / bản xung đột đã gộp mới nhất, cùng `vault_id`, gói khoá khác header hiện tại,
   không mang dấu `pre_change`, phần thân giải mã được bằng khoá HIỆN TẠI; không chạy Argon2). Kết quả > 0
   là dấu hiệu kho từng đổi mật khẩu bằng 0.1.x (đổi mật khẩu mà giữ khoá) ⇒ app hiện lời mời đổi master
-  password một lần. App chỉ quét lại khi dấu khoá đổi (tức sau một lần đổi mật khẩu); `pwv backups` quét
-  mỗi lần chạy và không dùng trường này.
+  password một lần. Lọc theo `vault_id` TRƯỚC giới hạn 300. Lần quét **không trọn vẹn** (có file của kho
+  không đọc được hay quá 64 MiB, hoặc chạm giới hạn 300) mà không thấy gì ⇒ báo lỗi chứ không báo
+  "sạch", và app không ghi nhớ gì (sẽ quét lại lần sau). App chỉ quét lại khi dấu khoá đổi (tức sau một
+  lần đổi mật khẩu); `pwv backups` quét mỗi lần chạy và không dùng trường này.
 - `last_vault_id` (cấp cao nhất, chuỗi hoặc vắng): `vault_id` của kho ở đường dẫn đang cấu hình
   (`vault`), ghi khi kho ở ĐÚNG đường dẫn đó được mở / được chấp nhận làm mốc; xoá khi đường dẫn đổi
   sang file khác. Dùng để tìm bản lưu riêng của kho khi file kho chính đã mất (mục dưới).
@@ -416,17 +434,24 @@ App máy tính giữ một thư mục riêng, **không đồng bộ**: `<app_loc
 
 | File | Nội dung | Khi nào ghi | Dùng thế nào |
 |---|---|---|---|
-| `<vault_id>-<ms>.pwv` | **Bản cứu hộ**: toàn bộ kho trong RAM, định dạng `.pwv` bình thường (mục 1–4), mã hoá như file kho | Khi phải khoá (hết giờ, đóng cửa sổ) mà còn thay đổi chưa ghi được ra file kho | Gộp ở lần mở khoá sau (và khi khôi phục); chỉ xoá sau khi gộp được VÀ kho đã ghi thành công |
-| `last-<vault_id>.pwv` | **Bản lưu riêng**: bản sao toàn bộ kho, định dạng `.pwv` bình thường | Sau mỗi lần đọc/ghi thành công và khi khoá — chỉ khi một trong (`vault_id`, `modified_at`, `key_changed_at`, dấu khoá, số mục, số mục trong thùng rác) đổi | Gộp ở mỗi lần mở khoá (trước bản cứu hộ); khôi phục khi không còn bản sao lưu nào dùng được; nút "Tạo lại file kho từ bản lưu riêng" khi file kho mất |
+| `<vault_id>-<ms>.pwv` | **Bản cứu hộ**: toàn bộ kho trong RAM, định dạng `.pwv` bình thường (mục 1–4), mã hoá như file kho | Khi phải khoá (hết giờ, đóng cửa sổ) mà còn thay đổi chưa ghi được ra file kho | Gộp ở lần mở khoá sau (và khi khôi phục); chỉ xoá sau khi đã xử lý xong (gộp, hoặc cất thành `oldkey-…`) VÀ kho đã ghi thành công |
+| `last-<vault_id>.pwv` | **Bản lưu riêng**: bản sao toàn bộ kho, định dạng `.pwv` bình thường | Sau mỗi lần đọc/ghi thành công và khi khoá — khi một trong (`vault_id`, SHA-256 của file kho trên đĩa, dấu khoá, `modified_at`, số mục, số mục trong thùng rác) đổi, và luôn khi còn thay đổi chưa ghi hoặc lần ghi gần nhất chưa xác minh | Gộp ở mỗi lần mở khoá (trước bản cứu hộ); khôi phục khi không còn bản sao lưu nào dùng được hoặc chỉ còn bản `pre_change`; nút "Tạo lại file kho từ bản lưu riêng" khi file kho mất |
 | `stash-<vault_id>.bin` | Khối niêm phong `"stash"`: bản nháp form đang sửa dở + danh sách "mật khẩu vừa tạo gần đây" (tối đa 20, mỗi dòng giữ tối đa 30 ngày) | Bản nháp: ~0,4 giây sau mỗi thay đổi trong form, khi cửa sổ bị ẩn / mất tiêu điểm, trước khi bấm khoá; xoá khi lưu hoặc bỏ thay đổi. Mật khẩu vừa tạo: khi bấm sao chép / "Dùng" trong bộ tạo | Mở lại form sau khi mở khoá; mục "Mật khẩu vừa tạo gần đây" |
 
-- **Gộp bản cứu hộ / bản lưu riêng** (`Vault::merge_file`): như mục 6.3, NHƯNG nội dung chỉ mở được
-  bằng khoá đã nghỉ **cũng được gộp** — ví dụ bản ghi trên máy này ngay trước khi master password được
-  đổi ở máy khác. Đây là ngoại lệ có chủ đích duy nhất của quy tắc "nội dung dưới mật khẩu cũ không bao
-  giờ được tự gộp": thư mục này nằm ngoài thư mục đồng bộ, nên chỉ ai dùng được tài khoản Windows này
-  mới đặt được file vào đó (cùng mức tin cậy với chính app). Gộp là phép hợp của mục 5, nên một bản
-  cũ không làm sống lại mục đã xoá vĩnh viễn và không đè lên thay đổi mới hơn.
-- Bản **không gộp được** (khoá mà kho hiện tại không biết — ví dụ ghi bằng một master password MỚI HƠN
+- Chỉ **app máy tính** ghi các file này. Công cụ dòng lệnh `pwv.exe` không ghi bản lưu riêng, bản cứu
+  hộ, bản nháp hay danh sách mật khẩu vừa tạo; thay đổi làm bằng CLI chỉ nằm trong file kho (và thư mục
+  sao lưu).
+- **Gộp bản cứu hộ / bản lưu riêng** (`Vault::merge_local_file`), cùng quy tắc tin cậy với mục 6.3:
+  - giải mã được bằng **khoá hiện tại** và không mang `pre_change` ⇒ gộp (phép hợp của mục 5: không làm
+    sống lại mục đã xoá vĩnh viễn, không đè lên thay đổi mới hơn);
+  - chỉ mở được bằng **khoá đã nghỉ**, hoặc mang `pre_change` ⇒ **không bao giờ gộp**. Lõi thử gộp
+    trong RAM: nếu nó có thêm gì so với kho, file được cất **nguyên văn** vào thư mục sao lưu thành
+    `oldkey-<ms>-<tên file>` (nhãn "ghi bằng mật khẩu cũ", giữ lại như các bản `oldkey-` khác) và app báo
+    cho chủ kho; nếu không có gì mới thì bỏ qua. Cất không được ⇒ lỗi (file được giữ). Sau khi cất xong
+    (và kho đã ghi), app xoá file trong thư mục riêng.
+  (Bản 0.2.0 trước đợt soát fix3 từng gộp cả nội dung dưới khoá đã nghỉ từ thư mục này; đã bỏ: ai dùng
+  được tài khoản Windows và biết một mật khẩu cũ đặt được file vào đó.)
+- Bản **không mở được** (khoá mà kho hiện tại không biết — ví dụ ghi bằng một master password MỚI HƠN
   hoặc khác hẳn, như khi kho vừa được dựng lại bằng một mật khẩu cũ; khoá đã rơi khỏi `old_keys` sau
   hơn 16 lần đổi; file hỏng) **không bị xoá**: app báo "N bản cứu hộ chưa gộp được" và thử lại ở lần mở
   khoá sau. Bản lưu riêng không gộp được được đổi tên thành tên bản cứu hộ (`<vault_id>-<ms>.pwv`) để vào
@@ -486,13 +511,12 @@ App máy tính giữ một thư mục riêng, **không đồng bộ**: `<app_loc
   bằng mật khẩu này". Cũng vậy, hai file như thế làm trường hợp "header file chính bị sửa" quay về báo
   sai mật khẩu thay vì "file hỏng". Không mất dữ liệu (không có gì được ghi), nhưng chủ kho có thể bị
   đẩy về phía gõ mật khẩu cũ hay bỏ cuộc.
-- Bản cứu hộ và bản lưu riêng trong thư mục riêng của app được gộp kể cả khi chỉ mở được bằng khoá đã
-  nghỉ (xem "Dữ liệu riêng của app"): ai dùng được tài khoản Windows đang đăng nhập (và biết một mật khẩu
-  cũ, có một bản sao cũ của kho) đặt được file vào đó để nó được gộp ở lần mở khoá sau. Đây là chủ ý —
-  người đó vốn đã ở mức "dùng được máy" (README, mục Giới hạn).
-- Khi còn máy chạy 0.1.x: quy tắc tombstone của file v1 và việc mục v1 không có thời điểm từng trường
-  (mục 5) làm một lần sửa hay xoá vĩnh viễn ở máy đó thay được cả mục / thắng lần sửa mới hơn ở máy 0.2
-  khi file của nó được gộp vào. Bản 0.1.x còn dọn thư mục sao lưu theo TÊN (`<tên>-*`, giữ 10 bản mới
+- Một máy còn đang mở khoá khi master password được đổi ở máy khác vẫn dùng khoá cũ cho tới khi nó biết
+  về lần đổi: trong lúc đó các file ghi bằng mật khẩu cũ vẫn là "khoá hiện tại" đối với nó và được gộp.
+  Vì vậy chủ kho nên khoá / đóng app trên các máy khác TRƯỚC khi đổi master password.
+- Khi còn máy chạy 0.1.x: mục v1 không có thời điểm từng trường (mục 5), nên một lần sửa ở máy đó thay
+  được cả mục khi file của nó được gộp vào; và một tombstone v1 đã được ghi vào file v2 là tuyệt đối
+  (mục 5, bước 3), nên một lần sửa muộn ở máy 0.1.x có thể vẫn mất (còn trong bản sao lưu). Bản 0.1.x còn dọn thư mục sao lưu theo TÊN (`<tên>-*`, giữ 10 bản mới
   nhất, không xét `vault_id` hay định dạng): nếu một file v1 quay lại làm file kho chính (dịch vụ đồng
   bộ chọn bản của máy 0.1.x, hoặc chép tay) thì mỗi lần lưu ở máy 0.1.x xoá dần các bản sao lưu của 0.2.
   Kho từng đổi mật khẩu bằng 0.1.x (đổi mật khẩu mà giữ khoá) thì mật khẩu cũ vẫn mở ra khoá hiện tại từ

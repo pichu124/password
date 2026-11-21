@@ -99,7 +99,9 @@ jobs:
           # commit (git show không đổi kiểu xuống dòng như bản checkout trên Windows có thể làm), để
           # SHA256SUMS.txt khớp với file trong repo.
           git show "HEAD:tools/pwv_recover.py" > dist-release/pwv_recover.py
-          python -I -m py_compile dist-release/pwv_recover.py
+          # Chỉ kiểm tra cú pháp, KHÔNG ghi gì ra đĩa (py_compile để lại __pycache__/ trong
+          # dist-release, và thư mục đó làm bước publish hỏng).
+          python -I -c "import ast, sys; ast.parse(open(sys.argv[1], 'rb').read())" dist-release/pwv_recover.py
 
       - uses: actions/upload-artifact@v4
         with:
@@ -133,7 +135,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir out
-          cp dl/release-windows/* out/
+          # Chỉ chép file thường (một thư mục lạc vào artifact không được làm hỏng bản phát hành).
+          find dl/release-windows -maxdepth 1 -type f -exec cp {} out/ \;
           cp dl/release-android/pwv-android-arm64.apk "out/pwv_${V}_android-arm64.apk"
           SIGNER=$(cat dl/release-android/pwv-android-signer.txt)
           (cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
@@ -149,10 +152,12 @@ jobs:
 
           ## Lưu ý khi nâng cấp từ 0.1.x
           Từ bản 0.2.0, file kho dùng định dạng mới mà bản cũ không đọc/ghi được. Hãy cập nhật **mọi thiết bị**:
-          1. **Khoá hoặc đóng pwv trên tất cả các máy** trước khi cài bản mới ở máy đầu tiên (những gì thêm/sửa
-             trên máy còn chạy bản cũ sau đó sẽ không lưu được).
+          1. **Khoá hoặc đóng pwv trên tất cả các máy** trước khi cài bản mới ở máy đầu tiên.
           2. Cài bản mới lần lượt trên từng máy tính và điện thoại.
-          3. Máy chưa cập nhật sẽ báo "hãy cập nhật phần mềm" thay vì mở file — dữ liệu không bị ảnh hưởng.
+          3. File kho chỉ chuyển sang định dạng mới khi một máy đã cập nhật **lưu một thay đổi**. Trước lúc đó máy
+             chưa cập nhật vẫn mở và lưu được, và những gì nó lưu sẽ được gộp vào sau theo kiểu "cả mục" (có thể đè
+             lên thay đổi mới hơn ở máy đã cập nhật). Từ lúc đó trở đi, máy chưa cập nhật báo "hãy cập nhật phần mềm"
+             thay vì mở file — dữ liệu không bị ảnh hưởng.
           4. Khi đã có một máy dùng bản mới, **đừng dùng bản 0.1.x ở bất kỳ máy nào nữa** (kể cả \`pwv.exe\` cũ): xem mục
              *Khi nâng cấp lên 0.2.0* trong README.
 
