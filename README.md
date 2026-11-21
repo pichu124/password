@@ -170,11 +170,11 @@ mục, mở PowerShell **tại thư mục đó** và gõ lệnh với `.\` ở �
 pwv init                       # tạo kho; gợi ý đặt trong thư mục đồng bộ
 pwv gen -p -w 6                # tạo cụm 6 từ (dùng làm master password rất tốt)
 pwv add "Vietcombank" -u nguyenvana --url https://vcbdigibank.vietcombank.com.vn -g -l 24
-pwv add "Gmail" -u toi@gmail.com --totp --notes   # mật khẩu, secret 2FA, ghi chú được HỎI sau khi chạy lệnh
+pwv add "Gmail" -u toi@gmail.com --totp --notes   # mật khẩu, secret 2FA rồi ghi chú được HỎI sau khi chạy lệnh; ghi chú kết thúc bằng một dòng chỉ có dấu chấm "."
 pwv list ngân                  # tìm kiếm
 pwv copy gmail                 # chép mật khẩu, tự xoá clipboard sau 20 giây
 pwv show gmail --reveal        # xem chi tiết (mật khẩu và ghi chú chỉ hiện khi có --reveal)
-pwv edit gmail -g              # đổi sang mật khẩu ngẫu nhiên mới (mật khẩu cũ vào lịch sử)
+pwv edit gmail -g -c           # đổi sang mật khẩu ngẫu nhiên mới (mật khẩu cũ vào lịch sử); -c chép mật khẩu mới vào clipboard
 pwv delete gmail               # chuyển vào thùng rác
 pwv trash                      # xem thùng rác;  pwv trash restore gmail | purge gmail | empty
 pwv passwd                     # đổi master password (đổi luôn khoá mã hoá)
@@ -189,7 +189,13 @@ pwv move "D:\Dropbox\Passwords\vault.pwv"
 ```
 
 Mật khẩu, secret 2FA và ghi chú không bao giờ nhận qua tham số dòng lệnh (chúng sẽ nằm lại trong lịch
-sử lệnh của PowerShell).
+sử lệnh của PowerShell). Ghi chú được phép có dòng trống: gõ (hoặc dán) xong thì Enter, gõ một dòng
+chỉ có dấu chấm `.` rồi Enter (hoặc Ctrl+Z rồi Enter). Để trống mật khẩu khi `pwv add` hỏi thì pwv hỏi
+lại có muốn tạo mật khẩu ngẫu nhiên không.
+
+Khi pwv cảnh báo kho cũ hơn / không nối tiếp kho máy này dùng lần trước, các lệnh chỉ xem vẫn chạy, còn
+lệnh sửa kho sẽ dừng lại hỏi (mặc định: không). Nếu tên bạn gõ chỉ khớp một phần với một mục, hoặc bản
+sao lưu được ghi từ trước lần đổi mật khẩu / bằng mật khẩu cũ, pwv luôn hỏi lại — kể cả khi có `-y`.
 
 ## Cứu hộ dữ liệu không cần app
 
