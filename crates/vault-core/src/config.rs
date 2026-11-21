@@ -24,6 +24,11 @@ pub struct SeenMark {
     /// Dấu nhận dạng của khoá kho mà máy này dùng gần đây nhất (`Vault::key_tag`; 0 = chưa ghi
     /// nhận). Không phải bí mật.
     pub key_tag: u64,
+    /// Dấu khoá (`Vault::key_tag`) mà lần quét gần nhất của `Vault::backups_under_other_password`
+    /// KHÔNG tìm thấy bản sao lưu nào mở được khoá hiện tại bằng một master password khác (0 = chưa
+    /// quét / lần quét gần nhất có tìm thấy). Để app không quét lại (và tải lại file từ dịch vụ đồng
+    /// bộ) ở mỗi lần mở khoá. Không phải bí mật.
+    pub wrap_scan: u64,
 }
 
 /// File kho vừa mở CŨ HƠN bản mà máy này đã từng thấy.
@@ -54,6 +59,10 @@ pub struct Config {
     /// Mốc mới nhất đã thấy của từng kho (theo vault_id) — để cảnh báo khi file kho bị thay bằng
     /// một bản cũ hơn (dịch vụ đồng bộ khôi phục nhầm, hoặc ai đó chép đè file cũ).
     pub seen: BTreeMap<String, SeenMark>,
+    /// `vault_id` của kho được mở khoá thành công gần nhất TẠI đường dẫn `vault` (để tìm bản sao
+    /// riêng của máy này khi kho đang khoá mà file kho không còn). Bị xoá khi `vault` đổi sang file
+    /// khác. Không phải bí mật.
+    pub last_vault_id: Option<String>,
 }
 
 impl Default for Config {
@@ -64,6 +73,7 @@ impl Default for Config {
             clipboard_clear_secs: 20,
             check_updates: true,
             seen: BTreeMap::new(),
+            last_vault_id: None,
         }
     }
 }
@@ -152,15 +162,49 @@ impl Config {
         key_changed_at: i64,
         key_tag: u64,
     ) {
+        let wrap_scan = self.seen.get(vault_id).map_or(0, |m| m.wrap_scan);
         self.seen.insert(
             vault_id.to_string(),
             SeenMark {
                 modified_at,
                 key_changed_at,
                 key_tag,
+                wrap_scan,
             },
         );
         self.sanitize();
+    }
+
+    /// Lần quét gần nhất (`Vault::backups_under_other_password`) cho đúng khoá `key_tag` này đã không
+    /// tìm thấy gì ⇒ không cần quét lại.
+    pub fn wrap_scan_clean(&self, vault_id: &str, key_tag: u64) -> bool {
+        key_tag != 0
+            && self
+                .seen
+                .get(vault_id)
+                .is_some_and(|m| m.wrap_scan == key_tag)
+    }
+
+    /// Ghi nhận: quét cho khoá `key_tag` không tìm thấy gì (chưa lưu). Trả về true nếu có thay đổi.
+    pub fn set_wrap_scan_clean(&mut self, vault_id: &str, key_tag: u64) -> bool {
+        let m = self.seen.entry(vault_id.to_string()).or_default();
+        let changed = m.wrap_scan != key_tag;
+        m.wrap_scan = key_tag;
+        self.sanitize();
+        changed
+    }
+
+    /// Đặt `last_vault_id` (chỉ khi `path` đúng là đường dẫn kho đang cấu hình). Trả về true nếu có
+    /// thay đổi.
+    pub fn note_last_vault(&mut self, path: &Path, vault_id: &str) -> bool {
+        let Some(configured) = self.vault.as_deref() else {
+            return false;
+        };
+        if !same_path(configured, path) || self.last_vault_id.as_deref() == Some(vault_id) {
+            return false;
+        }
+        self.last_vault_id = Some(vault_id.to_string());
+        true
     }
 
     /// Ghi nhận mốc mới (các mốc thời gian chỉ tăng). `key_tag` khác 0 thì thay dấu khoá đã ghi
@@ -178,6 +222,7 @@ impl Config {
             modified_at: m.modified_at.max(modified_at),
             key_changed_at: m.key_changed_at.max(key_changed_at),
             key_tag: if key_tag != 0 { key_tag } else { m.key_tag },
+            wrap_scan: m.wrap_scan,
         };
         let changed = *m != new;
         *m = new;
@@ -194,12 +239,21 @@ impl Config {
     }
 
     /// Đặt đường dẫn kho (chuyển sang đường dẫn tuyệt đối) — chưa lưu.
+    /// Nếu đường dẫn đổi sang một file khác thì `last_vault_id` bị xoá.
     pub fn set_vault_path(&mut self, vault: &Path) {
-        self.vault = Some(if is_uri(vault) {
+        let new = if is_uri(vault) {
             vault.to_path_buf()
         } else {
             std::path::absolute(vault).unwrap_or_else(|_| vault.to_path_buf())
-        });
+        };
+        if !self
+            .vault
+            .as_deref()
+            .is_some_and(|old| same_path(old, &new))
+        {
+            self.last_vault_id = None;
+        }
+        self.vault = Some(new);
     }
 
     /// Đặt đường dẫn kho và lưu.
@@ -207,6 +261,15 @@ impl Config {
         self.set_vault_path(vault);
         self.save()
     }
+}
+
+/// Hai đường dẫn chỉ cùng một file (so dạng tuyệt đối; URI so nguyên văn).
+fn same_path(a: &Path, b: &Path) -> bool {
+    if is_uri(a) || is_uri(b) {
+        return a == b;
+    }
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    abs(a) == abs(b)
 }
 
 /// Gợi ý vị trí đặt kho, theo thứ tự: thư mục Google Drive for Desktop (bản tiếng Anh
@@ -328,5 +391,35 @@ mod tests {
             serde_json::from_str(r#"{"seen":{"v":{"modified_at":7,"key_changed_at":3}}}"#).unwrap();
         assert_eq!(c.seen["v"].modified_at, 7);
         assert_eq!(c.seen_key_tag("v"), 0);
+    }
+
+    #[test]
+    fn wrap_scan_memo_survives_seen_updates() {
+        let mut c = Config::default();
+        assert!(!c.wrap_scan_clean("v", 7));
+        assert!(c.set_wrap_scan_clean("v", 7));
+        assert!(!c.set_wrap_scan_clean("v", 7));
+        assert!(c.wrap_scan_clean("v", 7));
+        assert!(!c.wrap_scan_clean("v", 9), "khoá khác ⇒ quét lại");
+        assert!(!c.wrap_scan_clean("v", 0));
+        c.note_seen("v", 100, 5, 7);
+        c.set_seen("v", 90, 5, 7);
+        assert!(c.wrap_scan_clean("v", 7));
+        assert_eq!(c.seen["v"].modified_at, 90);
+        let back: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert!(back.wrap_scan_clean("v", 7));
+    }
+
+    #[test]
+    fn last_vault_id_is_cleared_when_the_vault_path_changes() {
+        let mut c: Config = serde_json::from_str(r#"{"vault":"/a/vault.pwv"}"#).unwrap();
+        assert_eq!(c.last_vault_id, None);
+        assert!(!c.note_last_vault(Path::new("/b/vault.pwv"), "id"));
+        assert!(c.note_last_vault(Path::new("/a/vault.pwv"), "id"));
+        assert!(!c.note_last_vault(Path::new("/a/vault.pwv"), "id"));
+        c.set_vault_path(Path::new("/a/vault.pwv"));
+        assert_eq!(c.last_vault_id.as_deref(), Some("id"));
+        c.set_vault_path(Path::new("/b/vault.pwv"));
+        assert_eq!(c.last_vault_id, None);
     }
 }

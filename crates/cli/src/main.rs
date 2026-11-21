@@ -2849,6 +2849,7 @@ mod tests {
             backups_reencrypted: 7,
             backups_skipped: 2,
             save: SaveReport::default(),
+            ..Default::default()
         };
         let l = passwd_report_lines(&r, 0, &[], Path::new("x.backups")).join("\n");
         assert!(l.contains("đã mã hoá lại 7 bản"));

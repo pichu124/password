@@ -594,6 +594,21 @@ mod tests {
     }
 
     #[test]
+    fn capped_read_refuses_oversized_files_without_reading_them() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        fs::write(&p, b"nho").unwrap();
+        assert_eq!(read_retry_capped(&p, 3).unwrap().unwrap(), b"nho");
+        assert!(read_retry_capped(&p, 2).unwrap().is_none());
+        // File thưa rất lớn: không cấp phát / đọc gì.
+        let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
+        if f.set_len(1 << 40).is_ok() {
+            assert!(read_retry_capped(&p, MAX_VAULT_FILE).unwrap().is_none());
+        }
+        assert!(read_retry_capped(&d.path().join("khong-co"), 9).is_err());
+    }
+
+    #[test]
     fn write_new_refuses_existing_file() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("vault.pwv");

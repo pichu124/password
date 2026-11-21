@@ -1151,21 +1151,82 @@ mod tests {
             k
         }
         assert_eq!(crate::format::VERSION, 2);
+        // Mọi trường đều KHÁC giá trị mặc định: trường mới có `skip_serializing_if` / giá trị rỗng
+        // cũng phải hiện ra ở đây.
         let mut e = entry("x", "p", 10);
+        e.title = "t".into();
+        e.username = "u".into();
+        e.urls = vec!["https://x".into()];
+        e.notes = "n".into();
+        e.totp = Some("JBSWY3DPEHPK3PXP".into());
+        e.tags = vec!["g".into()];
+        e.favorite = true;
+        e.field_times.deleted = 3;
         e.password_history.push(HistoryItem {
             password: "o".into(),
             replaced_at: 1,
         });
         let mut d = VaultData {
-            entries: vec![e],
+            entries: vec![e.clone()],
+            trash: vec![e],
             tombstones: vec![Tombstone {
                 id: "t".into(),
                 deleted_at: 1,
             }],
+            modified_at: 5,
             ..Default::default()
         };
         d.push_old_key(&[1; KEY_LEN], 1);
         let v = serde_json::to_value(&d).unwrap();
+        // Không trường nào mang giá trị mặc định (null, rỗng, 0, false).
+        fn no_defaults(v: &serde_json::Value, path: &str) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, x) in m {
+                        no_defaults(x, &format!("{path}.{k}"));
+                    }
+                }
+                serde_json::Value::Array(a) => {
+                    assert!(!a.is_empty(), "{path} rỗng");
+                    for x in a {
+                        no_defaults(x, path);
+                    }
+                }
+                serde_json::Value::Null => panic!("{path} là null"),
+                serde_json::Value::Bool(b) => assert!(*b, "{path} = false"),
+                serde_json::Value::Number(n) => {
+                    assert!(n.as_f64() != Some(0.0), "{path} = 0")
+                }
+                serde_json::Value::String(x) => assert!(!x.is_empty(), "{path} rỗng"),
+            }
+        }
+        no_defaults(&v, "data");
+        let h = crate::format::Header {
+            pre_change: true,
+            ..crate::format::Header::new_wrapped(
+                "id".into(),
+                b"pw",
+                crate::KdfParams::INSECURE_TEST,
+                &crate::crypto::random_key(),
+                9,
+            )
+            .unwrap()
+        };
+        let hv = serde_json::to_value(&h).unwrap();
+        no_defaults(&hv, "header");
+        assert_eq!(
+            keys(&hv),
+            [
+                "kdf",
+                "key_changed_at",
+                "key_nonce",
+                "pre_change",
+                "salt",
+                "vault_id",
+                "wrapped_key"
+            ]
+        );
+        assert_eq!(keys(&hv["kdf"]), ["m_kib", "p", "t"]);
         assert_eq!(
             keys(&v),
             ["entries", "modified_at", "old_keys", "tombstones", "trash"]

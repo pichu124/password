@@ -66,9 +66,24 @@ pub struct MoveReport {
     pub old_removed: bool,
     /// Số bản xung đột đã gộp trước khi chuyển.
     pub conflicts_merged: usize,
-    /// File ở vị trí cũ không đọc được (hỏng / biến mất / của kho khác): chỉ ghi bản đang mở sang
-    /// vị trí mới, mọi thứ ở vị trí cũ được giữ nguyên.
+    /// Chỉ ghi bản đang mở sang vị trí mới, mọi thứ ở vị trí cũ được giữ nguyên: luôn đúng với
+    /// [`Vault::copy_to`]; với [`Vault::move_to`] là khi file ở vị trí cũ không đọc được (hỏng / biến
+    /// mất / của kho khác).
     pub rescued: bool,
+}
+
+/// Thông tin đọc từ header của một file kho mà KHÔNG cần mật khẩu (xem [`Vault::peek`]). Header
+/// chưa được xác thực: chỉ dùng để hiển thị / gợi ý, không dùng để quyết định tin file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInfo {
+    pub vault_id: String,
+    /// Phiên bản định dạng (1 = do bản app 0.1.x ghi).
+    pub version: u16,
+    /// Lần đổi master password gần nhất (ms) mà file tự khai.
+    pub key_changed_at: i64,
+    /// File tự khai là bản sao lưu có từ trước lần đổi mật khẩu (xem `Header::pre_change`).
+    pub pre_change: bool,
+    pub kdf: KdfParams,
 }
 
 /// Kết quả của một lần lưu.
@@ -116,12 +131,17 @@ pub struct SyncReport {
 }
 
 /// Kết quả của việc đổi master password.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PasswordChangeReport {
     /// Số bản sao lưu đã được mã hoá lại bằng khoá mới.
     pub backups_reencrypted: usize,
-    /// Số bản sao lưu không mã hoá lại được (có thể vẫn mở được bằng mật khẩu cũ).
+    /// Số bản sao lưu để nguyên vì không đọc / không giải mã được bằng khoá hiện tại hay khoá vừa bị
+    /// thay (file hỏng, của kho khác, hoặc chỉ mở được bằng một master password CŨ HƠN nữa).
     pub backups_skipped: usize,
+    /// Tên file (trong thư mục sao lưu) của các bản ĐỌC ĐƯỢC mà GHI LẠI không được (đĩa đầy, file bị
+    /// dịch vụ đồng bộ / diệt virus giữ), kể cả sau một lần thử lại. Các bản này VẪN mở được bằng
+    /// master password vừa bị thay. Không tính vào `backups_skipped`.
+    pub backups_failed: Vec<String>,
     /// Kết quả của lần ghi (có gộp thay đổi của máy khác không, có tạo được bản sao lưu không).
     pub save: SaveReport,
 }
@@ -150,6 +170,8 @@ pub struct Vault {
     /// SHA-256 của các bản trong `pending_old_keys` đã được cất xong. Không nằm trong `Snapshot`:
     /// hoàn tác một giao dịch không được làm bản cất bị ghi thêm lần nữa.
     archived_old_keys: Vec<[u8; 32]>,
+    /// Phiên bản định dạng của file kho chính như lúc mở (xem [`Vault::opened_version`]).
+    opened_version: u16,
 }
 
 impl std::fmt::Debug for Vault {
@@ -193,6 +215,67 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
+// Test: số lần ghi lại bản sao lưu (lúc đổi mật khẩu) kế tiếp bị giả lập là thất bại.
+#[cfg(test)]
+thread_local! {
+    static REENCRYPT_WRITE_FAULTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reencrypt_write_fault() -> Result<()> {
+    REENCRYPT_WRITE_FAULTS.with(|c| match c.get() {
+        0 => Ok(()),
+        n => {
+            c.set(n - 1);
+            Err(Error::Io(std::io::Error::other("lỗi ghi giả lập")))
+        }
+    })
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn reencrypt_write_fault() -> Result<()> {
+    Ok(())
+}
+
+/// Đọc file kho chính (hoặc một bản cùng kho) — file lớn hơn [`fsutil::MAX_VAULT_FILE`] bị coi là
+/// file hỏng, không được đọc vào RAM.
+fn read_vault_file(path: &Path) -> Result<Vec<u8>> {
+    fsutil::read_retry_capped(path, fsutil::MAX_VAULT_FILE)?.ok_or(Error::VaultFileDamaged)
+}
+
+/// Đọc một bản (bản sao lưu / bản cạnh kho) để thử; không đọc được hoặc quá lớn ⇒ `None`.
+fn read_copy(path: &Path) -> Option<Vec<u8>> {
+    fsutil::read_retry_capped(path, fsutil::MAX_VAULT_FILE)
+        .ok()
+        .flatten()
+}
+
+/// Miền của khoá con dùng cho [`Vault::seal_local`].
+const LOCAL_DOMAIN: &[u8] = b"pwv/v1/local\0";
+/// Đầu của một khối đã niêm phong bằng [`Vault::seal_local`].
+const LOCAL_MAGIC: &[u8; 4] = b"PWL1";
+
+/// Khoá con (HKDF-SHA256 từ khoá kho) cho một mục đích `purpose`.
+fn local_subkey(vault_key: &[u8; crypto::KEY_LEN], purpose: &str) -> Key {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, vault_key);
+    let mut info = Zeroizing::new(LOCAL_DOMAIN.to_vec());
+    info.extend_from_slice(purpose.as_bytes());
+    let mut k = Zeroizing::new([0u8; crypto::KEY_LEN]);
+    // 32 byte luôn nằm trong giới hạn đầu ra của HKDF-SHA256.
+    hk.expand(&info, k.as_mut())
+        .expect("HKDF-SHA256 cho được 32 byte");
+    k
+}
+
+fn local_aad(purpose: &str, vault_id: &str) -> Vec<u8> {
+    let mut aad = LOCAL_DOMAIN.to_vec();
+    aad.extend_from_slice(purpose.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(vault_id.as_bytes());
+    aad
+}
+
 fn fingerprint(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -229,6 +312,7 @@ struct Unlocked {
     header: Header,
     key: Key,
     data: VaultData,
+    version: u16,
 }
 
 /// Mở một file kho bằng master password.
@@ -249,6 +333,7 @@ fn unlock_bytes(bytes: &[u8], password: &[u8], allow_weak_kdf: bool) -> Result<U
         header: raw.header.clone(),
         key,
         data,
+        version: raw.version,
     })
 }
 
@@ -339,6 +424,17 @@ struct Snapshot {
     pending_old_keys: Vec<PendingOldKey>,
 }
 
+/// Kết quả mã hoá lại một bản sao lưu lúc đổi mật khẩu.
+enum Reencrypt {
+    Done,
+    /// Không đọc / không giải mã được bằng khoá hiện tại hay khoá vừa bị thay.
+    Skipped,
+    /// Không thuộc diện mã hoá lại (của kho khác, đã dùng header hiện tại, file hỏng đã cất).
+    Ignored,
+    /// Đọc và giải mã được nhưng ghi lại thất bại.
+    WriteFailed,
+}
+
 #[derive(Default)]
 struct Refreshed {
     stats: Option<MergeStats>,
@@ -414,6 +510,7 @@ impl Vault {
             allow_weak_kdf,
             pending_old_keys: Vec::new(),
             archived_old_keys: Vec::new(),
+            opened_version: format::VERSION,
         }
     }
 
@@ -428,10 +525,16 @@ impl Vault {
     /// có lần đổi mật khẩu chính MỚI HƠN (xem `absorb_forked_copies` và
     /// `open_via_newer_copy`): đó là cách hai lần đổi mật khẩu trên hai máy chưa kịp đồng bộ được
     /// nối lại, và là cách mở kho khi máy khác vừa đổi mật khẩu.
+    ///
+    /// Mật khẩu không mở được file chính nhưng mở được TRỌN VẸN một bản sao lưu / bản cạnh kho của
+    /// cùng kho, và chứng minh được rằng phần thân của file chính là của kho này (chỉ phần gói khoá
+    /// trong header bị sửa / hỏng) ⇒ [`Error::VaultFileDamaged`] chứ không phải [`Error::Decrypt`],
+    /// để chủ kho được mời "khôi phục từ bản sao lưu". File chính lớn hơn
+    /// [`fsutil::MAX_VAULT_FILE`] cũng là [`Error::VaultFileDamaged`].
     pub fn open_with(path: impl AsRef<Path>, password: &[u8], opts: OpenOptions) -> Result<Vault> {
         let path = path.as_ref().to_path_buf();
-        let bytes = fsutil::read_retry(&path)?;
-        let v = match unlock_bytes(&bytes, password, opts.allow_weak_kdf) {
+        let bytes = read_vault_file(&path)?;
+        let mut v = match unlock_bytes(&bytes, password, opts.allow_weak_kdf) {
             Ok(u) => {
                 let mut v = Vault::assemble(
                     path,
@@ -445,13 +548,43 @@ impl Vault {
                 v.absorb_forked_copies(password);
                 v
             }
-            Err(Error::Decrypt) => {
-                Self::open_via_newer_copy(&path, &bytes, password, opts).ok_or(Error::Decrypt)?
-            }
+            Err(Error::Decrypt) => Self::open_via_newer_copy(&path, &bytes, password, opts)?,
             Err(e) => return Err(e),
         };
+        v.opened_version = format::peek_versioned(&bytes).map_or(format::VERSION, |(ver, _)| ver);
         fsutil::clean_stale_temps(&v.path);
         Ok(v)
+    }
+
+    /// Đọc header của một file kho mà không cần mật khẩu (chỉ đọc phần đầu file, tối đa
+    /// [`format::HEADER_PEEK_LEN`] byte). Header CHƯA được xác thực.
+    ///
+    /// Lỗi: [`Error::Io`] (không đọc được / không có file), [`Error::BadFormat`] (không phải file kho),
+    /// [`Error::UnsupportedVersion`] (do bản app mới hơn ghi).
+    pub fn peek(path: impl AsRef<Path>) -> Result<FileInfo> {
+        let prefix = fsutil::read_prefix(path.as_ref(), format::HEADER_PEEK_LEN)?;
+        let (version, h) = format::peek_versioned(&prefix)?;
+        Ok(FileInfo {
+            vault_id: h.vault_id,
+            version,
+            key_changed_at: h.key_changed_at,
+            pre_change: h.pre_change,
+            kdf: h.kdf,
+        })
+    }
+
+    /// Các bản cạnh kho có `vault_id` này (lọc theo header TRƯỚC khi giới hạn số lượng, để file
+    /// `.pwv` rác không chiếm được chỗ của bản xung đột thật), xếp theo tên, tối đa
+    /// [`fsutil::MAX_SAME_VAULT_SIBLINGS`] bản.
+    fn same_vault_siblings(path: &Path, vault_id: &str) -> Vec<(PathBuf, Header)> {
+        fsutil::sibling_files(path)
+            .into_iter()
+            .filter_map(|p| {
+                let h = header_of(&p)?;
+                (h.vault_id == vault_id).then_some((p, h))
+            })
+            .take(fsutil::MAX_SAME_VAULT_SIBLINGS)
+            .collect()
     }
 
     /// Các bản cạnh kho của CÙNG kho có header khác `header` và lần đổi mật khẩu chính MỚI HƠN, mà
@@ -459,12 +592,10 @@ impl Vault {
     /// tốn một lượt Argon2 với tham số do FILE quy định, nên giới hạn này chặn việc ai đó có quyền
     /// ghi vào thư mục đồng bộ cài file bắt máy chạy Argon2 hàng phút mỗi lần mở khoá.
     fn newer_epoch_siblings(path: &Path, header: &Header, kdf_cap: &KdfParams) -> Vec<PathBuf> {
-        let mut candidates: Vec<(i64, PathBuf)> = fsutil::sibling_candidates(path)
+        let mut candidates: Vec<(i64, PathBuf)> = Self::same_vault_siblings(path, &header.vault_id)
             .into_iter()
-            .filter_map(|p| {
-                let h = header_of(&p)?;
-                (h.vault_id == header.vault_id
-                    && h != *header
+            .filter_map(|(p, h)| {
+                (h != *header
                     && h.key_changed_at > header.key_changed_at
                     && kdf_not_costlier(&h.kdf, kdf_cap))
                 .then_some((h.key_changed_at, p))
@@ -505,11 +636,13 @@ impl Vault {
         }
     }
 
-    /// Mật khẩu không mở được file chính. Nếu có một bản khác của CÙNG kho với lần đổi master
-    /// password MỚI HƠN — bản cạnh kho (máy kia đổi mật khẩu đúng lúc máy này đang ghi, nên dịch vụ
-    /// đồng bộ giữ cả hai file), hoặc bản sao lưu (máy chưa biết mật khẩu mới đã ghi đè file kho mà
-    /// dịch vụ đồng bộ không giữ lại bản kia) — thì thử mở bằng bản đó. Sau đó xét file chính bằng
-    /// khoá của bản vừa mở:
+    /// Mật khẩu không mở được file chính. Nếu có một bản khác của CÙNG kho dùng GÓI KHOÁ KHÁC file
+    /// chính (cùng gói khoá thì chắc chắn cũng không mở được, khỏi tốn Argon2) với lần đổi master
+    /// password không cũ hơn file chính — bản cạnh kho (máy kia đổi mật khẩu đúng lúc máy này đang
+    /// ghi, nên dịch vụ đồng bộ giữ cả hai file), hoặc bản sao lưu (máy chưa biết mật khẩu mới đã ghi
+    /// đè file kho mà dịch vụ đồng bộ không giữ lại bản kia; hoặc gói khoá trong header file chính bị
+    /// sửa / hỏng) — thì thử mở TRỌN VẸN bản đó (gói khoá + phần thân, nên header của nó được xác
+    /// thực; bản `pre_change` bị bỏ qua). Sau đó xét file chính bằng khoá của bản vừa mở:
     ///
     /// - cùng khoá hiện tại ⇒ gộp vào;
     /// - chỉ mở được bằng khoá cũ ⇒ KHÔNG gộp; nó sẽ được cất nguyên văn vào thư mục sao lưu trước
@@ -518,7 +651,11 @@ impl Vault {
     ///   mục đồng bộ tự làm được một "bản mới hơn" mở bằng mật khẩu cũ (header chưa được xác thực,
     ///   khoá do họ chọn). Nếu chủ kho lỡ gõ mật khẩu cũ mà app mở kho từ bản đó, thì lần "ghi đè file
     ///   hỏng" sau sẽ đưa cả kho về khoá của kẻ đó. Đòi khoá của bản kia mở được file chính là thứ
-    ///   chặn điều này (kẻ đó không có khoá hiện tại).
+    ///   chặn điều này (kẻ đó không có khoá hiện tại). Riêng khi phần thân của file chính giải mã được
+    ///   bằng khoá đó với header CỦA BẢN KIA làm dữ liệu xác thực — tức file chính đúng là do người có
+    ///   khoá này ghi, chỉ header của nó bị đổi sau đó — thì mật khẩu chắc chắn đúng và file chính
+    ///   chắc chắn hỏng ⇒ [`Error::VaultFileDamaged`] (không mở từ bản kia: chủ kho đi qua bước khôi
+    ///   phục, nơi có các kiểm tra mật khẩu cũ / quay lui).
     ///
     /// Tối đa 2 lượt Argon2 (mỗi "gói khoá" một lượt), tham số bị chặn như `newer_epoch_siblings`.
     /// Lần đồng bộ kế tiếp ghi kết quả ra file chính và cất bản xung đột đi.
@@ -527,22 +664,34 @@ impl Vault {
         main_bytes: &[u8],
         password: &[u8],
         opts: OpenOptions,
-    ) -> Option<Vault> {
+    ) -> Result<Vault> {
         const MAX_ATTEMPTS: usize = 2; // mỗi lượt thử tốn một lượt Argon2
-        let main = format::parse(main_bytes).ok()?;
+        let Ok(main) = format::parse(main_bytes) else {
+            return Err(Error::Decrypt);
+        };
+        let mh = &main.header;
         // Mật khẩu chưa mở được gì nên chưa biết tham số "thật"; cho phép tới mức mặc định.
-        let cap = kdf_max(&main.header.kdf, &KdfParams::DEFAULT);
-        let mut candidates = Self::newer_epoch_siblings(path, &main.header, &cap);
-        // Bản sao lưu (tự động / bản xung đột đã gộp) có lần đổi mật khẩu mới hơn: mới nhất trước.
+        let cap = kdf_max(&mh.kdf, &KdfParams::DEFAULT);
+        let eligible = |h: &Header| {
+            h.vault_id == mh.vault_id
+                && !h.same_wrap(mh)
+                && h.key_changed_at >= mh.key_changed_at
+                && kdf_not_costlier(&h.kdf, &cap)
+        };
+        let mut siblings: Vec<(i64, PathBuf)> = Self::same_vault_siblings(path, &mh.vault_id)
+            .into_iter()
+            .filter(|(_, h)| eligible(h))
+            .map(|(p, h)| (h.key_changed_at, p))
+            .collect();
+        siblings.sort_by(|a, b| b.cmp(a));
+        let mut candidates: Vec<PathBuf> = siblings.into_iter().take(2).map(|(_, p)| p).collect();
+        // Bản sao lưu (tự động / bản xung đột đã gộp): lần đổi mật khẩu (tự khai) mới nhất trước.
         let mut backups: Vec<(i64, i64, PathBuf)> = fsutil::list_backups(path)
             .into_iter()
             .filter(|b| matches!(b.kind, BackupKind::Auto | BackupKind::Merged))
             .filter_map(|b| {
                 let h = header_of(&b.path)?;
-                (h.vault_id == main.header.vault_id
-                    && h.key_changed_at > main.header.key_changed_at
-                    && kdf_not_costlier(&h.kdf, &cap))
-                .then_some((h.key_changed_at, b.timestamp, b.path))
+                eligible(&h).then_some((h.key_changed_at, b.timestamp, b.path))
             })
             .collect();
         backups.sort_by(|a, b| b.cmp(a));
@@ -551,8 +700,9 @@ impl Vault {
         // Các file dùng chung một "gói khoá" (kể cả header bị sửa số `key_changed_at`) chỉ tốn một
         // lượt Argon2; gói đã thử mà sai mật khẩu thì không thử lại.
         let mut tried: Vec<(Header, Option<Key>)> = Vec::new();
+        let mut main_proven_damaged = false;
         for p in candidates {
-            let Ok(bytes) = fsutil::read_retry(&p) else {
+            let Some(bytes) = read_copy(&p) else {
                 continue;
             };
             let Ok(raw) = format::parse(&bytes) else {
@@ -580,8 +730,21 @@ impl Vault {
             let Ok(data) = raw.decrypt_body(&key) else {
                 continue;
             };
-            let Ok((main_data, used)) = decrypt_with_keys(&main, &key, &data) else {
-                continue;
+            let (main_data, used) = match decrypt_with_keys(&main, &key, &data) {
+                Ok(x) => x,
+                // Phần thân của file chính xác thực được bằng khoá này nhưng nội dung hỏng.
+                Err(Error::BadFormat | Error::Json) => {
+                    main_proven_damaged = true;
+                    continue;
+                }
+                Err(_) => {
+                    // Header của file chính bị đổi sau khi ghi (phần thân nhận header làm AAD): thử
+                    // xác thực phần thân của nó với header thật của bản này.
+                    if crypto::open(&key, &main.body_nonce, main.body_ct, raw.aad).is_ok() {
+                        main_proven_damaged = true;
+                    }
+                    continue;
+                }
             };
             let main_fp = fingerprint(main_bytes);
             let mut v = Vault::assemble(
@@ -599,9 +762,13 @@ impl Vault {
                 }
                 KeyUsed::Retired => v.queue_old_key_archive(main_fp, main_bytes),
             }
-            return Some(v);
+            return Ok(v);
         }
-        None
+        Err(if main_proven_damaged {
+            Error::VaultFileDamaged
+        } else {
+            Error::Decrypt
+        })
     }
 
     /// File kho chính không mở được (hỏng, đồng bộ dở, bị xoá): dựng lại kho từ thư mục sao lưu.
@@ -622,9 +789,15 @@ impl Vault {
     /// gộp thêm MỌI bản sao lưu giải mã được bằng đúng khoá đó (kể cả bản xung đột đã cất) để vớt
     /// được nhiều dữ liệu nhất. Bản chỉ mở được bằng khoá khác (khoá cũ) bị bỏ qua.
     ///
+    /// Giới hạn 40 bản chỉ tính những bản THÊM được gì đó vào kết quả (gốc tính là một): file rác
+    /// (không giải mã được), bản trùng từng byte với bản đã gộp, hay bản cũ không thêm gì đều không
+    /// chiếm chỗ của các bản thật. File lớn hơn [`fsutil::MAX_VAULT_FILE`] bị bỏ qua.
+    ///
     /// Nếu gốc cũ hơn lần đổi mật khẩu mới nhất mà thư mục sao lưu ghi nhận (`password` là mật khẩu
     /// CŨ) thì trả về [`Error::OlderPasswordBackups`] — dựng lại từ đó sẽ đưa kho về mật khẩu cũ và
     /// làm mất các thay đổi sau lần đổi. Chỉ khi chủ kho chọn rõ ràng (`allow_older`) mới làm vậy.
+    /// Cũng vậy khi `password` chỉ mở được các bản `pre_change` mà một gói khoá khác tự khai là mới
+    /// hơn; nếu không có gói nào như thế thì là [`Error::OnlyPreChangeBackups`].
     ///
     /// Kết quả mới chỉ nằm trong RAM: gọi [`Vault::force_write`] để ghi ra — file hỏng (nếu còn) sẽ
     /// được cất vào thư mục sao lưu, không bị xoá. Trả về kho, số file đã dùng và thời điểm của bản
@@ -637,7 +810,6 @@ impl Vault {
     ) -> Result<(Vault, usize, i64)> {
         const MAX_PASSWORD_ATTEMPTS: usize = 5; // mỗi gói khoá tốn một lượt Argon2
         const MAX_FILES_MERGED: usize = 40;
-        const MAX_FILES_EXAMINED: usize = 500;
         let path = path.as_ref().to_path_buf();
         // (xếp mới nhất trước)
         let candidates: Vec<(BackupFile, Header)> = fsutil::list_backups(&path)
@@ -671,11 +843,21 @@ impl Vault {
                 std::cmp::Reverse(claimed(w)),
             )
         });
+        // Có bản sao lưu của cùng kho, dùng gói khoá KHÁC `h`, tự khai là mới hơn `h`: rất có thể mật
+        // khẩu vừa nhập là mật khẩu CŨ. Con số đó chưa được xác thực (ta không có khoá của bản ấy),
+        // nên đây chỉ là lý do để DỪNG và hỏi lại chủ kho, không phải kết luận.
+        let newer_elsewhere = |h: &Header| {
+            candidates.iter().any(|(_, o)| {
+                o.vault_id == h.vault_id && !o.same_wrap(h) && o.key_changed_at > h.key_changed_at
+            })
+        };
         let mut last_err = Error::NoUsableBackup;
         // Gốc = bản MỚI NHẤT mà phần thân giải mã được bằng khoá mở ra từ chính header của nó. Phần
         // thân nhận header làm dữ liệu xác thực (AAD), nên header của gốc — kể cả `key_changed_at`
         // — là header thật, không phải một bản chép bị sửa.
-        let mut base: Option<(Header, Key, VaultData)> = None;
+        // (header, khoá, dữ liệu, (SHA-256, thời điểm) của file gốc nếu dữ liệu của nó đã được lấy)
+        type Base = (Header, Key, VaultData, Option<([u8; 32], i64)>);
+        let mut base: Option<Base> = None;
         // Gốc chỉ còn là bản có từ trước lần đổi mật khẩu (xem `Header::pre_change`).
         let mut base_is_pre_change = false;
         for w in wraps.into_iter().take(MAX_PASSWORD_ATTEMPTS) {
@@ -686,72 +868,81 @@ impl Vault {
                     continue;
                 }
             };
-            // (header đã xác thực, dữ liệu) của các bản trong nhóm giải mã được, mới nhất trước.
-            let mut readable = candidates
-                .iter()
-                .filter(|(_, h)| h.same_wrap(w))
-                .take(MAX_FILES_EXAMINED)
-                .filter_map(|(b, _)| {
-                    let bytes = fsutil::read_retry(&b.path).ok()?;
-                    let raw = format::parse(&bytes).ok()?;
-                    let data = raw.decrypt_body(&key).ok()?;
-                    Some((raw.header.clone(), data))
-                });
-            let mut first_pre_change = None;
-            let trusted = readable.find(|(h, _)| {
-                if h.pre_change && first_pre_change.is_none() {
-                    first_pre_change = Some(h.clone());
+            // Bản đầu tiên (mới nhất) giải mã được và không mang dấu `pre_change`. Không giới hạn số
+            // file xét: file rác mang tên "mới nhất" không được đẩy bản thật ra ngoài.
+            let mut first_pre_change: Option<Header> = None;
+            let mut trusted: Option<Base> = None;
+            for (b, _) in candidates.iter().filter(|(_, h)| h.same_wrap(w)) {
+                let Some(bytes) = read_copy(&b.path) else {
+                    continue;
+                };
+                let Ok(raw) = format::parse(&bytes) else {
+                    continue;
+                };
+                let Ok(data) = raw.decrypt_body(&key) else {
+                    continue;
+                };
+                if raw.header.pre_change {
+                    first_pre_change.get_or_insert_with(|| raw.header.clone());
+                    continue;
                 }
-                !h.pre_change
-            });
-            if let Some((header, data)) = trusted {
-                base = Some((header, key, data));
+                let origin = Some((fingerprint(&bytes), b.timestamp));
+                trusted = Some((raw.header.clone(), key.clone(), data, origin));
+                break;
+            }
+            if trusted.is_some() {
+                base = trusted;
                 break;
             }
             if let Some(mut header) = first_pre_change {
-                // Mật khẩu đúng nhưng chỉ còn các bản có từ trước lần đổi mật khẩu: không tự dùng.
+                // Mật khẩu mở được, nhưng chỉ còn các bản có từ trước lần đổi mật khẩu: không tự dùng.
+                // Nếu một gói khoá khác tự khai là mới hơn thì rất có thể đây là mật khẩu CŨ — đừng
+                // để người gọi nói với chủ kho rằng "mật khẩu đúng, các bản mới hơn đã mất".
                 if !allow_older {
-                    return Err(Error::OnlyPreChangeBackups);
+                    return Err(if newer_elsewhere(&header) {
+                        Error::OlderPasswordBackups
+                    } else {
+                        Error::OnlyPreChangeBackups
+                    });
                 }
                 header.pre_change = false;
-                base = Some((header, key, VaultData::default()));
+                base = Some((header, key, VaultData::default(), None));
                 base_is_pre_change = true;
                 break;
             }
             // Mở được gói khoá mà không bản nào giải mã được: nhóm này chỉ còn file hỏng.
             last_err = Error::NoUsableBackup;
         }
-        let Some((header, key, mut data)) = base else {
+        let Some((header, key, mut data, origin)) = base else {
             return Err(last_err);
         };
-        // Có bản sao lưu của cùng kho, dùng gói khoá KHÁC, tự khai là mới hơn gốc: rất có thể mật
-        // khẩu vừa nhập là mật khẩu CŨ. Con số đó chưa được xác thực (ta không có khoá của bản ấy),
-        // nên đây chỉ là lý do để DỪNG và hỏi lại chủ kho, không phải kết luận.
-        let newest_claimed = candidates
-            .iter()
-            .filter(|(_, h)| h.vault_id == header.vault_id && !h.same_wrap(&header))
-            .map(|(_, h)| h.key_changed_at)
-            .max()
-            .unwrap_or(header.key_changed_at);
-        if header.key_changed_at < newest_claimed && !allow_older {
+        if !allow_older && newer_elsewhere(&header) {
             return Err(Error::OlderPasswordBackups);
         }
+        // Gốc tính là một bản đã dùng; SHA-256 của mọi bản đã gộp để bỏ qua bản trùng từng byte.
+        let mut merged: Vec<[u8; 32]> = Vec::new();
         let (mut used, mut newest) = (0usize, 0i64);
-        // Giới hạn tính trên số file GỘP ĐƯỢC (không phải số file đã xét): vài chục file rác mang
-        // tên bản sao lưu "mới nhất" không được phép đẩy các bản thật ra ngoài.
+        if let Some((fp, ts)) = origin {
+            merged.push(fp);
+            used = 1;
+            newest = ts;
+        }
         for (b, _) in candidates
             .iter()
             .filter(|(_, h)| h.vault_id == header.vault_id)
-            .take(MAX_FILES_EXAMINED)
         {
             if used >= MAX_FILES_MERGED {
                 break;
             }
             // Chỉ nhận đúng khoá gốc: bản ghi bằng khoá cũ / khoá lạ trong thư mục đồng bộ không
             // được tự gộp (xem quy tắc ở đầu file).
-            let Ok(bytes) = fsutil::read_retry(&b.path) else {
+            let Some(bytes) = read_copy(&b.path) else {
                 continue;
             };
+            let fp = fingerprint(&bytes);
+            if merged.contains(&fp) {
+                continue;
+            }
             let Ok(raw) = format::parse(&bytes) else {
                 continue;
             };
@@ -763,9 +954,15 @@ impl Vault {
             let Ok(d) = raw.decrypt_body(&key) else {
                 continue;
             };
+            merged.push(fp);
+            let before = data.clone();
             data.merge_from(&d);
-            used += 1;
-            newest = newest.max(b.timestamp);
+            // Bản không thêm được gì (ví dụ một bản sao lưu cũ bị chép ra nhiều bản mang tên "mới
+            // nhất") không tính vào giới hạn.
+            if data != before || used == 0 {
+                used += 1;
+                newest = newest.max(b.timestamp);
+            }
         }
         if used == 0 {
             return Err(Error::NoUsableBackup);
@@ -797,6 +994,7 @@ impl Vault {
             opts.allow_weak_kdf,
         );
         v.read_only = true;
+        v.opened_version = u.version;
         Ok(v)
     }
 
@@ -850,6 +1048,89 @@ impl Vault {
         self.header.key_changed_at
     }
 
+    /// Phiên bản định dạng của file kho chính như lúc mở khoá (1 = do bản app 0.1.x ghi). Không
+    /// theo dõi các lần đọc sau đó. Kho tạo mới / dựng lại từ sao lưu: [`format::VERSION`].
+    pub fn opened_version(&self) -> u16 {
+        self.opened_version
+    }
+
+    /// Niêm phong một khối nhỏ (ví dụ bản nháp chưa lưu) để cất trong thư mục RIÊNG của app trên máy
+    /// này: XChaCha20-Poly1305, nonce ngẫu nhiên, khoá con HKDF-SHA256 từ khoá kho (info =
+    /// `"pwv/v1/local\0" + purpose`), AAD = `"pwv/v1/local\0" + purpose + "\0" + vault_id`.
+    /// Kết quả: `"PWL1"` + nonce (24 byte) + bản mã. Mở lại bằng [`Vault::open_local`] với đúng
+    /// `purpose`.
+    pub fn seal_local(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let sub = local_subkey(&self.vault_key, purpose);
+        let nonce = crypto::random_nonce();
+        let ct = crypto::seal(
+            &sub,
+            &nonce,
+            plaintext,
+            &local_aad(purpose, self.vault_id()),
+        )?;
+        let mut out = Vec::with_capacity(LOCAL_MAGIC.len() + nonce.len() + ct.len());
+        out.extend_from_slice(LOCAL_MAGIC);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    /// Mở một khối do [`Vault::seal_local`] niêm phong: thử khoá kho hiện tại, rồi từng khoá cũ
+    /// (khối niêm phong trước một lần đổi mật khẩu — kể cả đổi ở máy khác — vẫn mở được). Sai mục
+    /// đích, của kho khác, bị sửa, cụt, rác ⇒ `None` (không bao giờ panic).
+    pub fn open_local(&self, purpose: &str, sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+        let rest = sealed.strip_prefix(LOCAL_MAGIC.as_slice())?;
+        if rest.len() < crypto::NONCE_LEN + crypto::TAG_LEN {
+            return None;
+        }
+        let (nonce, ct) = rest.split_at(crypto::NONCE_LEN);
+        let nonce: [u8; crypto::NONCE_LEN] = nonce.try_into().ok()?;
+        let aad = local_aad(purpose, self.vault_id());
+        std::iter::once(&**self.vault_key)
+            .chain(self.data.old_keys.iter().map(|k| &k.key))
+            .find_map(|k| {
+                let sub = local_subkey(k, purpose);
+                crypto::open(&sub, &nonce, ct, &aad).ok()
+            })
+    }
+
+    /// Số bản sao lưu (tự động / bản xung đột đã gộp; tối đa 300 bản mới nhất; bỏ qua `oldkey-…`,
+    /// `damaged-…`) của kho này mà phần thân giải mã được bằng KHOÁ KHO HIỆN TẠI nhưng header dùng
+    /// một gói khoá khác (không mang dấu `pre_change`): tức là một master password KHÁC mật khẩu
+    /// hiện tại (thường là mật khẩu đã đổi bằng bản app 0.1.x, vốn đổi mật khẩu mà giữ nguyên khoá)
+    /// vẫn mở ra được khoá hiện tại từ các bản đó. Khác 0 ⇒ nên mời chủ kho đổi master password một
+    /// lần (đổi mật khẩu sinh khoá mới và mã hoá lại các bản này).
+    ///
+    /// Không chạy Argon2 (chỉ giải mã phần thân). File lỗi đọc riêng lẻ bị bỏ qua; không đọc được
+    /// thư mục sao lưu ⇒ lỗi (không có thư mục ⇒ 0).
+    pub fn backups_under_other_password(&self) -> Result<usize> {
+        const MAX_SCANNED: usize = 300;
+        match fs::read_dir(fsutil::backup_dir(&self.path)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        }
+        let n = fsutil::list_backups(&self.path)
+            .into_iter()
+            .filter(|b| matches!(b.kind, BackupKind::Auto | BackupKind::Merged))
+            .take(MAX_SCANNED)
+            .filter(|b| {
+                let Some(h) = header_of(&b.path) else {
+                    return false;
+                };
+                if h.vault_id != self.header.vault_id || h.same_wrap(&self.header) || h.pre_change {
+                    return false;
+                }
+                read_copy(&b.path).is_some_and(|bytes| {
+                    format::parse(&bytes).is_ok_and(|raw| {
+                        !raw.header.pre_change && raw.decrypt_body(&self.vault_key).is_ok()
+                    })
+                })
+            })
+            .count();
+        Ok(n)
+    }
+
     /// Bản sao khoá giải mã có được khoá trong RAM (không bị ghi xuống pagefile) hay không.
     pub fn memory_locked(&self) -> bool {
         self.vault_key.is_locked()
@@ -893,19 +1174,24 @@ impl Vault {
     /// Ghi nhận trạng thái hiện tại vào mốc "đã thấy" (các mốc chỉ tăng). Dấu khoá chỉ được cập
     /// nhật khi khoá hiện tại nối tiếp khoá đã ghi nhận — nếu không, cảnh báo phải còn nguyên cho
     /// tới khi chủ kho chấp nhận ([`Vault::accept_as_seen`]). Trả về true nếu `config` thay đổi.
+    ///
+    /// Nếu kho này nằm đúng ở đường dẫn kho đang cấu hình (`config.vault`) thì `vault_id` của nó cũng
+    /// được ghi vào `config.last_vault_id`.
     pub fn note_seen_in(&self, config: &mut Config) -> bool {
         let seen = config.seen_key_tag(self.vault_id());
         let key_known = seen == 0 || self.knows_key_tag(seen);
-        config.note_seen(
+        let changed = config.note_seen(
             self.vault_id(),
             self.modified_at(),
             self.key_changed_at(),
             if key_known { self.key_tag() } else { 0 },
-        )
+        );
+        config.note_last_vault(&self.path, self.vault_id()) || changed
     }
 
     /// Chủ kho đã biết và chấp nhận trạng thái hiện tại (vừa khôi phục từ sao lưu, hoặc đã đọc
     /// cảnh báo): lấy nó làm mốc mới.
+    /// Như [`Vault::note_seen_in`], cũng ghi `config.last_vault_id`.
     pub fn accept_as_seen(&self, config: &mut Config) {
         config.set_seen(
             self.vault_id(),
@@ -913,6 +1199,7 @@ impl Vault {
             self.key_changed_at(),
             self.key_tag(),
         );
+        config.note_last_vault(&self.path, self.vault_id());
     }
 
     /// Bản trong RAM có thay đổi chưa nằm trên đĩa (ví dụ lần ghi gần nhất thất bại).
@@ -1102,8 +1389,10 @@ impl Vault {
         // trước khi kết luận file đã biến mất.
         let mut attempts = 0;
         let bytes = loop {
-            match fsutil::read_retry(&self.path) {
-                Ok(b) => break b,
+            match fsutil::read_retry_capped(&self.path, fsutil::MAX_VAULT_FILE) {
+                Ok(Some(b)) => break b,
+                // File khổng lồ ở chỗ file kho: không đọc vào RAM, coi như file hỏng.
+                Ok(None) => return Err(Error::VaultFileDamaged),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     attempts += 1;
                     if attempts >= 3 {
@@ -1499,42 +1788,83 @@ impl Vault {
     /// nào khác mã hoá lại bản sao lưu: file ghi bằng khoá cũ mãi là "bản ghi bằng khoá cũ" — chủ kho
     /// vẫn xem và khôi phục từng mục từ nó được ([`Vault::read_backup`]), nhưng nó không bao giờ được
     /// tự gộp.
+    ///
+    /// Mỗi bản được đánh dấu cũng nhận mọi khoá trong `old_keys` của kho hiện tại (kể cả khoá vừa bị
+    /// thay): kho dựng lại từ CHỈ các bản này (chủ kho chọn rõ ràng) vẫn đọc được các file của thời
+    /// khoá cũ (`oldkey-…`, file của máy chưa biết lần đổi) thay vì coi chúng là file hỏng.
+    ///
+    /// Bản đọc được mà ghi lại thất bại được thử lại một lần ở cuối; vẫn thất bại ⇒ tên file vào
+    /// `backups_failed` (chúng vẫn mở được bằng mật khẩu vừa bị thay).
     fn reencrypt_backups(&self, retiring: &Key) -> PasswordChangeReport {
         let mut report = PasswordChangeReport::default();
+        let mut failed: Vec<BackupFile> = Vec::new();
         for b in fsutil::list_backups(&self.path) {
-            // File hỏng đã cất (`damaged-…`) vốn không giải mã được bằng bất kỳ mật khẩu nào: bỏ qua,
-            // không tính vào số "chưa mã hoá lại được".
-            let unreadable = usize::from(b.kind != BackupKind::Damaged);
-            let Ok(bytes) = fsutil::read_retry(&b.path) else {
-                report.backups_skipped += unreadable;
-                continue;
-            };
-            let Ok(raw) = format::parse(&bytes) else {
-                report.backups_skipped += unreadable;
-                continue;
-            };
-            // File của kho khác, hoặc đã dùng header hiện tại (bản sao lưu của chính lần ghi đổi mật
-            // khẩu, hay bản đã được đánh dấu ở một lần chạy trước).
-            let current = raw.header.same_wrap(&self.header)
-                && raw.header.key_changed_at == self.header.key_changed_at;
-            if raw.header.vault_id != self.header.vault_id || current {
-                continue;
+            match self.reencrypt_one(&b, retiring) {
+                Reencrypt::Done => report.backups_reencrypted += 1,
+                Reencrypt::Skipped => report.backups_skipped += 1,
+                Reencrypt::Ignored => {}
+                Reencrypt::WriteFailed => failed.push(b),
             }
-            let marked = Header {
-                pre_change: true,
-                ..self.header.clone()
-            };
-            let done = raw
-                .decrypt_body(&self.vault_key)
-                .or_else(|_| raw.decrypt_body(retiring))
-                .and_then(|data| format::serialize(&marked, &data, &self.vault_key))
-                .and_then(|out| fsutil::atomic_write(&b.path, &out));
-            match done {
-                Ok(()) => report.backups_reencrypted += 1,
-                Err(_) => report.backups_skipped += unreadable,
+        }
+        for b in failed {
+            match self.reencrypt_one(&b, retiring) {
+                Reencrypt::Done => report.backups_reencrypted += 1,
+                Reencrypt::Skipped => report.backups_skipped += 1,
+                Reencrypt::Ignored => {}
+                Reencrypt::WriteFailed => report.backups_failed.push(
+                    b.path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                ),
             }
         }
         report
+    }
+
+    fn reencrypt_one(&self, b: &BackupFile, retiring: &Key) -> Reencrypt {
+        // File hỏng đã cất (`damaged-…`) vốn không giải mã được bằng bất kỳ mật khẩu nào: bỏ qua,
+        // không tính vào số "chưa mã hoá lại được".
+        let unreadable = if b.kind == BackupKind::Damaged {
+            Reencrypt::Ignored
+        } else {
+            Reencrypt::Skipped
+        };
+        let Ok(bytes) = fsutil::read_retry(&b.path) else {
+            return unreadable;
+        };
+        let Ok(raw) = format::parse(&bytes) else {
+            return unreadable;
+        };
+        // File của kho khác, hoặc đã dùng header hiện tại (bản sao lưu của chính lần ghi đổi mật
+        // khẩu, hay bản đã được đánh dấu ở một lần chạy trước).
+        let current = raw.header.same_wrap(&self.header)
+            && raw.header.key_changed_at == self.header.key_changed_at;
+        if raw.header.vault_id != self.header.vault_id || current {
+            return Reencrypt::Ignored;
+        }
+        let Ok(mut data) = raw
+            .decrypt_body(&self.vault_key)
+            .or_else(|_| raw.decrypt_body(retiring))
+        else {
+            return unreadable;
+        };
+        for k in &self.data.old_keys {
+            data.push_old_key(&k.key, k.retired_at);
+        }
+        let marked = Header {
+            pre_change: true,
+            ..self.header.clone()
+        };
+        let written = format::serialize(&marked, &data, &self.vault_key).and_then(|out| {
+            reencrypt_write_fault()?;
+            fsutil::atomic_write(&b.path, &out)
+        });
+        match written {
+            Ok(()) => Reencrypt::Done,
+            Err(_) => Reencrypt::WriteFailed,
+        }
     }
 
     // ------------------------------------------------------------------ đồng bộ
@@ -1549,9 +1879,9 @@ impl Vault {
         if self.read_only {
             return Vec::new();
         }
-        fsutil::sibling_candidates(&self.path)
+        Self::same_vault_siblings(&self.path, &self.header.vault_id)
             .into_iter()
-            .filter(|p| self.is_same_vault_file(p))
+            .map(|(p, _)| p)
             .collect()
     }
 
@@ -1732,10 +2062,25 @@ impl Vault {
     /// Nếu file ở chỗ cũ không còn đọc được (hỏng, biến mất, bị thay bằng kho khác) thì đây là
     /// cách "lưu bản đang mở ra chỗ khác": chỉ ghi bản mới, không đụng tới bất cứ thứ gì ở chỗ cũ.
     pub fn move_to(&mut self, new_path: impl AsRef<Path>) -> Result<MoveReport> {
+        self.relocate(new_path.as_ref(), false)
+    }
+
+    /// "Lưu bản đang mở ra chỗ khác" (ví dụ từ thông báo "file kho có vấn đề"): ghi bản đang mở ra
+    /// `new_path`, đọc lại và giải mã thử, rồi chuyển kho sang dùng file mới. KHÔNG BAO GIỜ đụng tới
+    /// bất cứ thứ gì ở chỗ cũ — không ghi file kho cũ, không cất bản xung đột, không chuyển thư mục
+    /// sao lưu, không xoá file cũ — dù lúc đó file cũ có đọc được trở lại hay không.
+    ///
+    /// Trước khi ghi, file ở chỗ cũ được ĐỌC và gộp vào (chỉ khi mở được bằng khoá hiện tại); đọc
+    /// không được thì dùng đúng bản trong RAM. [`MoveReport::rescued`] luôn là `true`.
+    pub fn copy_to(&mut self, new_path: impl AsRef<Path>) -> Result<MoveReport> {
+        self.relocate(new_path.as_ref(), true)
+    }
+
+    fn relocate(&mut self, new_path: &Path, copy_only: bool) -> Result<MoveReport> {
         if self.read_only {
             return Err(Error::ReadOnly);
         }
-        let new_path = std::path::absolute(new_path.as_ref())?;
+        let new_path = std::path::absolute(new_path)?;
         let old_path = std::path::absolute(&self.path)?;
         if new_path == old_path {
             return Err(Error::SamePath);
@@ -1757,20 +2102,12 @@ impl Vault {
 
         // 1. Đưa chỗ cũ về trạng thái mới nhất.
         let mut report = MoveReport::default();
-        match self.sync() {
-            Ok(s) => {
-                report.conflicts_merged = s.conflicts.iter().filter(|c| c.result.is_ok()).count();
-            }
-            // File ở chỗ cũ thật sự không dùng được nữa ⇒ "cứu" bản đang mở sang chỗ mới.
-            Err(
-                Error::VaultFileMissing(_)
-                | Error::VaultFileDamaged
-                | Error::DifferentVault
-                | Error::UnsupportedVersion(_),
-            ) => report.rescued = true,
-            // Mọi lỗi khác (đọc/ghi tạm thời, đĩa đầy, máy khác đã đổi mật khẩu…): HUỶ chuyển. Nếu
-            // cứ "cứu" thì sẽ có hai file kho cùng sống ở hai thư mục, lặng lẽ tách nhau ra.
-            Err(e) => return Err(e),
+        if copy_only {
+            // Chỉ ĐỌC chỗ cũ (gộp nếu được); lỗi gì cũng cứu đúng bản trong RAM.
+            report.rescued = true;
+            let _ = self.refresh();
+        } else {
+            self.sync_before_move(&mut report)?;
         }
         let left_behind = self.disk_fingerprint;
 
@@ -1798,6 +2135,27 @@ impl Vault {
         test_hook("move:before-delete");
         report.old_removed = self.remove_old_location(&old_path, left_behind);
         Ok(report)
+    }
+
+    /// Bước 1 của [`Vault::move_to`]: đồng bộ chỗ cũ. File ở chỗ cũ không dùng được nữa ⇒ đánh dấu
+    /// "cứu" (chỉ ghi bản mới); lỗi khác ⇒ huỷ chuyển.
+    fn sync_before_move(&mut self, report: &mut MoveReport) -> Result<()> {
+        match self.sync() {
+            Ok(s) => {
+                report.conflicts_merged = s.conflicts.iter().filter(|c| c.result.is_ok()).count();
+            }
+            // File ở chỗ cũ thật sự không dùng được nữa ⇒ "cứu" bản đang mở sang chỗ mới.
+            Err(
+                Error::VaultFileMissing(_)
+                | Error::VaultFileDamaged
+                | Error::DifferentVault
+                | Error::UnsupportedVersion(_),
+            ) => report.rescued = true,
+            // Mọi lỗi khác (đọc/ghi tạm thời, đĩa đầy, máy khác đã đổi mật khẩu…): HUỶ chuyển. Nếu
+            // cứ "cứu" thì sẽ có hai file kho cùng sống ở hai thư mục, lặng lẽ tách nhau ra.
+            Err(e) => return Err(e),
+        }
+        Ok(())
     }
 
     /// Bước cuối của [`Vault::move_to`]: xoá file ở chỗ cũ — chỉ khi nó vẫn đúng là thứ bước 1 để lại
@@ -2030,6 +2388,115 @@ mod tests {
         // Lần lưu sau đọc lại file thật và mọi thứ trở lại bình thường.
         v.save().unwrap();
         assert!(!v.has_unsaved_changes());
+    }
+
+    /// Rà soát core-fix-review-2#5 (2): lần đọc lại đầu thấy file hợp lệ của máy khác, lần thứ hai
+    /// lỗi (dịch vụ đồng bộ đang giữ chính file đó) ⇒ không xác minh được, và KHÔNG ghi lại lần nữa.
+    #[test]
+    fn a_foreign_file_seen_once_is_never_overwritten_even_if_the_next_read_fails() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        let mut v = Vault::create(&p, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+        let other = fs::read(&p).unwrap();
+        fail_readbacks(vec![
+            Ok(other),
+            Err(std::io::Error::other("bị giữ")),
+            garbage(),
+        ]);
+        let (_, r) = v.transact(|v| Ok(v.add(Entry::new("B")))).unwrap();
+        assert!(r.unverified);
+        assert_eq!(
+            readback_faults_left(),
+            1,
+            "không ghi lại, không đọc lại lần ba"
+        );
+        fail_readbacks(vec![]);
+        assert!(v.has_unsaved_changes());
+    }
+
+    fn set_reencrypt_write_faults(n: usize) {
+        REENCRYPT_WRITE_FAULTS.with(|c| c.set(n));
+    }
+
+    /// Rà soát cli-fix-review#3: bản sao lưu đọc được mà ghi lại thất bại lúc đổi mật khẩu (vẫn mở
+    /// được bằng mật khẩu vừa bị thay) từng bị tính chung vào "để nguyên: không đọc được".
+    #[test]
+    fn reencryption_write_failures_are_retried_then_reported_by_name() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        let mut v = Vault::create(&p, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("B")))).unwrap();
+        // Lỗi thoáng qua: lần thử lại ở cuối thành công.
+        set_reencrypt_write_faults(1);
+        let r = v
+            .change_password(b"moi 1", KdfParams::INSECURE_TEST)
+            .unwrap();
+        assert!(r.backups_failed.is_empty() && r.backups_skipped == 0);
+        assert!(r.backups_reencrypted >= 2);
+        // Lỗi kéo dài: tên các file được báo riêng, không tính vào `backups_skipped`.
+        set_reencrypt_write_faults(usize::MAX);
+        let r = v.change_password(b"moi 2", KdfParams::INSECURE_TEST);
+        set_reencrypt_write_faults(0);
+        let r = r.unwrap();
+        assert_eq!((r.backups_reencrypted, r.backups_skipped), (0, 0));
+        assert!(r.backups_failed.len() >= 2, "{:?}", r.backups_failed);
+        for name in &r.backups_failed {
+            let bytes = fs::read(fsutil::backup_dir(&p).join(name)).unwrap();
+            let h = format::parse(&bytes).unwrap().header;
+            assert!(
+                h.unwrap_key(b"moi 1", true).is_ok(),
+                "vẫn mở bằng mật khẩu vừa bị thay"
+            );
+        }
+    }
+
+    #[test]
+    fn local_blobs_are_sealed_under_the_vault_key() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        let mut v = Vault::create(&p, PW, opts()).unwrap();
+        let secret = b"mat khau ngan hang vua tao: X7#kq";
+        let sealed = v.seal_local("draft", secret).unwrap();
+        assert!(sealed.starts_with(b"PWL1"));
+        assert!(!sealed.windows(secret.len()).any(|w| w == secret));
+        assert_eq!(&**v.open_local("draft", &sealed).unwrap(), secret);
+        // Hai lần niêm phong khác nhau (nonce ngẫu nhiên).
+        assert_ne!(v.seal_local("draft", secret).unwrap(), sealed);
+        // Sai mục đích, cụt, bị sửa, rác: None.
+        assert!(v.open_local("generated", &sealed).is_none());
+        for n in 0..sealed.len() {
+            assert!(v.open_local("draft", &sealed[..n]).is_none());
+        }
+        let mut bad = sealed.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(v.open_local("draft", &bad).is_none());
+        assert!(v.open_local("draft", b"").is_none());
+        // Kho khác (dù cùng mật khẩu) không mở được.
+        let other = Vault::create(d.path().join("khac.pwv"), PW, opts()).unwrap();
+        assert!(other.open_local("draft", &sealed).is_none());
+        // Niêm phong trước lần đổi mật khẩu (khoá giờ là khoá cũ) vẫn mở được.
+        v.change_password(b"moi", KdfParams::INSECURE_TEST).unwrap();
+        assert_eq!(&**v.open_local("draft", &sealed).unwrap(), secret);
+        let after = v.seal_local("draft", secret).unwrap();
+        assert_eq!(&**v.open_local("draft", &after).unwrap(), secret);
+        // Cùng khoá kho nhưng vault_id khác (AAD) ⇒ không mở được.
+        let mut forged = Vault::assemble(
+            d.path().join("x.pwv"),
+            Header {
+                vault_id: "khac".into(),
+                ..v.header.clone()
+            },
+            Zeroizing::new(**v.vault_key),
+            VaultData::default(),
+            None,
+            false,
+            true,
+        );
+        assert!(forged.open_local("draft", &after).is_none());
+        forged.header.vault_id = v.header.vault_id.clone();
+        assert!(forged.open_local("draft", &after).is_some());
     }
 
     /// Rà soát "archive race": bản xung đột được gộp lúc đọc, nhưng chỉ được cất SAU khi ghi kho.

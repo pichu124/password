@@ -61,6 +61,45 @@ proptest! {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
+
+    /// Khối niêm phong cục bộ: rác / bị sửa / cụt không bao giờ làm panic và không bao giờ mở được.
+    #[test]
+    fn open_local_never_panics(tail in proptest::collection::vec(any::<u8>(), 0..256), magic in any::<bool>(), purpose in ".{0,20}") {
+        let v = local_vault();
+        let mut b = if magic { b"PWL1".to_vec() } else { Vec::new() };
+        b.extend_from_slice(&tail);
+        prop_assert!(v.open_local(&purpose, &b).is_none());
+        let sealed = v.seal_local(&purpose, &tail).unwrap();
+        prop_assert_eq!(&**v.open_local(&purpose, &sealed).unwrap(), &tail[..]);
+        if !tail.is_empty() {
+            let mut bad = sealed.clone();
+            let i = 4 + (tail[0] as usize) % (bad.len() - 4);
+            bad[i] ^= 1;
+            prop_assert!(v.open_local(&purpose, &bad).is_none());
+        }
+    }
+}
+
+fn local_vault() -> &'static Vault {
+    static V: std::sync::OnceLock<(tempfile::TempDir, Vault)> = std::sync::OnceLock::new();
+    &V.get_or_init(|| {
+        let d = tempfile::tempdir().unwrap();
+        let v = Vault::create(
+            d.path().join("v.pwv"),
+            PW,
+            CreateOptions {
+                kdf: KdfParams::INSECURE_TEST,
+                allow_weak_kdf: true,
+            },
+        )
+        .unwrap();
+        (d, v)
+    })
+    .1
+}
+
+proptest! {
     #![proptest_config(ProptestConfig { cases: 300, ..ProptestConfig::default() })]
 
     /// Sửa ngẫu nhiên 1–8 byte của một file hợp lệ: luôn bị từ chối, không panic.

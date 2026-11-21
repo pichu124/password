@@ -186,7 +186,8 @@ pub fn peek_header(prefix: &[u8]) -> Result<Header> {
 /// Như [`peek_header`], kèm phiên bản định dạng ghi trong file (CHƯA được xác thực).
 pub fn peek_versioned(prefix: &[u8]) -> Result<(u16, Header)> {
     let (version, header_end) = parse_prefix(prefix)?;
-    let h = serde_json::from_slice(&prefix[PREFIX_LEN..header_end]).map_err(|_| Error::BadFormat)?;
+    let h =
+        serde_json::from_slice(&prefix[PREFIX_LEN..header_end]).map_err(|_| Error::BadFormat)?;
     Ok((version, h))
 }
 
