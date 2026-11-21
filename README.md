@@ -36,8 +36,13 @@ Ghi chú của bản phát hành cho biết APK được ký bằng khoá nào. 
 mới phải gỡ bản cũ trước (kho trên Drive/Dropbox không bị ảnh hưởng; chỉ mất bản xem ngoại tuyến).
 Xem mục *Phát hành* để tạo khoá ký cố định.
 
-> **Khi nâng cấp lên 0.2.0, hãy cập nhật MỌI thiết bị.** File kho chuyển sang định dạng mới; bản app
-> cũ hơn sẽ báo "hãy cập nhật phần mềm" thay vì mở file (không mất dữ liệu).
+> **Khi nâng cấp lên 0.2.0, hãy cập nhật MỌI thiết bị.** File kho chuyển sang định dạng mới mà bản
+> cũ không đọc/ghi được. Làm theo thứ tự:
+> 1. **Khoá hoặc đóng pwv trên tất cả các máy** (bản cũ đang mở sẽ không lưu được nữa — những gì bạn
+>    thêm/sửa trên máy còn chạy bản cũ sau thời điểm này sẽ mất).
+> 2. Cài 0.2.0 lần lượt trên từng máy tính và điện thoại, mở kho bình thường.
+> 3. Máy nào chưa cập nhật sẽ báo "hãy cập nhật phần mềm" thay vì mở file — dữ liệu trong file không
+>    bị ảnh hưởng, chỉ cần cài bản mới.
 
 ## Dùng app
 
@@ -171,7 +176,8 @@ Hãy làm với một kho thử (vài mục giả) trước:
 2. Sao chép một mật khẩu → dán thử → bấm **Win+V**: mật khẩu KHÔNG nằm trong lịch sử. Chờ 20 giây →
    dán lại: đã trống. Sao chép rồi **đóng app ngay** → trong 20 giây vẫn dán được, sau đó dán lại:
    phải trống, và trong Task Manager không còn `pwv` (app chạy ẩn tới khi xoá xong rồi tự thoát).
-3. Bấm **Win+Shift+S** chụp cửa sổ app: phần app phải đen.
+3. Bấm **Win+Shift+S** chụp cửa sổ app: cửa sổ pwv không được hiện trong ảnh chụp (chỗ đó trống,
+   đen, hoặc chỉ thấy thứ nằm phía sau nó).
 4. Gập máy (Sleep) khi kho đang mở → mở máy: app phải đang khoá.
 5. Trên hai máy: sửa ở máy A → trong 1 phút thấy ở máy B. Tắt mạng máy B, sửa GHI CHÚ một mục ở B và
    đổi MẬT KHẨU mục đó ở A → bật mạng lại: mục đó phải có cả hai thay đổi.
