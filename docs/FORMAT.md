@@ -239,12 +239,17 @@ khẩu thua vẫn nằm trong lịch sử.
    - **Chỉ một khoá đã nghỉ mở được**, hoặc khoá hiện tại mở được nhưng header mang dấu `pre_change`
      (mục 3) ("bản khoá cũ") ⇒ **KHÔNG BAO GIỜ tự gộp** (kể cả bản cứu hộ / bản lưu riêng trong thư
      mục riêng của app, xem "Dữ liệu riêng của app" bên dưới) — một máy chưa biết lần đổi mật khẩu ghi ra
-     được file như vậy, nhưng người biết mật khẩu cũ và giữ một bản sao cũ cũng làm được. File được cất **nguyên văn** (đúng từng byte) vào thư mục sao lưu dưới tên
-     `oldkey-<ms>-<tên gốc>`; chủ kho xem lại và lấy từng mục ra bằng chức năng khôi phục từ bản sao
-     lưu. KHÔNG được mã hoá lại nó bằng khoá hiện tại: khi đó chỉ còn TÊN FILE phân biệt nó với một bản
+     được file như vậy, nhưng người biết mật khẩu cũ và giữ một bản sao cũ cũng làm được. File tìm thấy
+     TRONG thư mục đồng bộ (bản cạnh kho, file kho chính) được cất **nguyên văn** (đúng từng byte) vào
+     thư mục sao lưu dưới tên `oldkey-<ms>-<tên gốc>` — các byte đó vốn đã nằm trong thư mục đồng bộ;
+     chủ kho xem lại và lấy từng mục ra bằng chức năng khôi phục từ bản sao lưu. Nếu mã hoá lại một file
+     như vậy bằng khoá hiện tại mà KHÔNG có dấu xác thực, thì chỉ còn TÊN FILE phân biệt nó với một bản
      đáng tin, mà ai có quyền ghi vào thư mục cũng đổi tên / chuyển chỗ file được (chuyển ra cạnh file
-     kho ⇒ bị gộp như bản xung đột; đổi tên thành bản tự động ⇒ bị gộp khi khôi phục). Giữ nguyên văn
-     thì ở đâu, mang tên gì nó cũng chỉ mở được bằng khoá đã nghỉ. Nếu đó là file kho chính: nó được cất
+     kho ⇒ bị gộp như bản xung đột; đổi tên thành bản tự động ⇒ bị gộp khi khôi phục). Mã hoá lại chỉ an
+     toàn khi đi kèm dấu `pre_change` (nằm trong header, được phần thân xác thực): đó là cách dùng cho bản
+     cứu hộ / bản lưu riêng trong thư mục RIÊNG của app — chúng thường chứa đúng những gì chưa từng lên
+     thư mục đồng bộ, nên không được cất nguyên văn (mật khẩu cũ sẽ đọc được chúng ở đó); xem "Dữ liệu
+     riêng của app". Nếu đó là file kho chính: nó được cất
      TRƯỚC khi file kho bị ghi đè (không cất được ⇒ không ghi, báo lỗi đọc/ghi), rồi file kho được ghi
      lại từ RAM; cùng những byte đó không bị xét lại ở lần đọc sau. Trên điện thoại (chỉ đọc) bản khoá
      cũ bị bỏ qua.

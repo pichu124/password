@@ -307,12 +307,18 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
 /// (v1 hay v2) mang mục đó — đang dùng hay trong thùng rác — được sửa SAU lần xoá ⇒ tombstone ấy bị bỏ
 /// khỏi `target` trước khi gộp. Tombstone không nằm trong `v1_ids` (tức có từ một file v2 / một lần
 /// xoá vĩnh viễn ở bản này) thì tuyệt đối, không bao giờ bị bỏ. Sau khi gộp, `v1_ids` được cập nhật:
-/// thêm các tombstone MỚI mà nguồn v1 mang vào, bỏ những id mà một nguồn v2 cũng mang tombstone.
+/// thêm các tombstone MỚI mà nguồn v1 mang vào, và — khi `promote` — bỏ những id mà nguồn v2 cũng mang
+/// tombstone (một file v2 do máy khác ghi chứng tỏ lần xoá đã được ghi vào v2 ⇒ từ đó tuyệt đối).
+///
+/// `promote = false` cho bản RIÊNG của máy này (bản lưu riêng, bản cứu hộ, bản xem ngoại tuyến của
+/// điện thoại): đó chỉ là bản chép bộ nhớ của chính máy này — tombstone v1 trong đó chưa từng được ghi
+/// vào file kho v2 nào, nên không được làm nó thành tuyệt đối.
 fn merge_tracked(
     target: &mut VaultData,
     v1_ids: &mut Vec<String>,
     src: &VaultData,
     version: u16,
+    promote: bool,
 ) -> MergeStats {
     if !v1_ids.is_empty() {
         let superseded = |id: &str, deleted_at: i64| {
@@ -342,7 +348,9 @@ fn merge_tracked(
         }
         target.merge_from(&s)
     } else {
-        v1_ids.retain(|id| !src.tombstones.iter().any(|t| &t.id == id));
+        if promote {
+            v1_ids.retain(|id| !src.tombstones.iter().any(|t| &t.id == id));
+        }
         target.merge_from(src)
     }
 }
@@ -504,12 +512,15 @@ fn kdf_max(a: &KdfParams, b: &KdfParams) -> KdfParams {
     }
 }
 
-/// Bản chỉ mở được bằng khoá cũ, đang chờ được cất NGUYÊN VĂN vào thư mục sao lưu.
+/// Bản (tìm thấy TRONG thư mục đồng bộ) chỉ mở được bằng khoá cũ, đang chờ được cất NGUYÊN VĂN vào thư
+/// mục sao lưu — các byte đó vốn đã nằm trong thư mục đồng bộ.
 ///
-/// Không bao giờ mã hoá lại nó bằng khoá hiện tại: khi đó thứ duy nhất còn phân biệt nó với một bản
-/// đáng tin là TÊN FILE, mà tên file thì ai có quyền ghi vào thư mục đồng bộ cũng đổi được — chỉ cần
-/// chuyển bản đã cất ra cạnh file kho là lần đồng bộ sau gộp nó như một bản xung đột bình thường.
-/// Giữ nguyên văn thì dù nằm ở đâu, mang tên gì, nó vẫn chỉ mở được bằng khoá cũ ⇒ không bao giờ được gộp.
+/// Không mã hoá lại nó bằng khoá hiện tại mà không có dấu xác thực: khi đó thứ duy nhất còn phân biệt
+/// nó với một bản đáng tin là TÊN FILE, mà tên file thì ai có quyền ghi vào thư mục đồng bộ cũng đổi
+/// được — chỉ cần chuyển bản đã cất ra cạnh file kho là lần đồng bộ sau gộp nó như một bản xung đột bình
+/// thường. Giữ nguyên văn thì dù nằm ở đâu, mang tên gì, nó vẫn chỉ mở được bằng khoá cũ ⇒ không bao giờ
+/// được gộp. (Bản RIÊNG của máy này thì ngược lại được mã hoá lại KÈM dấu `pre_change`, xem
+/// [`Vault::merge_local_file`].)
 #[derive(Clone)]
 struct PendingOldKey {
     /// SHA-256 của file đã đọc.
@@ -626,7 +637,12 @@ impl Vault {
 
     /// Gộp dữ liệu đọc từ một file định dạng `version` vào `self.data` (xem [`merge_tracked`]).
     fn merge_in(&mut self, src: &VaultData, version: u16) -> MergeStats {
-        merge_tracked(&mut self.data, &mut self.v1_tombstones, src, version)
+        merge_tracked(&mut self.data, &mut self.v1_tombstones, src, version, true)
+    }
+
+    /// Như [`Vault::merge_in`] cho bản RIÊNG của máy này (xem `promote` ở [`merge_tracked`]).
+    fn merge_in_private(&mut self, src: &VaultData, version: u16) -> MergeStats {
+        merge_tracked(&mut self.data, &mut self.v1_tombstones, src, version, false)
     }
 
     /// Dữ liệu vừa đọc làm nền của kho từ một file định dạng `version`: tombstone của file v1 là
@@ -1182,6 +1198,28 @@ impl Vault {
             self.header = h;
         }
         self.disk_fingerprint = Some(fp);
+        Ok(self.data != before)
+    }
+
+    /// Gộp bản xem ngoại tuyến mà CHÍNH thiết bị này đã lưu (điện thoại) vào kho vừa mở. Như
+    /// [`Vault::replace_from_bytes`], nhưng đây là bản chép bộ nhớ của chính máy này chứ không phải một
+    /// file kho do máy khác ghi: tombstone v1 chưa ghi vào file v2 nào vẫn giữ quy tắc của 0.1.x
+    /// (xem `promote` ở [`merge_tracked`]), và dấu vân tay "file trên đĩa" không đổi. Bản chỉ mở được
+    /// bằng khoá đã nghỉ bị bỏ qua (`Ok(false)`).
+    pub fn merge_cached_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+        let (remote, adopt, version) = match self.decrypt_same_vault(bytes)? {
+            Decrypted::Current {
+                data,
+                adopt_header,
+                version,
+            } => (data, adopt_header, version),
+            Decrypted::Retired { .. } => return Ok(false),
+        };
+        let before = self.data.clone();
+        self.merge_in_private(&remote, version);
+        if let Some(h) = adopt {
+            self.header = h;
+        }
         Ok(self.data != before)
     }
 
@@ -2126,7 +2164,7 @@ impl Vault {
                 adopt_header,
                 version,
             }) => Ok(LocalMerge::Merged(
-                self.merge_remote(&data, adopt_header, version).0,
+                self.merge_remote(&data, adopt_header, version, true).0,
             )),
             Ok(Decrypted::Retired { data, version }) => {
                 // Thử gộp trên một bản sao (cả hai ở dạng chuẩn): có thay đổi gì không?
@@ -2134,7 +2172,7 @@ impl Vault {
                 current.normalize();
                 let mut trial = current.clone();
                 let mut ids = self.v1_tombstones.clone();
-                merge_tracked(&mut trial, &mut ids, &data, version);
+                merge_tracked(&mut trial, &mut ids, &data, version, false);
                 if trial == current {
                     return Ok(LocalMerge::RetiredNoNews);
                 }
@@ -2197,9 +2235,14 @@ impl Vault {
         remote: &VaultData,
         adopt: Option<Header>,
         version: u16,
+        private: bool,
     ) -> (MergeStats, bool) {
         let before = self.data.clone();
-        let stats = self.merge_in(remote, version);
+        let stats = if private {
+            self.merge_in_private(remote, version)
+        } else {
+            self.merge_in(remote, version)
+        };
         let adopted = adopt.is_some();
         if let Some(h) = adopt {
             self.header = h;
@@ -2262,7 +2305,7 @@ impl Vault {
                     adopt_header,
                     version,
                 }) => {
-                    let (stats, adopted) = self.merge_remote(&data, adopt_header, version);
+                    let (stats, adopted) = self.merge_remote(&data, adopt_header, version, false);
                     report.adopted_remote_password |= adopted;
                     merged.push((report.conflicts.len(), fp));
                     Ok(stats)
@@ -2483,7 +2526,7 @@ impl Vault {
             else {
                 return false;
             };
-            self.merge_remote(&data, adopt_header, version);
+            self.merge_remote(&data, adopt_header, version, false);
             if self.dirty && self.save().is_err() {
                 return false;
             }

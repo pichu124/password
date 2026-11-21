@@ -452,6 +452,18 @@ fn restore_local_copy(state: State<AppState>) -> AppResult<()> {
     with(&state, |s| s.restore_local_copy())
 }
 
+/// "Lưu sang chỗ khác": tạo sẵn thư mục con gợi ý bên trong thư mục của file kho.
+#[tauri::command(async)]
+fn prepare_copy_folder(state: State<AppState>, day: String) -> AppResult<String> {
+    with(&state, |s| s.prepare_copy_folder(&day))
+}
+
+/// Xoá thư mục con vừa tạo cho "Lưu sang chỗ khác" nếu nó vẫn trống.
+#[tauri::command(async)]
+fn discard_copy_folder(state: State<AppState>) {
+    lock_state(&state).discard_copy_folder();
+}
+
 /// File vừa chọn có phải bản xung đột của một file kho khác cùng thư mục không.
 #[tauri::command(async)]
 fn check_vault_choice(path: String) -> Option<ConflictHint> {
@@ -616,7 +628,7 @@ async fn open_readonly(app: tauri::AppHandle, password: String) -> AppResult<Rea
                     // dịch vụ đồng bộ trả về một bản cũ. (Nếu bản đã lưu dùng master password MỚI
                     // hơn file vừa đọc thì phiên bị khoá kèm lời giải thích — xem bên dưới.)
                     if let Some(c) = &cached {
-                        if let Err(e) = s.reload_bytes(c) {
+                        if let Err(e) = s.merge_cached_bytes(c) {
                             if e.code == "password_changed" {
                                 return Err(AppError::new(
                                     "password_changed",
@@ -1038,6 +1050,8 @@ pub fn run() {
             check_rekey,
             restore_local_copy,
             check_vault_choice,
+            prepare_copy_folder,
+            discard_copy_folder,
         ])
         .build(tauri::generate_context!())
         .expect("không khởi động được ứng dụng");
@@ -1103,10 +1117,13 @@ fn auto_lock_loop(handle: &tauri::AppHandle) {
     }
 }
 
-/// Khoá phiên đang bị giữ: có phải khoá không? `known` = (đang mở khoá, số phút tự khoá).
+/// Khoá phiên đang bị giữ: có phải khoá không? `known` = (đang mở khoá, số phút tự khoá) — đọc ở lần
+/// lấy được khoá phiên gần nhất nên có thể đã cũ (ví dụ máy ngủ đúng lúc lệnh mở khoá đang chạy). Máy
+/// vừa ngủ ⇒ luôn yêu cầu khoá (kho đã khoá sẵn thì yêu cầu đó không làm gì); hết giờ ⇒ chỉ khi biết
+/// kho đang mở.
 fn should_lock_while_busy(known: (bool, u32), suspend: bool, idle: Duration) -> bool {
     let (unlocked, mins) = known;
-    unlocked && (suspend || (mins > 0 && idle >= Duration::from_secs(u64::from(mins) * 60)))
+    suspend || (unlocked && mins > 0 && idle >= Duration::from_secs(u64::from(mins) * 60))
 }
 
 #[cfg(test)]
@@ -1181,8 +1198,12 @@ mod tests {
             "tự khoá tắt"
         );
         assert!(
-            !should_lock_while_busy((false, 5), true, five),
-            "đã khoá sẵn"
+            should_lock_while_busy((false, 5), true, five),
+            "máy vừa ngủ: luôn yêu cầu khoá, dù lần đọc trước thấy kho đang khoá (có thể đã cũ)"
+        );
+        assert!(
+            !should_lock_while_busy((false, 5), false, five * 100),
+            "hết giờ nhưng kho đang khoá"
         );
     }
 

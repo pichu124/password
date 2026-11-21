@@ -280,8 +280,13 @@ impl Shared {
                 StashOp::Draft { draft, seq } => match seq {
                     Some(q) if q < self.draft_seq.load(Ordering::SeqCst) => Ok(()),
                     Some(q) => {
-                        self.draft_seq.store(q, Ordering::SeqCst);
-                        s.set_draft(draft)
+                        // Chỉ ghi nhận số thứ tự khi bản nháp thật sự được lưu: một lệnh cũ đến sau khi
+                        // kho đã khoá (thất bại) không được chặn các bản nháp của lần mở khoá sau.
+                        let r = s.set_draft(draft);
+                        if r.is_ok() {
+                            self.draft_seq.store(q, Ordering::SeqCst);
+                        }
+                        r
                     }
                     None => s.set_draft(draft),
                 },
@@ -300,6 +305,7 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.drain(&mut g);
         self.apply_pending(&mut g);
+        self.reset_draft_seq_if_locked(&g);
         g
     }
 
@@ -312,7 +318,17 @@ impl Shared {
         };
         self.drain(&mut g);
         self.apply_pending(&mut g);
+        self.reset_draft_seq_if_locked(&g);
         Some(g)
+    }
+
+    /// Số thứ tự bản nháp do trang tạo từ đồng hồ (`Date.now()`), và trang được nạp lại sau mỗi lần
+    /// khoá. Kho đã khoá ⇒ bắt đầu lại từ 0, để đồng hồ máy bị chỉnh lùi không làm các bản nháp của lần
+    /// mở khoá sau bị coi là "cũ hơn" và bị bỏ.
+    fn reset_draft_seq_if_locked(&self, s: &Session) {
+        if s.vault.is_none() {
+            self.draft_seq.store(0, Ordering::SeqCst);
+        }
     }
 
     /// Yêu cầu khoá (không cần khoá phiên). Trả về true nếu đây là yêu cầu mới.
@@ -464,6 +480,8 @@ pub struct Session {
     local_written: Option<LocalSig>,
     /// Có bản sao lưu mở được khoá hiện tại bằng một mật khẩu chính khác (đổi mật khẩu kiểu 0.1.x).
     rekey_advised: bool,
+    /// Thư mục con "Ban sao <ngày>" do app vừa tạo cho "Lưu sang chỗ khác" (xoá lại nếu vẫn trống).
+    copy_folder_created: Option<PathBuf>,
 }
 
 impl Default for Session {
@@ -485,6 +503,7 @@ impl Default for Session {
             local_checked: None,
             local_written: None,
             rekey_advised: false,
+            copy_folder_created: None,
         }
     }
 }
@@ -1471,6 +1490,14 @@ impl Session {
         r.map_err(|e| self.vault_error(e))
     }
 
+    /// Gộp bản xem ngoại tuyến mà CHÍNH điện thoại này đã lưu vào kho vừa mở (xem
+    /// `Vault::merge_cached_bytes`: bản chép bộ nhớ của chính máy này, không phải file do máy khác ghi).
+    pub fn merge_cached_bytes(&mut self, bytes: &[u8]) -> AppResult<bool> {
+        self.touch();
+        let r = self.vault_mut()?.merge_cached_bytes(bytes);
+        r.map_err(|e| self.vault_error(e))
+    }
+
     /// Toàn bộ kho đang mở (đã mã hoá) — điện thoại dùng để lưu bản xem ngoại tuyến.
     pub fn export_bytes(&self) -> AppResult<Vec<u8>> {
         Ok(self.vault()?.export_bytes()?)
@@ -2267,6 +2294,44 @@ impl Session {
     ///
     /// Lỗi ở đây là lỗi của VIỆC CHUYỂN (thường là ở chỗ mới: ổ đĩa không có, file đã tồn tại…):
     /// trả mã `move_failed` và KHÔNG ghi nhận thành vấn đề của file kho hiện tại.
+    /// "Lưu sang chỗ khác" (chỉ chép): tạo sẵn thư mục con gợi ý `Ban sao <day>` bên trong thư mục đang
+    /// chứa file kho — hộp thoại lưu file của Windows bỏ qua một thư mục chưa có — và trả về đường dẫn
+    /// của nó. `day` phải có dạng `YYYY-MM-DD`. Thư mục do app vừa tạo được xoá lại nếu vẫn trống khi
+    /// người dùng huỷ ([`Session::discard_copy_folder`]).
+    pub fn prepare_copy_folder(&mut self, day: &str) -> AppResult<String> {
+        let valid = day.len() == 10
+            && day.bytes().enumerate().all(|(i, b)| {
+                if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }
+            });
+        if !valid {
+            return Err("Ngày không hợp lệ".into());
+        }
+        let parent = std::path::absolute(self.vault()?.path())
+            .map_err(err)?
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or("Không xác định được thư mục của file kho")?;
+        let dir = parent.join(format!("Ban sao {day}"));
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir).map_err(err)?;
+            self.copy_folder_created = Some(dir.clone());
+        }
+        Ok(dir.display().to_string())
+    }
+
+    /// Xoá thư mục con mà [`Session::prepare_copy_folder`] vừa tạo, nếu nó vẫn trống (người dùng huỷ
+    /// hoặc chọn chỗ khác). Không bao giờ xoá một thư mục có sẵn từ trước hay một thư mục có file.
+    pub fn discard_copy_folder(&mut self) {
+        if let Some(dir) = self.copy_folder_created.take() {
+            // `remove_dir` chỉ xoá được thư mục trống.
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+
     pub fn move_vault(&mut self, new_path: &Path, copy_only: bool) -> AppResult<MoveView> {
         self.touch();
         let old_path = self.vault()?.path().display().to_string();
@@ -2934,6 +2999,7 @@ mod tests {
             local_checked: None,
             local_written: None,
             rekey_advised: false,
+            copy_folder_created: None,
         };
         (s, d)
     }
@@ -4856,6 +4922,68 @@ mod tests {
         let mut g = shared.lock();
         assert!(g.vault.is_none());
         assert_eq!(g.unlock(&p, MP).unwrap().draft.as_deref(), Some("luc-khoa"));
+    }
+
+    /// Rà lại fix4-app#1: số thứ tự bản nháp do trang tạo từ đồng hồ; sau một lần khoá nó bắt đầu lại,
+    /// nên đồng hồ bị chỉnh lùi không làm bản nháp của lần mở khoá sau bị bỏ. Lệnh cũ đến sau khi đã khoá
+    /// (thất bại) cũng không được nâng số thứ tự lên.
+    #[test]
+    fn draft_order_restarts_after_a_lock_so_a_clock_step_back_cannot_drop_drafts() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        let shared = Shared::new(s);
+        shared.queue_stash(StashOp::Draft {
+            draft: z("truoc"),
+            seq: Some(5_000),
+        });
+        drop(shared.lock());
+        shared.lock().lock();
+        // Lệnh cũ (số rất lớn) đến khi kho đã khoá: thất bại, không được ghi nhận.
+        shared.queue_stash(StashOp::Draft {
+            draft: z("cu-sau-khi-khoa"),
+            seq: Some(9_000),
+        });
+        drop(shared.lock());
+        {
+            let mut g = shared.lock();
+            assert_eq!(g.unlock(&p, MP).unwrap().draft.as_deref(), Some("truoc"));
+        }
+        // Đồng hồ bị chỉnh lùi: số thứ tự nhỏ hơn mọi số trước đó, vẫn phải được lưu.
+        shared.queue_stash(StashOp::Draft {
+            draft: z("sau-khi-chinh-dong-ho"),
+            seq: Some(10),
+        });
+        let mut g = shared.lock();
+        g.lock();
+        assert_eq!(
+            g.unlock(&p, MP).unwrap().draft.as_deref(),
+            Some("sau-khi-chinh-dong-ho")
+        );
+    }
+
+    /// Rà lại fix4-app#3: thư mục con gợi ý cho "Lưu sang chỗ khác" được tạo sẵn, và chỉ bị xoá lại khi
+    /// app vừa tạo nó VÀ nó vẫn trống.
+    #[test]
+    fn the_suggested_copy_folder_is_created_and_removed_only_when_empty() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        assert!(s.prepare_copy_folder("2026-1-21").is_err());
+        assert!(s.prepare_copy_folder("../../x").is_err());
+        let dir = PathBuf::from(s.prepare_copy_folder("2026-11-21").unwrap());
+        assert_eq!(dir.parent(), std::path::absolute(&p).unwrap().parent());
+        assert!(dir.is_dir());
+        s.discard_copy_folder();
+        assert!(!dir.exists(), "huỷ: thư mục trống vừa tạo bị xoá");
+        // Có file bên trong (đã lưu vào đó): không xoá.
+        let dir = PathBuf::from(s.prepare_copy_folder("2026-11-21").unwrap());
+        std::fs::write(dir.join("vault.pwv"), b"x").unwrap();
+        s.discard_copy_folder();
+        assert!(dir.join("vault.pwv").exists());
+        // Thư mục có sẵn từ trước: không bao giờ bị xoá.
+        std::fs::remove_file(dir.join("vault.pwv")).unwrap();
+        s.prepare_copy_folder("2026-11-21").unwrap();
+        s.discard_copy_folder();
+        assert!(dir.is_dir(), "thư mục không do app tạo lần này");
     }
 
     /// Q2 + Q4: bản cứu hộ ghi bằng khoá cũ bị xoá NGAY (không chờ ghi kho); bản không thêm được gì

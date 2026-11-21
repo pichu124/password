@@ -501,6 +501,11 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       await sleep(300);
       vaultExists = true; setUrlFlag("missing", false); setUrlFlag("localcopy", false);
       return null;
+    case "prepare_copy_folder":
+      needUnlocked();
+      return `G:\\My Drive\\Passwords\\Ban sao ${String(a.day)}`;
+    case "discard_copy_folder":
+      return null;
     case "check_vault_choice":
       await sleep(50);
       return /\(1\)\.pwv$/.test(String(a.path)) ? { picked_name: "vault (1).pwv", original_name: "vault.pwv", original_path: "G:\\My Drive\\Passwords\\vault.pwv" } : null;

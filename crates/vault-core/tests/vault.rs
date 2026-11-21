@@ -3435,6 +3435,67 @@ fn a_v1_delete_already_in_memory_does_not_beat_a_later_v1_edit_on_reload() {
     assert_eq!(titles(&phone), ["Bank", "Keep"]);
 }
 
+/// Rà lại fix4-core#1: bản RIÊNG của máy này (bản lưu riêng, bản cứu hộ, bản xem ngoại tuyến của điện
+/// thoại) là bản chép bộ nhớ — gộp nó không được làm một tombstone v1 chưa ghi vào file v2 nào thành
+/// tuyệt đối. Thứ tự của app: mở file chính v1 (lần xoá), gộp bản lưu riêng (chép lúc trước), rồi đồng
+/// bộ một bản xung đột v1 mang lần sửa sau đó ⇒ mục được giữ, như một phiên mở lâu.
+#[test]
+fn a_private_copy_does_not_make_an_unwritten_v1_delete_absolute() {
+    let (key, h) = v1_setup();
+    let (m1, _) = m1_m2(&key, &h);
+    let edit = raw_file(1, &key, &h, &serde_json::to_vec(&c_edit_only()).unwrap());
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    fs::write(&p, &m1).unwrap();
+    // Bản lưu riêng = bản chép bộ nhớ sau khi mở file chính v1 (mang tombstone "bank").
+    // (Thư mục riêng của app, KHÔNG nằm cạnh file kho.)
+    let private = tempfile::tempdir().unwrap();
+    let local = private.path().join("last-copy.pwv");
+    fs::write(&local, open(&p, PW).unwrap().export_bytes().unwrap()).unwrap();
+    let mut v = open(&p, PW).unwrap();
+    assert!(matches!(
+        v.merge_local_file(&local).unwrap(),
+        pwv_vault_core::LocalMerge::Merged(_)
+    ));
+    fs::write(d.path().join("vault (1).pwv"), &edit).unwrap();
+    v.sync().unwrap();
+    assert_eq!(titles(&v), ["Bank", "Keep"]);
+    // Điện thoại: mở file chính, gộp bản xem ngoại tuyến của chính nó, rồi tải lại file có lần sửa.
+    let cache = open_bytes(&m1, PW).unwrap().export_bytes().unwrap();
+    let mut phone = open_bytes(&m1, PW).unwrap();
+    phone.merge_cached_bytes(&cache).unwrap();
+    assert!(phone.replace_from_bytes(&edit).unwrap());
+    assert_eq!(titles(&phone), ["Bank", "Keep"]);
+}
+
+/// Rà lại fix4-core#2: một bản xung đột v2 do máy 0.2 KHÁC ghi, mang cùng tombstone, chứng tỏ lần xoá
+/// đã được ghi vào v2 ⇒ từ đó tuyệt đối, theo cả hai thứ tự tên file.
+#[test]
+fn a_v2_copy_carrying_the_same_delete_makes_it_absolute_in_either_order() {
+    let (key, h) = v1_setup();
+    let (m1, _) = m1_m2(&key, &h);
+    let edit = raw_file(1, &key, &h, &serde_json::to_vec(&c_edit_only()).unwrap());
+    // File v2 do một máy 0.2 khác ghi sau khi mở chính file v1 đó.
+    let other = tempfile::tempdir().unwrap();
+    let op = other.path().join("vault.pwv");
+    fs::write(&op, &m1).unwrap();
+    let mut o = open(&op, PW).unwrap();
+    o.transact(|v| v.update("keep", |e| e.notes = "ghi ở máy 0.2 khác".into()))
+        .unwrap();
+    let v2_copy = fs::read(&op).unwrap();
+    assert_eq!(format::peek_versioned(&v2_copy).unwrap().0, format::VERSION);
+    for (first, second) in [(&v2_copy, &edit), (&edit, &v2_copy)] {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        fs::write(&p, &m1).unwrap();
+        fs::write(d.path().join("vault (1).pwv"), first).unwrap();
+        fs::write(d.path().join("vault (2).pwv"), second).unwrap();
+        let mut v = open(&p, PW).unwrap();
+        v.sync().unwrap();
+        assert_eq!(titles(&v), ["Keep"]);
+    }
+}
+
 /// Mặt kia: tombstone có từ file v2 (hoặc lần xoá vĩnh viễn ở bản này) luôn tuyệt đối; và sau khi
 /// tombstone v1 đã được ghi vào file v2 thì nó cũng tuyệt đối (giới hạn đã ghi trong tài liệu).
 #[test]

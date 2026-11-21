@@ -52,7 +52,7 @@ const SESSION_LOST = new Set(["locked", "password_changed"]);
 /** Mã lỗi nghĩa là file kho trên đĩa đang có vấn đề (backend ghi nhận vào `disk_problem`). */
 const DISK_PROBLEM = new Set(["file_damaged", "file_missing", "different_vault", "unsupported_version"]);
 /** Các lệnh tự xử lý lỗi của mình (màn hình khoá / mở khoá) — không kích hoạt xử lý chung. */
-const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path", "restore_local_copy", "check_vault_choice", "set_draft", "record_generated", "check_rekey"]);
+const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path", "restore_local_copy", "check_vault_choice", "prepare_copy_folder", "discard_copy_folder", "set_draft", "record_generated", "check_rekey"]);
 
 let sessionLostHandler: ((e: AppError) => void) | null = null;
 let diskProblemHandler: ((e: AppError) => void) | null = null;
@@ -112,6 +112,8 @@ export const api = {
   restoreLocalCopy: () => call<void>("restore_local_copy"),
   /** File vừa chọn có phải bản xung đột của một file kho khác cùng thư mục không. */
   checkVaultChoice: (path: string) => call<ConflictHint | null>("check_vault_choice", { path }),
+  prepareCopyFolder: (day: string) => call<string>("prepare_copy_folder", { day }),
+  discardCopyFolder: () => call<void>("discard_copy_folder"),
   acceptRollback: () => call<void>("accept_rollback"),
   /** `form`: bản nháp form đang giữ NGAY LÚC NÀY (`draft: null` = form sạch) — được ghi vào stash trước khi kho khoá. */
   lock: (form?: { draft: string | null }) =>

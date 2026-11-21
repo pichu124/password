@@ -33,10 +33,17 @@ export function MoveVault({
       // Cứu dữ liệu: gợi ý một thư mục con MỚI bên trong thư mục đang chứa file kho — vẫn được đồng bộ, mà không phải chính
       // thư mục của file kho (file đặt ngay cạnh sẽ bị coi là bản xung đột).
       let dir: string;
+      let prepared = false;
       if (rescue && status.vault_path) {
-        const vdir = status.vault_path.replace(/[\\/][^\\/]*$/, "");
         const day = new Date().toISOString().slice(0, 10);
-        dir = vdir && vdir !== status.vault_path ? `${vdir}${sep(vdir)}Ban sao ${day}` : "";
+        try {
+          // Tạo sẵn thư mục con: hộp thoại lưu file của Windows bỏ qua một thư mục chưa có.
+          dir = await api.prepareCopyFolder(day);
+          prepared = true;
+        } catch {
+          const vdir = status.vault_path.replace(/[\\/][^\\/]*$/, "");
+          dir = vdir && vdir !== status.vault_path ? `${vdir}${sep(vdir)}Ban sao ${day}` : "";
+        }
       } else {
         const suggested = await api.suggestPath().catch(() => "");
         dir = suggested.replace(/[\\/][^\\/]*$/, "");
@@ -47,8 +54,10 @@ export function MoveVault({
         defaultPath: dir ? `${dir}${sep(dir)}${fileName}` : fileName,
         filters: [{ name: "Kho pwv", extensions: ["pwv"] }],
       });
-      if (!p) return;
       const folder = (x: string) => x.replace(/[\\/][^\\/]*$/, "").toLowerCase();
+      // Không lưu vào thư mục con vừa tạo (huỷ, hoặc chọn chỗ khác): xoá lại nó nếu vẫn trống.
+      if (prepared && (!p || folder(p) !== dir.toLowerCase())) api.discardCopyFolder().catch(() => {});
+      if (!p) return;
       if (rescue && status.vault_path && folder(p) === folder(status.vault_path)) {
         setError(SAME_FOLDER_TEXT);
         return;
@@ -114,7 +123,14 @@ export function MoveVault({
         <button className="btn primary" disabled={busy} onClick={move}>
           {busy ? "Đang ghi…" : rescue ? "Lưu sang đây" : "Chuyển"}
         </button>
-        <button className="btn" disabled={busy} onClick={() => setTarget(null)}>
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() => {
+            setTarget(null);
+            if (rescue) api.discardCopyFolder().catch(() => {});
+          }}
+        >
           Huỷ
         </button>
       </div>
