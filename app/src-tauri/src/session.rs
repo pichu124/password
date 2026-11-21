@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use pwv_generator::{
@@ -33,6 +35,18 @@ use zeroize::Zeroizing;
 pub struct AppError {
     pub code: String,
     pub message: String,
+    /// Dữ liệu kèm theo cho giao diện (hiện chỉ dùng cho `older_than_seen`: hai mốc thời gian).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ErrorDetail>,
+}
+
+/// Hai mốc thời gian (ms) đi kèm lỗi `older_than_seen`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ErrorDetail {
+    /// Thời điểm sửa của bản vừa dựng lại.
+    pub file_modified_at: i64,
+    /// Thời điểm của bản mới nhất máy này từng thấy.
+    pub seen_modified_at: i64,
 }
 
 impl AppError {
@@ -40,6 +54,7 @@ impl AppError {
         Self {
             code: code.into(),
             message: message.into(),
+            detail: None,
         }
     }
     fn locked() -> Self {
@@ -139,10 +154,186 @@ const MAX_CONSECUTIVE_WRITEBACKS: u32 = 6;
 /// File CSV lớn hơn mức này bị từ chối (chống file rác làm treo app).
 const MAX_CSV_BYTES: u64 = 20 * 1024 * 1024;
 
+// ----------------------------------------------------------------------------- hoạt động & khoá
+
+/// Đồng hồ "lần hoạt động gần nhất", đọc/ghi được mà KHÔNG cần khoá phiên: lệnh `touch` (gửi mỗi
+/// lần rê chuột) không bao giờ phải chờ một thao tác đĩa chậm, và luồng tự khoá biết đã hết giờ
+/// kể cả khi một luồng khác đang giữ khoá phiên.
+pub struct Activity {
+    base: Instant,
+    /// ms kể từ `base` (có thể âm trong test).
+    last_ms: AtomicI64,
+}
+
+impl Default for Activity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Activity {
+    pub fn new() -> Self {
+        Self {
+            base: Instant::now(),
+            last_ms: AtomicI64::new(0),
+        }
+    }
+    fn now_ms(&self) -> i64 {
+        i64::try_from(self.base.elapsed().as_millis()).unwrap_or(i64::MAX)
+    }
+    pub fn touch(&self) {
+        self.last_ms.store(self.now_ms(), Ordering::SeqCst);
+    }
+    /// Thời gian không hoạt động.
+    pub fn idle(&self) -> Duration {
+        let d = self.now_ms().saturating_sub(self.last_ms.load(Ordering::SeqCst));
+        Duration::from_millis(u64::try_from(d).unwrap_or(0))
+    }
+    #[cfg(test)]
+    pub fn backdate(&self, by: Duration) {
+        let by = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
+        self.last_ms.store(self.now_ms() - by, Ordering::SeqCst);
+    }
+}
+
+/// Lý do của một lần khoá được yêu cầu từ bên ngoài khoá phiên (xem [`Shared::request_lock`]).
+pub const LOCK_IDLE: u8 = 1;
+pub const LOCK_SUSPEND: u8 = 2;
+pub const LOCK_CLOSE: u8 = 3;
+
+/// Phiên + "lệnh khoá đang chờ". Khi phải khoá (hết giờ, máy vừa ngủ, đóng cửa sổ) mà một luồng
+/// khác đang giữ khoá phiên trong một thao tác đĩa treo, luồng tự khoá KHÔNG chờ: nó ghi một yêu
+/// cầu khoá vào đây (không cần khoá phiên), báo trang vứt bí mật ngay, rồi chờ khoá phiên ở luồng
+/// riêng. MỌI lần lấy khoá phiên ([`Shared::lock`], [`Shared::try_lock`]) đều thực hiện yêu cầu
+/// đang chờ TRƯỚC khi trả phiên cho người gọi — nên không lệnh nào đến sau đó (kể cả `status` của
+/// trang vừa nạp lại) thấy được kho đang mở.
+pub struct Shared {
+    session: Mutex<Session>,
+    pub activity: Arc<Activity>,
+    pending: AtomicU8,
+}
+
+impl Shared {
+    pub fn new(s: Session) -> Self {
+        Self {
+            activity: s.activity.clone(),
+            session: Mutex::new(s),
+            pending: AtomicU8::new(0),
+        }
+    }
+
+    /// Lấy khoá phiên (kể cả khi mutex "nhiễm độc" vì một lệnh trước panic) rồi thực hiện yêu cầu
+    /// khoá đang chờ, nếu có.
+    pub fn lock(&self) -> MutexGuard<'_, Session> {
+        let mut g = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.apply_pending(&mut g);
+        g
+    }
+
+    /// Như [`Shared::lock`] nhưng không chờ: `None` nếu luồng khác đang giữ khoá phiên.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, Session>> {
+        let mut g = match self.session.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        self.apply_pending(&mut g);
+        Some(g)
+    }
+
+    /// Yêu cầu khoá (không cần khoá phiên). Trả về true nếu đây là yêu cầu mới.
+    pub fn request_lock(&self, reason: u8) -> bool {
+        self.pending
+            .compare_exchange(0, reason, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub fn lock_pending(&self) -> bool {
+        self.pending.load(Ordering::SeqCst) != 0
+    }
+
+    fn apply_pending(&self, s: &mut Session) {
+        match self.pending.swap(0, Ordering::SeqCst) {
+            0 => {}
+            _ if s.vault.is_none() => {}
+            LOCK_IDLE => s.lock_because("Kho đã tự khoá do không sử dụng."),
+            LOCK_SUSPEND => s.lock_because("Kho đã tự khoá vì máy vừa ngủ hoặc app bị tạm dừng."),
+            _ => s.lock(),
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------- bản nháp (stash)
+
+/// Mục đích niêm phong (`Vault::seal_local`) của bản nháp + mật khẩu vừa tạo.
+const STASH_PURPOSE: &str = "stash";
+/// Bản nháp lớn hơn mức này không được giữ.
+pub const MAX_DRAFT_BYTES: usize = 256 * 1024;
+const MAX_STASH_FILE: u64 = 4 * 1024 * 1024;
+/// Chỉ giữ chừng này mật khẩu vừa tạo, và không giữ quá 30 ngày.
+pub const MAX_GENERATED: usize = 20;
+pub const GENERATED_MAX_AGE_MS: i64 = 30 * 86_400_000;
+
+#[derive(Serialize, Deserialize, Default)]
+struct StashData {
+    #[serde(default)]
+    draft: Option<Zeroizing<String>>,
+    #[serde(default)]
+    generated: Vec<GeneratedItem>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeneratedItem {
+    id: String,
+    value: Zeroizing<String>,
+    at: i64,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+impl StashData {
+    fn prune(&mut self, now: i64) {
+        self.generated.retain(|g| g.at > now - GENERATED_MAX_AGE_MS);
+        self.generated.sort_by_key(|g| std::cmp::Reverse(g.at));
+        self.generated.truncate(MAX_GENERATED);
+    }
+    fn is_empty(&self) -> bool {
+        self.draft.is_none() && self.generated.is_empty()
+    }
+}
+
+/// Bản stash đã niêm phong (không có bản rõ) của một kho.
+struct SealedStash {
+    vault_id: String,
+    sealed: Vec<u8>,
+}
+
+/// Một mật khẩu vừa tạo, KHÔNG kèm giá trị.
+#[derive(Debug, Serialize)]
+pub struct GeneratedView {
+    pub id: String,
+    pub at: i64,
+    pub label: Option<String>,
+}
+
+/// Tên file trong thư mục riêng chỉ dùng mã kho gồm ký tự an toàn.
+fn safe_id(id: &str) -> Option<&str> {
+    (!id.is_empty()
+        && id.len() <= 100
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then_some(id)
+}
+
 pub struct Session {
     pub vault: Option<Vault>,
     pub config: Config,
-    pub last_activity: Instant,
+    /// Đồng hồ "lần hoạt động gần nhất" — nằm NGOÀI khoá phiên (xem [`Activity`]).
+    pub activity: Arc<Activity>,
     /// Tham số KDF khi tạo kho mới (test dùng tham số thấp).
     pub create_opts: CreateOptions,
     /// Ghi config.json thật (test đặt false để không đụng vào cấu hình của máy chạy test).
@@ -160,6 +351,16 @@ pub struct Session {
     /// bằng mật khẩu cũ", "đã ghi nhưng chưa kiểm tra lại được". Được gộp vào kết quả của lần đồng
     /// bộ tới (giao diện đồng bộ mỗi 20 giây) để không bị mất.
     pending: SyncResult,
+    /// Bản nháp + mật khẩu vừa tạo của kho (đã niêm phong bằng khoá kho) — giữ qua lần khoá.
+    stash: Option<SealedStash>,
+    /// Kho có file stash trên đĩa không mở được: trước lần ghi đầu, file đó được đổi tên để giữ lại.
+    stash_unreadable: Option<String>,
+    /// Kho mà bản lưu riêng (`last-<id>.pwv`) đã được gộp / kiểm tra trong phiên này.
+    local_checked: Option<String>,
+    /// Trạng thái kho của lần ghi bản lưu riêng gần nhất (để không ghi lại khi không có gì mới).
+    local_written: Option<(String, i64, i64, u64)>,
+    /// Có bản sao lưu mở được khoá hiện tại bằng một mật khẩu chính khác (đổi mật khẩu kiểu 0.1.x).
+    rekey_advised: bool,
 }
 
 impl Default for Session {
@@ -167,7 +368,7 @@ impl Default for Session {
         Self {
             vault: None,
             config: Config::load(),
-            last_activity: Instant::now(),
+            activity: Arc::new(Activity::new()),
             create_opts: CreateOptions::default(),
             persist_config: true,
             disk_problem: None,
@@ -176,6 +377,11 @@ impl Default for Session {
             writebacks: 0,
             last_import: None,
             pending: SyncResult::default(),
+            stash: None,
+            stash_unreadable: None,
+            local_checked: None,
+            local_written: None,
+            rekey_advised: false,
         }
     }
 }
@@ -199,6 +405,10 @@ pub struct Status {
     pub disk_problem: Option<AppError>,
     pub lock_note: Option<String>,
     pub auto_lock_minutes: u32,
+    /// Kho đang khoá: máy này còn giữ một bản lưu riêng của kho đã cấu hình (thời điểm ghi, ms).
+    pub local_copy_at: Option<i64>,
+    /// Nên đổi mật khẩu chính một lần để thay khoá mã hoá (xem [`Session::check_rekey`]).
+    pub rekey_advised: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -414,6 +624,28 @@ pub struct UnlockInfo {
     /// trong thư mục riêng của app, lần mở khoá sau thử lại.
     pub rescue_kept: usize,
     pub sync: SyncResult,
+    /// Bản nháp (form đang sửa dở) giữ từ trước khi kho bị khoá — chuỗi do giao diện tự định nghĩa.
+    pub draft: Option<String>,
+    /// File kho vừa mở thiếu thay đổi mà máy này đã lưu; đã gộp lại từ bản lưu riêng trên máy.
+    pub local_restored: Option<LocalRestoredView>,
+    /// File kho vừa được một máy chạy bản 0.1.x ghi lại (sau khi máy này đã mở nó bằng bản mới).
+    pub old_version_wrote: bool,
+}
+
+/// Số mục vừa lấy lại từ bản lưu riêng trên máy này.
+#[derive(Debug, Serialize, Clone, Copy)]
+pub struct LocalRestoredView {
+    pub added: usize,
+    pub updated: usize,
+    pub deleted: usize,
+}
+
+/// File vừa chọn có vẻ là bản xung đột của một file kho khác cùng thư mục (cùng kho).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ConflictHint {
+    pub picked_name: String,
+    pub original_path: String,
+    pub original_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -425,6 +657,19 @@ pub struct RecoverInfo {
     pub archived: Option<String>,
     /// Số bản cứu hộ không gộp được (vẫn được giữ lại, xem [`UnlockInfo::rescue_kept`]).
     pub rescue_kept: usize,
+    /// Không còn bản sao lưu dùng được: kho được dựng lại từ bản lưu riêng / bản cứu hộ trên máy này.
+    pub from_local_copy: bool,
+}
+
+/// Các lựa chọn rõ ràng của chủ kho khi khôi phục.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RecoverOpts {
+    /// Chấp nhận các bản sao lưu từ trước lần đổi mật khẩu chính gần nhất (mật khẩu cũ).
+    pub allow_older: bool,
+    /// Chấp nhận bản dựng lại CŨ HƠN dữ liệu máy này từng thấy (`older_than_seen`).
+    pub allow_stale: bool,
+    /// File kho chính báo "định dạng mới hơn": vẫn cất nó đi (`damaged-…`) và thay bằng bản dựng lại.
+    pub replace_newer: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,6 +708,7 @@ pub struct ImportView {
 
 #[derive(Debug, Serialize)]
 pub struct MoveView {
+    pub old_path: String,
     pub new_path: String,
     pub backups_moved: bool,
     pub old_removed: bool,
@@ -478,6 +724,8 @@ pub struct PasswordChangeView {
     pub backups_skipped: usize,
     /// Mật khẩu ĐÃ được đổi và file kho đã được ghi, nhưng đọc lại không kiểm tra được.
     pub unverified: bool,
+    /// Tên các bản sao lưu ĐỌC được nhưng GHI LẠI không được: chúng vẫn mở được bằng mật khẩu CŨ.
+    pub backups_failed: Vec<String>,
 }
 
 /// Kết quả "dọn sạch thùng rác".
@@ -590,7 +838,7 @@ fn diff_fields(a: &Entry, b: &Entry) -> Vec<&'static str> {
 
 impl Session {
     pub fn touch(&mut self) {
-        self.last_activity = Instant::now();
+        self.activity.touch();
     }
 
     fn open_opts(&self) -> OpenOptions {
@@ -610,7 +858,7 @@ impl Session {
         if mins == 0 || self.vault.is_none() {
             return false;
         }
-        if self.last_activity.elapsed() >= Duration::from_secs(u64::from(mins) * 60) {
+        if self.activity.idle() >= Duration::from_secs(u64::from(mins) * 60) {
             self.lock_because("Kho đã tự khoá do không sử dụng.");
             return true;
         }
@@ -1648,7 +1896,7 @@ mod tests {
         let s = Session {
             vault: None,
             config: Config::default(),
-            last_activity: Instant::now(),
+            activity: Arc::new(Activity::new()),
             create_opts: CreateOptions {
                 kdf: KdfParams::INSECURE_TEST,
                 allow_weak_kdf: true,
@@ -1660,6 +1908,11 @@ mod tests {
             writebacks: 0,
             last_import: None,
             pending: SyncResult::default(),
+            stash: None,
+            stash_unreadable: None,
+            local_checked: None,
+            local_written: None,
+            rekey_advised: false,
         };
         (s, d)
     }
@@ -1863,7 +2116,7 @@ mod tests {
         let p = open(&mut s, &d);
         s.config.auto_lock_minutes = 1;
         assert!(!s.auto_lock_if_idle());
-        s.last_activity = Instant::now() - Duration::from_secs(61);
+        s.activity.backdate(Duration::from_secs(61));
         assert!(s.auto_lock_if_idle());
         assert!(s.vault.is_none());
         assert_eq!(s.list("").unwrap_err().code, "locked");
