@@ -325,7 +325,7 @@ fn changing_master_password_rotates_the_vault_key() {
     // KHÔNG giải mã được file kho hiện tại: máy "kẻ tấn công" thấy file mới là thứ không đọc nổi.
     let mut attacker = open(&stolen, PW).unwrap();
     assert_eq!(attacker.entries().len(), 2);
-    assert!(attacker.merge_file(&p).is_err());
+    assert!(attacker.merge_local_file(&p).is_err());
     assert!(!attacker
         .entries()
         .iter()
@@ -1624,7 +1624,10 @@ fn merge_conflict_copies_of_drive_dropbox_onedrive() {
     assert!(foreign.exists() && d.path().join("vault (2).pwv").exists());
     assert_eq!(open(&p, PW).unwrap().entries().len(), 5);
     // Không gộp được file của kho khác.
-    assert!(matches!(v.merge_file(&foreign), Err(Error::DifferentVault)));
+    assert!(matches!(
+        v.merge_local_file(&foreign),
+        Err(Error::DifferentVault)
+    ));
 }
 
 /// Lỗi 0.1.2: bản xung đột bị chuyển khỏi thư mục TRƯỚC khi kho được ghi; ghi lỗi là mất dấu.
@@ -2769,4 +2772,513 @@ fn last_vault_id_follows_the_configured_path() {
     c.set_vault_path(&p);
     v.accept_as_seen(&mut c);
     assert_eq!(c.last_vault_id.as_deref(), Some(v.vault_id()));
+}
+
+// ----------------------------------------------------------------------------- đợt sửa fix3
+
+/// Bytes của một file kho định dạng `version`, header `h`, phần thân là đúng `json` (không kiểm tra
+/// gì), mã hoá bằng `key`.
+fn raw_file(
+    version: u16,
+    key: &pwv_vault_core::crypto::Key,
+    h: &format::Header,
+    json: &[u8],
+) -> Vec<u8> {
+    use pwv_vault_core::crypto;
+    let hj = serde_json::to_vec(h).unwrap();
+    let mut out = b"PWV1".to_vec();
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&(hj.len() as u32).to_le_bytes());
+    out.extend_from_slice(&hj);
+    let mut plain = (json.len() as u32).to_le_bytes().to_vec();
+    plain.extend_from_slice(json);
+    plain.resize(
+        plain.len().div_ceil(format::PAD_BLOCK) * format::PAD_BLOCK,
+        0,
+    );
+    let nonce = crypto::random_nonce();
+    let ct = crypto::seal(key, &nonce, &plain, &out).unwrap();
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+fn v1_setup() -> (pwv_vault_core::crypto::Key, format::Header) {
+    let key = pwv_vault_core::crypto::random_key();
+    let h = format::Header::new_wrapped(
+        "11111111-2222-3333-4444-555555555555".into(),
+        PW,
+        KdfParams::INSECURE_TEST,
+        &key,
+        1_000,
+    )
+    .unwrap();
+    (key, h)
+}
+
+/// Lịch sử 0.1.2: máy A xoá "bank" (tombstone 250) ⇒ M1; máy B đã sửa nó lúc 300 rồi gộp ⇒ M2 (mục
+/// còn sống, tombstone vẫn nằm đó). 0.1.2 giữ "bank" ở mọi lần gộp M1/M2.
+fn m1_m2(key: &pwv_vault_core::crypto::Key, h: &format::Header) -> (Vec<u8>, Vec<u8>) {
+    let m1 = serde_json::json!({
+        "entries": [{"id": "keep", "title": "Keep", "created_at": 50, "updated_at": 50}],
+        "tombstones": [{"id": "bank", "deleted_at": 250}],
+        "modified_at": 250
+    });
+    let m2 = serde_json::json!({
+        "entries": [
+            {"id": "keep", "title": "Keep", "created_at": 50, "updated_at": 50},
+            {"id": "bank", "title": "Bank", "password": "moi", "created_at": 100, "updated_at": 300}
+        ],
+        "tombstones": [{"id": "bank", "deleted_at": 250}],
+        "modified_at": 300
+    });
+    (
+        raw_file(1, key, h, &serde_json::to_vec(&m1).unwrap()),
+        raw_file(1, key, h, &serde_json::to_vec(&m2).unwrap()),
+    )
+}
+
+/// Rà soát fix2-core#1 (1): bản sao lưu v1 chỉ mang lần xoá, được gộp lúc khôi phục (sau khi đã nâng
+/// cấp và sửa ở 0.2), từng xoá mục mà 0.1.2 giữ lại.
+#[test]
+fn recovery_merging_a_v1_backup_with_only_the_delete_keeps_the_entry() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    let (key, h) = v1_setup();
+    let (m1, m2) = m1_m2(&key, &h);
+    pwv_vault_core::fsutil::backup_bytes(&p, 2_000, &m1).unwrap();
+    pwv_vault_core::fsutil::backup_bytes(&p, 3_000, &m2).unwrap();
+    fs::write(&p, &m2).unwrap();
+    let mut v = open(&p, PW).unwrap();
+    v.transact(|v| v.update("bank", |e| e.password = "sua o 0.2".into()))
+        .unwrap();
+    v.transact(|v| Ok(v.add(login("Sau nâng cấp", "x", "x"))))
+        .unwrap();
+    drop(v);
+    fs::write(&p, b"rac").unwrap();
+    let (r, _, _) = Vault::recover_from_backups(&p, PW, kdf_opts()).unwrap();
+    assert_eq!(titles(&r), ["Bank", "Keep", "Sau nâng cấp"]);
+    assert_eq!(r.get("bank").unwrap().password, "sua o 0.2");
+    // Chỉ còn các bản v1: vẫn như 0.1.2.
+    for b in list_backups(&p) {
+        if fs::read(&b.path).unwrap()[4..6] != [1, 0] {
+            fs::remove_file(&b.path).unwrap();
+        }
+    }
+    let (r, _, _) = Vault::recover_from_backups(&p, PW, kdf_opts()).unwrap();
+    assert_eq!(titles(&r), ["Bank", "Keep"]);
+}
+
+/// Rà soát fix2-core#1 (2): bản xung đột v1 còn sót chỉ mang lần xoá.
+#[test]
+fn a_v1_conflict_copy_with_only_the_delete_does_not_delete_a_newer_entry() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    let (key, h) = v1_setup();
+    let (m1, m2) = m1_m2(&key, &h);
+    fs::write(&p, &m2).unwrap();
+    fs::write(d.path().join("vault (1).pwv"), &m1).unwrap();
+    let mut v = open(&p, PW).unwrap();
+    assert_eq!(titles(&v), ["Bank", "Keep"]);
+    let r = v.sync().unwrap();
+    assert!(r.conflicts[0].result.is_ok() && r.conflicts[0].archived);
+    assert_eq!(titles(&v), ["Bank", "Keep"]);
+    assert_eq!(titles(&open(&p, PW).unwrap()), ["Bank", "Keep"]);
+}
+
+/// Mặt kia của quy tắc 0.1.2: tombstone v1 MỚI HƠN hoặc BẰNG lần sửa ⇒ mục bị xoá; mục không có ở
+/// đích ⇒ tombstone được giữ (để mục không "sống lại" từ một bản cũ hơn).
+#[test]
+fn v1_tombstones_still_delete_older_or_equal_entries_and_are_kept_otherwise() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("vault.pwv");
+    let (key, h) = v1_setup();
+    let main = serde_json::json!({
+        "entries": [
+            {"id": "old", "title": "Cũ", "created_at": 10, "updated_at": 200},
+            {"id": "eq", "title": "Bằng", "created_at": 10, "updated_at": 250},
+            {"id": "keep", "title": "Giữ", "created_at": 10, "updated_at": 10}
+        ],
+        "modified_at": 250
+    });
+    let copy = serde_json::json!({
+        "entries": [{"id": "keep", "title": "Giữ", "created_at": 10, "updated_at": 10}],
+        "tombstones": [
+            {"id": "old", "deleted_at": 250},
+            {"id": "eq", "deleted_at": 250},
+            {"id": "absent", "deleted_at": 250}
+        ],
+        "modified_at": 260
+    });
+    fs::write(
+        &p,
+        raw_file(1, &key, &h, &serde_json::to_vec(&main).unwrap()),
+    )
+    .unwrap();
+    fs::write(
+        d.path().join("vault (1).pwv"),
+        raw_file(1, &key, &h, &serde_json::to_vec(&copy).unwrap()),
+    )
+    .unwrap();
+    let mut v = open(&p, PW).unwrap();
+    v.sync().unwrap();
+    assert_eq!(titles(&v), ["Giữ"]);
+    let ids: Vec<String> = decrypt_file(&p, PW)
+        .tombstones
+        .iter()
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(ids, ["absent", "eq", "old"]);
+}
+
+/// Một bản lưu riêng / bản cứu hộ dùng khoá hiện tại, cùng thư mục tạm.
+fn local_copy_of(
+    p: &Path,
+    d: &tempfile::TempDir,
+    name: &str,
+    edit: impl FnOnce(&mut Vault),
+) -> PathBuf {
+    let dir = d.path().join("rieng");
+    fs::create_dir_all(&dir).unwrap();
+    let local = dir.join(name);
+    fs::copy(p, &local).unwrap();
+    let mut l = open(&local, PW).unwrap();
+    edit(&mut l);
+    l.save().unwrap();
+    local
+}
+
+/// Rà soát fix2-attacker-walk#1: bản lưu riêng chỉ mở được bằng khoá CŨ có thể chứa những gì người
+/// biết mật khẩu cũ ghi vào thư mục đồng bộ SAU lần đổi mật khẩu ⇒ không bao giờ được tự gộp.
+#[test]
+fn local_copies_under_a_retired_key_are_archived_never_merged() {
+    use pwv_vault_core::LocalMerge;
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(login("A", "a", "a")))).unwrap();
+    let with_news = local_copy_of(&p, &d, "co-moi.pwv", |l| {
+        l.add(login("Từ khoá cũ", "x", "x"));
+    });
+    let no_news = local_copy_of(&p, &d, "khong-moi.pwv", |_| {});
+    v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+
+    // (2) Không có gì mới ⇒ không làm gì.
+    let before = list_backups(&p).len();
+    assert_eq!(
+        v.merge_local_file(&no_news).unwrap(),
+        LocalMerge::RetiredNoNews
+    );
+    assert_eq!(list_backups(&p).len(), before);
+    assert!(!v.has_unsaved_changes());
+
+    // (1) Có thứ mới ⇒ không gộp, cất nguyên văn `oldkey-…`.
+    let LocalMerge::RetiredArchived(archived) = v.merge_local_file(&with_news).unwrap() else {
+        panic!("phải được cất");
+    };
+    assert_eq!(titles(&v), ["A"]);
+    assert!(!v.has_unsaved_changes());
+    assert_eq!(only_backup_of_kind(&p, BackupKind::OldKey), archived);
+    assert_eq!(fs::read(&archived).unwrap(), fs::read(&with_news).unwrap());
+    let (seen, retired) = v.read_backup_checked(&archived).unwrap();
+    assert!(retired && seen.entries.iter().any(|e| e.title == "Từ khoá cũ"));
+    assert!(with_news.exists(), "file gốc để nguyên");
+
+    // (3) Khoá hiện tại: gộp như trước.
+    let cur = d.path().join("rieng").join("hien-tai-2.pwv");
+    fs::copy(&p, &cur).unwrap();
+    let mut l = open(&cur, NEW).unwrap();
+    l.add(login("Mới, khoá hiện tại", "y", "y"));
+    l.save().unwrap();
+    let LocalMerge::Merged(stats) = v.merge_local_file(&cur).unwrap() else {
+        panic!("phải được gộp");
+    };
+    assert_eq!(stats.added, 1);
+    assert_eq!(titles(&v), ["A", "Mới, khoá hiện tại"]);
+}
+
+/// Bản mang dấu `pre_change` (khoá hiện tại, nhưng nội dung từ trước lần đổi) = như khoá cũ.
+#[test]
+fn a_marked_local_copy_is_treated_like_a_retired_one() {
+    use pwv_vault_core::LocalMerge;
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    let current = fs::read(&p).unwrap();
+    let bomb = forge_with_old_key(&current, OLD, |data| {
+        data.entries.push(login("BOM", "x", "x"));
+    });
+    let planted = backup_dir(&p).join("vault-9999999999999.pwv");
+    fs::write(&planted, &bomb).unwrap();
+    v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    assert!(
+        format::parse(&fs::read(&planted).unwrap())
+            .unwrap()
+            .header
+            .pre_change
+    );
+    let local = d.path().join("rescue.pwv.copy");
+    fs::copy(&planted, &local).unwrap();
+    let r = v.merge_local_file(&local).unwrap();
+    assert!(matches!(r, LocalMerge::RetiredArchived(_)), "{r:?}");
+    assert_eq!(titles(&v), ["Bank"]);
+    // Bản mang dấu không có gì mới (một bản sao lưu thật từ trước lần đổi).
+    let plain_marked = list_backups(&p)
+        .into_iter()
+        .filter(|b| b.path != planted && b.kind == BackupKind::Auto)
+        .map(|b| fs::read(b.path).unwrap())
+        .find(|b| format::parse(b).unwrap().header.pre_change)
+        .unwrap();
+    let local2 = d.path().join("rescue2.pwv.copy");
+    fs::write(&local2, &plain_marked).unwrap();
+    let r = v.merge_local_file(&local2).unwrap();
+    assert_eq!(r, LocalMerge::RetiredNoNews);
+    assert_eq!(titles(&v), ["Bank"]);
+}
+
+/// Rà soát fix2-core#2: 45 bản cũ THẬT (khác nhau) được chép ra dưới tên "ở tương lai" từng chiếm hết
+/// 40 lượt gộp ⇒ kho dựng lại thiếu các mục mới, và thời điểm "bản mới nhất" là con số giả.
+#[test]
+fn replayed_distinct_old_snapshots_do_not_shadow_newer_backups() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    let mut snaps = Vec::new();
+    for i in 0..45 {
+        v.transact(|v| Ok(v.add(Entry::new(format!("e{i:02}")))))
+            .unwrap();
+        snaps.push(fs::read(&p).unwrap());
+    }
+    for i in 45..50 {
+        v.transact(|v| Ok(v.add(Entry::new(format!("e{i:02}")))))
+            .unwrap();
+    }
+    drop(v);
+    fs::write(&p, b"rac").unwrap();
+    let base: i64 = 4_000_000_000_000;
+    for (i, s) in snaps.iter().enumerate() {
+        pwv_vault_core::fsutil::backup_bytes(&p, base - i as i64, s).unwrap();
+    }
+    let (r, _, newest) = Vault::recover_from_backups(&p, PW, kdf_opts()).unwrap();
+    assert_eq!(r.entries().len(), 50);
+    assert!(newest <= pwv_vault_core::model::now_ms(), "{newest}");
+}
+
+/// Rà soát fix2-core#3: quét "bản mở được bằng mật khẩu khác" không được báo "sạch" khi có file
+/// không đọc được; lọc theo vault_id TRƯỚC giới hạn 300 bản.
+#[test]
+fn an_incomplete_other_password_scan_is_not_reported_clean() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    let bytes = fs::read(&p).unwrap();
+    // Một bản cùng kho, gói khoá khác, quá lớn để đọc (như một file chưa tải về được).
+    let big = backup_dir(&p).join("vault-1000000000000.pwv");
+    fs::write(&big, header_with_garbage_body(&bytes, |h| h.salt[0] ^= 1)).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_len(pwv_vault_core::fsutil::MAX_VAULT_FILE + 1)
+        .unwrap();
+    assert!(v.backups_under_other_password().is_err());
+    fs::remove_file(&big).unwrap();
+    // File không phải file kho: không phải của kho này, không làm lần quét dở dang.
+    fs::write(backup_dir(&p).join("vault-1000000000001.pwv"), b"rac").unwrap();
+    assert_eq!(v.backups_under_other_password().unwrap(), 0);
+
+    // 310 bản của kho KHÁC mang tên mới hơn không che được bản cũ (gói bằng mật khẩu 0.1.2) của kho này.
+    let raw = format::parse(&bytes).unwrap();
+    let k = raw.header.unwrap_key(PW, true).unwrap();
+    let data = raw.decrypt_body(&k).unwrap();
+    let legacy = format::Header::new_wrapped(
+        raw.header.vault_id.clone(),
+        b"mat khau 0.1.2",
+        KdfParams::INSECURE_TEST,
+        &k,
+        raw.header.key_changed_at - 1,
+    )
+    .unwrap();
+    fs::write(
+        backup_dir(&p).join("vault-1000000000002.pwv"),
+        format::serialize(&legacy, &data, &k).unwrap(),
+    )
+    .unwrap();
+    let foreign = header_with_garbage_body(&bytes, |h| h.vault_id = "kho-khac".into());
+    for i in 0..310u64 {
+        fs::write(
+            backup_dir(&p).join(format!("vault-{}.pwv", 9_000_000_000_000 + i)),
+            &foreign,
+        )
+        .unwrap();
+    }
+    assert_eq!(v.backups_under_other_password().unwrap(), 1);
+}
+
+/// Rà soát fix2-core#4: file khổng lồ trong thư mục sao lưu (ví dụ file kho khổng lồ đã được cất
+/// `damaged-…`) không bao giờ bị đọc vào RAM.
+#[test]
+fn oversized_files_in_the_backup_folder_are_never_read() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    let huge: u64 = 1 << 40;
+    let mk = |name: &str| {
+        let f = backup_dir(&p).join(name);
+        fs::write(&f, b"PWV1").unwrap();
+        let ok = fs::OpenOptions::new()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_len(huge)
+            .is_ok();
+        if !ok {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_len(pwv_vault_core::fsutil::MAX_VAULT_FILE + 1)
+                .unwrap();
+        }
+        f
+    };
+    let damaged = mk("damaged-1000-vault.pwv");
+    let auto = mk("vault-1000.pwv");
+    assert!(matches!(v.read_backup_checked(&auto), Err(Error::Io(_))));
+    assert!(matches!(v.read_backup_checked(&damaged), Err(Error::Io(_))));
+    let r = v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    assert_eq!(
+        r.backups_skipped, 1,
+        "chỉ bản tự động khổng lồ (không đọc), không tính damaged-…"
+    );
+    assert!(r.backups_failed.is_empty());
+    drop(v);
+    fs::write(&p, b"rac").unwrap();
+    let (r, _, _) = Vault::recover_from_backups(&p, NEW, kdf_opts()).unwrap();
+    assert_eq!(titles(&r), ["Bank"]);
+}
+
+/// Rà soát fix2-attacker-walk#2: "lưu ra chỗ khác" khi máy khác vừa đổi master password không được
+/// tạo một kho tách riêng dùng mật khẩu CŨ.
+#[test]
+fn copy_to_refuses_to_fork_after_a_password_change_elsewhere() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    let mut other = open(&p, PW).unwrap();
+    other
+        .change_password(NEW, KdfParams::INSECURE_TEST)
+        .unwrap();
+    drop(other);
+    let new = d.path().join("cuu").join("vault.pwv");
+    assert!(matches!(
+        v.copy_to(&new),
+        Err(Error::PasswordChangedElsewhere)
+    ));
+    assert!(!new.exists() && !new.parent().unwrap().exists());
+    assert_eq!(v.path(), p);
+}
+
+#[test]
+fn disk_fingerprint_tracks_the_file_on_disk() {
+    use sha2::{Digest, Sha256};
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    let sha = |p: &Path| -> [u8; 32] { Sha256::digest(fs::read(p).unwrap()).into() };
+    assert_eq!(v.disk_fingerprint(), Some(sha(&p)));
+    let before = v.disk_fingerprint();
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    assert_eq!(v.disk_fingerprint(), Some(sha(&p)));
+    assert_ne!(v.disk_fingerprint(), before);
+    // Máy khác ghi: lần đồng bộ sau cập nhật dấu.
+    let mut other = open(&p, PW).unwrap();
+    other
+        .transact(|v| Ok(v.add(login("Máy kia", "x", "x"))))
+        .unwrap();
+    assert_ne!(v.disk_fingerprint(), Some(sha(&p)));
+    v.sync().unwrap();
+    assert_eq!(v.disk_fingerprint(), Some(sha(&p)));
+}
+
+/// Rà soát fix2-core#6: bằng chứng thứ hai của C4 — phần thân file chính xác thực được bằng khoá của
+/// một bản sao lưu (với header của CHÍNH nó) nhưng nội dung hỏng ⇒ file hỏng, không phải sai mật khẩu.
+#[test]
+fn a_main_file_that_authenticates_but_holds_bad_json_is_damaged() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    drop(v);
+    let raw_bytes = fs::read(&p).unwrap();
+    let raw = format::parse(&raw_bytes).unwrap();
+    let k = raw.header.unwrap_key(PW, true).unwrap();
+    // Gói khoá khác (mật khẩu này không mở được), phần thân thật bằng đúng khoá, JSON hỏng.
+    let h = format::Header::new_wrapped(
+        raw.header.vault_id.clone(),
+        b"mat khau khac",
+        KdfParams::INSECURE_TEST,
+        &k,
+        raw.header.key_changed_at,
+    )
+    .unwrap();
+    fs::write(&p, raw_file(2, &k, &h, b"{khong phai json")).unwrap();
+    assert!(matches!(open(&p, PW), Err(Error::VaultFileDamaged)));
+}
+
+/// `opened_version` là phiên bản của FILE KHO CHÍNH, kể cả khi kho được mở qua một bản sao lưu.
+#[test]
+fn opened_version_reports_the_main_file_even_when_opened_through_a_backup() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    let raw_bytes = fs::read(&p).unwrap();
+    let raw = format::parse(&raw_bytes).unwrap();
+    let k0 = raw.header.unwrap_key(OLD, true).unwrap();
+    let old_header = raw.header.clone();
+    v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    drop(v);
+    // Một máy 0.1.2 chưa biết lần đổi ghi đè file kho bằng khoá cũ (định dạng v1).
+    let body = serde_json::json!({
+        "entries": [{"id": "b", "title": "Từ máy 0.1.2", "created_at": 1, "updated_at": 2}],
+        "modified_at": 2
+    });
+    fs::write(
+        &p,
+        raw_file(1, &k0, &old_header, &serde_json::to_vec(&body).unwrap()),
+    )
+    .unwrap();
+    let v = open(&p, NEW).unwrap();
+    assert_eq!(v.opened_version(), 1);
+    assert_eq!(titles(&v), ["Bank"], "file khoá cũ không được gộp");
+}
+
+/// Rà soát fix2-core#5 — điều mã đảm bảo THẬT SỰ: file rác MANG vault_id của kho vẫn chiếm chỗ trong
+/// 32 bản cạnh kho được xét (header chưa xác thực). Ít hơn 32 bản như vậy thì bản xung đột thật vẫn
+/// được gộp; đủ 32 thì nó không được xét ở lần này, nhưng không mất (để nguyên tại chỗ) và rác hiện
+/// ra thành 32 lỗi "bản xung đột hỏng" ở mỗi lần đồng bộ (không im lặng).
+#[test]
+fn same_vault_id_junk_can_occupy_sibling_slots_but_never_silently_or_destructively() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(login("Gốc", "g", "g")))).unwrap();
+    let good = fs::read(&p).unwrap();
+    let conflict = d.path().join("vault (1).pwv");
+    fs::copy(&p, &conflict).unwrap();
+    let mut other = open(&conflict, PW).unwrap();
+    other.add(login("Máy kia", "x", "x"));
+    other.save().unwrap();
+    let _ = fs::remove_dir_all(backup_dir(&conflict));
+    let junk = header_with_garbage_body(&good, |_| {});
+    for i in 0..32 {
+        fs::write(d.path().join(format!("a{i:02}.pwv")), &junk).unwrap();
+    }
+    let r = v.sync().unwrap();
+    assert_eq!(r.conflicts.len(), 32);
+    assert!(r.conflicts.iter().all(|c| c.result.is_err() && !c.archived));
+    assert!(conflict.exists(), "bản thật không bị đụng tới");
+    assert_eq!(titles(&v), ["Gốc"]);
+    fs::remove_file(d.path().join("a00.pwv")).unwrap();
+    let r = v.sync().unwrap();
+    assert!(r
+        .conflicts
+        .iter()
+        .any(|c| c.path == conflict && c.result.is_ok()));
+    assert_eq!(titles(&v), ["Gốc", "Máy kia"]);
 }

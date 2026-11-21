@@ -24,8 +24,8 @@ use pwv_vault_core::config::{
 };
 use pwv_vault_core::fsutil::{self, BackupKind};
 use pwv_vault_core::{
-    CreateOptions, Entry, Error as VaultError, KdfParams, MergeStats, OpenOptions, SaveReport,
-    SyncReport, Totp, Vault,
+    CreateOptions, Entry, Error as VaultError, KdfParams, LocalMerge, MergeStats, OpenOptions,
+    SaveReport, SyncReport, Totp, Vault,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -1389,8 +1389,9 @@ impl Session {
         let Some(v) = self.vault.as_mut() else {
             return (Vec::new(), 0);
         };
-        let (merged, failed): (Vec<PathBuf>, Vec<PathBuf>) =
-            files.into_iter().partition(|f| v.merge_file(f).is_ok());
+        let (merged, failed): (Vec<PathBuf>, Vec<PathBuf>) = files
+            .into_iter()
+            .partition(|f| v.merge_local_file(f).is_ok());
         (merged, failed.len())
     }
 
@@ -2362,10 +2363,12 @@ impl Session {
             self.local_checked = Some(id);
             return None;
         }
-        let r = self.vault.as_mut()?.merge_file(&p);
+        let r = self.vault.as_mut()?.merge_local_file(&p);
         self.local_checked = Some(id.clone());
         match r {
-            Ok(m) => m.changed().then_some(m),
+            Ok(LocalMerge::Merged(m)) => m.changed().then_some(m),
+            // Bản ghi bằng khoá CŨ: không bao giờ được gộp (đã được cất `oldkey-…` nếu có gì mới).
+            Ok(LocalMerge::RetiredNoNews | LocalMerge::RetiredArchived(_)) => None,
             Err(_) => {
                 self.preserve_local_copy(&p, &id);
                 self.local_written = None;
@@ -3790,9 +3793,11 @@ mod tests {
         assert!(s.list_trash().unwrap().is_empty());
     }
 
-    /// (3) Bản lưu riêng ghi bằng khoá cũ vẫn gộp được sau khi mật khẩu được đổi ở máy khác.
+    /// (3) Bản lưu riêng ghi bằng khoá cũ (mật khẩu được đổi ở máy khác) KHÔNG được tự gộp — nó có
+    /// thể chứa những gì người biết mật khẩu cũ ghi vào thư mục đồng bộ sau lần đổi. Phần nó có mà
+    /// kho chưa có được cất nguyên văn thành bản `oldkey-…` để chủ kho tự xem lại.
     #[test]
-    fn a_local_copy_under_a_retired_key_merges_after_a_password_change_elsewhere() {
+    fn a_local_copy_under_a_retired_key_is_archived_not_merged() {
         let (mut s, d) = session();
         let p = open(&mut s, &d);
         s.save_entry(input("A", Some("a"))).unwrap();
@@ -3806,8 +3811,20 @@ mod tests {
             .unwrap();
         drop(pc2);
         let info = s.unlock(&p, MP2).unwrap();
-        assert_eq!(info.local_restored.map(|l| l.added), Some(1));
-        assert_eq!(titles(&s), ["A", "X"]);
+        assert!(info.local_restored.is_none());
+        assert_eq!(titles(&s), ["A"]);
+        let archived: Vec<_> = fsutil::list_backups(&p)
+            .into_iter()
+            .filter(|b| b.kind == BackupKind::OldKey)
+            .collect();
+        assert_eq!(archived.len(), 1);
+        let (data, retired) = s
+            .vault
+            .as_ref()
+            .unwrap()
+            .read_backup_checked(&archived[0].path)
+            .unwrap();
+        assert!(retired && data.entries.iter().any(|e| e.title == "X"));
     }
 
     /// (4) Bản lưu riêng không gộp được được giữ lại thành bản cứu hộ, không bị ghi đè.

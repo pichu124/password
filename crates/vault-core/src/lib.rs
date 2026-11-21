@@ -26,6 +26,6 @@ pub use fsutil::{BackupFile, BackupKind};
 pub use model::{Entry, FieldTimes, HistoryItem, MergeStats, OldKey, Tombstone, VaultData};
 pub use totp::{Totp, TotpError};
 pub use vault::{
-    ConflictOutcome, CreateOptions, FileInfo, MoveReport, OpenOptions, PasswordChangeReport,
-    SaveReport, SyncReport, Vault,
+    ConflictOutcome, CreateOptions, FileInfo, LocalMerge, MoveReport, OpenOptions,
+    PasswordChangeReport, SaveReport, SyncReport, Vault,
 };
