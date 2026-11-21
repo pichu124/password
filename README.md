@@ -1,9 +1,5 @@
 # pwv — Kho mật khẩu cá nhân
 
-> ⚠ **Đang cập nhật lớn (bản 0.2.0, chưa phát hành).** Mã nguồn trên nhánh này đang được sửa sau đợt
-> rà soát bảo mật. Chỉ cài app từ trang
-> [Releases](https://github.com/pichu124/password/releases) — **không** tải các file `dev-build-…` trong tab Actions.
-
 Phần mềm tạo mật khẩu mạnh và lưu chúng trong **một file được mã hoá**, đồng bộ giữa các máy Windows
 và điện thoại Android qua thư mục Google Drive / Dropbox / OneDrive. Chỉ người biết **master
 password** mới mở được.
