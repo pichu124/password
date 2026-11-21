@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, onWriteResult, pickFile, reloadPage, STASHED_LOCK_NOTE, STASHED_UNLOCK_INFO, stashForReload } from "./api";
-import { EntryForm } from "./components/EntryForm";
+import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, onWriteResult, reloadPage, STASHED_LOCK_NOTE, STASHED_UNLOCK_INFO, stashForReload } from "./api";
+import { EntryForm, type EntryFormHandle, parseDraft, type Restore } from "./components/EntryForm";
 import { EntryView } from "./components/EntryView";
 import { Generator } from "./components/Generator";
 import { Health } from "./components/Health";
@@ -9,17 +9,19 @@ import { MoveVault, moveMessage } from "./components/MoveVault";
 import { SettingsView } from "./components/SettingsView";
 import { Trash } from "./components/Trash";
 import { avatarHue, ConfirmBox, formatDateTime, Icon, initials, useClipboardGuard, useToast } from "./components/ui";
+import { useVaultChooser } from "./components/VaultChooser";
 import type { AppError, EntrySummary, MoveView, RollbackView, Status, SyncResult, UnlockInfo, UpdateInfo } from "./types";
 
 type View =
   | { kind: "empty" }
   | { kind: "entry"; id: string }
-  | { kind: "edit"; id: string | null }
+  /** `restore`: bản nháp giữ từ trước khi kho bị khoá. */
+  | { kind: "edit"; id: string | null; restore?: Restore }
   | { kind: "generator" }
   | { kind: "health" }
   | { kind: "trash" }
   /** `section`: cuộn tới mục đó khi mở (ví dụ từ thông báo "bản ghi bằng mật khẩu cũ"). */
-  | { kind: "settings"; section?: "backups"; at?: number };
+  | { kind: "settings"; section?: "backups" | "master"; at?: number };
 
 const SYNC_EVERY_MS = 20_000;
 const UPDATE_CHECK_EVERY_MS = 24 * 60 * 60 * 1000;
@@ -92,7 +94,9 @@ export default function App() {
     let off: (() => void) | undefined;
     let alive = true;
     onEvent("vault-locked", (reason) => {
-      reloadPage(reason === "suspend" ? "Kho đã tự khoá vì máy vừa ngủ hoặc app bị tạm dừng." : "Kho đã tự khoá do không sử dụng.");
+      // "close": cửa sổ vừa được đóng (app ẩn chờ xoá clipboard rồi thoát) — chỉ cần vứt bí mật, không cần lời nhắn.
+      if (reason === "close") reloadPage();
+      else reloadPage(reason === "suspend" ? "Kho đã tự khoá vì máy vừa ngủ hoặc app bị tạm dừng." : "Kho đã tự khoá do không sử dụng.");
     }).then((f) => {
       if (alive) off = f;
       else f();
@@ -105,10 +109,13 @@ export default function App() {
     };
   }, []);
 
-  /** Mở khoá xong: nạp lại trang (xoá mật khẩu chính khỏi bộ nhớ JavaScript), mang theo kết quả mở khoá. */
+  /**
+   * Mở khoá xong: nạp lại trang (xoá mật khẩu chính khỏi bộ nhớ JavaScript), mang theo kết quả mở khoá. Bản nháp (có
+   * thể chứa mật khẩu) KHÔNG đi qua sessionStorage: trang sau tự hỏi backend (`get_draft`).
+   */
   const afterUnlock = useCallback(
     (info: UnlockInfo | null) => {
-      if (info === null || stashForReload("unlock-info", info)) {
+      if (info === null || stashForReload("unlock-info", { ...info, draft: null })) {
         reloadPage();
         return;
       }
@@ -118,16 +125,15 @@ export default function App() {
     [refreshStatus],
   );
 
-  async function switchVault() {
-    const p = await pickFile({ title: "Chọn file kho (.pwv)", filters: [{ name: "Kho pwv", extensions: ["pwv"] }] });
-    if (!p) return;
-    try {
-      await api.setVaultPath(p);
-      reloadPage();
-    } catch (e) {
-      toast(errorText(e), "error");
-    }
-  }
+  // Chọn một file kho có sẵn (kể cả khi kho đang mở: ghi nhớ đường dẫn rồi khoá ⇒ màn hình mở khoá của file đó).
+  const chooser = useVaultChooser(async (p) => {
+    await api.setVaultPath(p);
+    reloadPage();
+  });
+  useEffect(() => {
+    if (chooser.error) toast(chooser.error, "error");
+  }, [chooser.error, toast]);
+  const switchVault = chooser.choose;
 
   if (!status) return null;
   const note = status.lock_note ?? STASHED_NOTE;
@@ -136,6 +142,8 @@ export default function App() {
     return <NotFoundScreen status={status} note={note} onRetry={refreshStatus} onRecovered={() => afterUnlock(null)} />;
   if (!status.unlocked)
     return (
+      <>
+      {chooser.box}
       <UnlockScreen
         status={status}
         note={note}
@@ -147,8 +155,14 @@ export default function App() {
           refreshStatus();
         }}
       />
+      </>
     );
-  return <VaultScreen status={status} update={update} unlockInfo={unlockInfo} onStatusChange={refreshStatus} onSwitchVault={switchVault} />;
+  return (
+    <>
+      {chooser.box}
+      <VaultScreen status={status} update={update} unlockInfo={unlockInfo} onStatusChange={refreshStatus} onSwitchVault={switchVault} />
+    </>
+  );
 }
 
 // ------------------------------------------------------------------ thông báo cố định
@@ -191,8 +205,48 @@ function VaultScreen({
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [entries, setEntries] = useState<EntrySummary[]>([]);
-  const [view, setView] = useState<View>({ kind: "empty" });
+  const [view, setViewRaw] = useState<View>({ kind: "empty" });
   const [syncing, setSyncing] = useState(false);
+  /** Đổi ⇒ mục đang mở được tải lại (đồng bộ vừa đổi dữ liệu, vừa khôi phục từ sao lưu). */
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [rekey, setRekey] = useState(status.rekey_advised);
+  const [rekeyLater, setRekeyLater] = useState(false);
+  // Form đang sửa dở: rời đi (bấm mục khác, Ctrl+N, nút trên thanh công cụ…) phải hỏi trước. Khoá thì không bao giờ hỏi.
+  const formDirty = useRef(false);
+  const formHandle = useRef<EntryFormHandle>(null);
+  const [pendingView, setPendingView] = useState<View | null>(null);
+  const [leaving, setLeaving] = useState(false);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const setView = useCallback((v: View) => {
+    if (viewRef.current.kind === "edit" && formDirty.current) {
+      setPendingView(v);
+      return;
+    }
+    setPendingView(null);
+    setViewRaw(v);
+  }, []);
+  const onDirtyChange = useCallback((d: boolean) => {
+    formDirty.current = d;
+    if (!d) setPendingView(null);
+  }, []);
+  async function leave(how: "discard" | "save") {
+    const target = pendingView;
+    if (!target) return;
+    setLeaving(true);
+    try {
+      if (how === "save") {
+        if (!(await formHandle.current?.save())) return;
+      } else {
+        await formHandle.current?.discard();
+      }
+      formDirty.current = false;
+      setPendingView(null);
+      setViewRaw(target);
+    } finally {
+      setLeaving(false);
+    }
+  }
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [problem, setProblem] = useState<AppError | null>(status.disk_problem);
   const [rollback, setRollback] = useState<RollbackView | null>(unlockInfo?.rollback ?? null);
@@ -206,6 +260,7 @@ function VaultScreen({
   // Mỗi lần đọc lại status: vấn đề với file kho hiện / mất theo đúng status.
   useEffect(() => {
     setProblem(status.disk_problem);
+    if (!status.rekey_advised) setRekey(false);
   }, [status]);
 
   // Lệnh nào báo file kho có vấn đề ⇒ hiện ngay cảnh báo cố định.
@@ -250,6 +305,7 @@ function VaultScreen({
       if (r.changed) {
         toast(`Đã cập nhật từ máy khác: +${r.added} mới, ${r.updated} sửa, ${r.deleted} xoá`, "info");
         reload();
+        setRefreshKey((k) => k + 1);
         onStatusChange();
       } else if (manual && !r.problem) {
         toast("Đã đồng bộ — không có thay đổi mới");
@@ -276,8 +332,60 @@ function VaultScreen({
         `${unlockInfo.rescue_kept} bản cứu hộ (thay đổi chưa kịp lưu của lần dùng trước) chưa gộp được vào kho — có thể chúng được ghi bằng một mật khẩu chính khác. Chúng vẫn được giữ lại trên máy này; app sẽ thử gộp lại ở lần mở khoá sau.`,
         "warn",
       );
+    if (unlockInfo.local_restored) {
+      const n = unlockInfo.local_restored.added + unlockInfo.local_restored.updated + unlockInfo.local_restored.deleted;
+      addNotice(
+        `File kho vừa mở thiếu một số thay đổi mà máy này đã lưu trước đó (${n} mục). App đã gộp lại từ bản lưu riêng trên máy này. Nguyên nhân thường gặp: một máy khác ghi đè file kho khi chưa đồng bộ xong.`,
+        "warn",
+      );
+    }
+    if (unlockInfo.old_version_wrote)
+      addNotice(
+        "File kho vừa được một máy còn chạy bản 0.1.x ghi lại. Hãy cập nhật app trên máy đó: khi còn máy chạy bản cũ, thay đổi ở hai bên có thể ghi đè lẫn nhau.",
+        "warn",
+      );
     applySync(unlockInfo.sync, false);
   }, [unlockInfo, addNotice, applySync]);
+
+  // Bản nháp giữ từ trước khi kho bị khoá (form đang sửa dở): mở lại form với nó.
+  const draftChecked = useRef(false);
+  useEffect(() => {
+    if (draftChecked.current) return;
+    draftChecked.current = true;
+    (async () => {
+      const raw = unlockInfo?.draft ?? (await api.getDraft().catch(() => null));
+      const draft = parseDraft(raw);
+      if (!draft) return;
+      if (draft.id) {
+        try {
+          const e = await api.get(draft.id);
+          setViewRaw({ kind: "edit", id: draft.id, restore: { draft, changedSince: e.updated_at !== draft.updated_at } });
+          addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá.", "info");
+          return;
+        } catch (e) {
+          if (errorCode(e) !== "not_found") return;
+        }
+        setViewRaw({ kind: "edit", id: null, restore: { draft: { ...draft, id: null, updated_at: null }, asNew: true } });
+        addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá. Mục đó không còn trong kho (có thể đã bị xoá ở máy khác) nên được mở thành một mục MỚI.", "warn");
+        return;
+      }
+      setViewRaw({ kind: "edit", id: null, restore: { draft } });
+      addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá.", "info");
+    })();
+  }, [unlockInfo, addNotice]);
+
+  // Kho từng đổi mật khẩu chính bằng bản 0.1.x? (quét một lần cho mỗi khoá, ngoài luồng giao diện.)
+  // Việc quét đọc các bản sao lưu trong thư mục đồng bộ và giữ khoá phiên trong lúc đó, nên chờ vài
+  // giây cho danh sách hiện xong rồi mới quét.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      api
+        .checkRekey()
+        .then(setRekey)
+        .catch(() => {});
+    }, 4000);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const sync = useCallback(
     async (manual: boolean) => {
@@ -337,7 +445,7 @@ function VaultScreen({
         searchRef.current?.focus();
       } else if (k === "n") {
         e.preventDefault();
-        setView({ kind: "edit", id: null });
+        if (viewRef.current.kind !== "edit" || viewRef.current.id !== null) setView({ kind: "edit", id: null });
       } else if (k === "l") {
         e.preventDefault();
         lock();
@@ -345,7 +453,7 @@ function VaultScreen({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [lock]);
+  }, [lock, setView]);
 
   async function acceptRollback() {
     try {
@@ -356,9 +464,9 @@ function VaultScreen({
     }
   }
 
+  /** Kết quả thật của việc chuyển / lưu sang chỗ khác: thông báo cố định (không phải toast 3,5 giây). */
   function afterMove(r: MoveView) {
-    if (r.rescued) addNotice(moveMessage(r), "info");
-    else toast(moveMessage(r), r.old_removed ? "ok" : "info");
+    addNotice(moveMessage(r), r.rescued || !r.old_removed ? "warn" : "info");
     setProblem(null);
     onStatusChange();
   }
@@ -417,7 +525,37 @@ function VaultScreen({
         </nav>
       </header>
 
-      {problem && <DiskProblemBanner problem={problem} status={status} onRetry={() => sync(true)} onResolved={() => { setProblem(null); onStatusChange(); }} onMoved={afterMove} />}
+      {problem && (
+        <DiskProblemBanner
+          problem={problem}
+          status={status}
+          onRetry={() => sync(true)}
+          onResolved={() => {
+            setProblem(null);
+            onStatusChange();
+          }}
+          onMoved={afterMove}
+          onChooseFile={onSwitchVault}
+        />
+      )}
+
+      {rekey && !rekeyLater && (
+        <div className="banner" role="status">
+          <div className="banner-body">
+            <strong>Kho này từng được đổi mật khẩu chính bằng bản 0.1.x.</strong> Bản đó không thay khoá mã hoá, nên ai biết mật khẩu CŨ và có một bản sao
+            lưu cũ vẫn mở được dữ liệu mới. Hãy đổi mật khẩu chính một lần để thay khoá — làm ở MỘT máy, khi các máy khác đã khoá app; có thể nhập lại đúng
+            mật khẩu đang dùng nếu nó vẫn an toàn.
+            <div className="row gap banner-actions">
+              <button className="btn primary" onClick={() => setView({ kind: "settings", section: "master", at: Date.now() })}>
+                <Icon name="key" /> Đổi mật khẩu chính…
+              </button>
+              <button className="btn link muted-link" onClick={() => setRekeyLater(true)}>
+                Để sau
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {rollback && rollback.unknown_key && (
         // Mạnh hơn cảnh báo "file cũ hơn": kho này không biết khoá mà máy này dùng lần trước ⇒ hoặc vừa gõ
@@ -569,10 +707,27 @@ function VaultScreen({
               </div>
             </div>
           )}
+          {pendingView && view.kind === "edit" && (
+            <div className="confirm-box unsaved-bar" role="alertdialog">
+              <span className="small grow">
+                <strong>Bạn đang sửa dở mục này.</strong> Rời đi thì những thay đổi chưa lưu sẽ mất.
+              </span>
+              <button className="btn primary" disabled={leaving} onClick={() => setPendingView(null)}>
+                Tiếp tục sửa
+              </button>
+              <button className="btn" disabled={leaving} onClick={() => leave("save")}>
+                Lưu
+              </button>
+              <button className="btn danger" disabled={leaving} onClick={() => leave("discard")}>
+                Bỏ thay đổi
+              </button>
+            </div>
+          )}
           {view.kind === "entry" && (
             <EntryView
               key={view.id}
               id={view.id}
+              refreshKey={refreshKey}
               onEdit={() => setView({ kind: "edit", id: view.id })}
               onDeleted={() => {
                 setView({ kind: "empty" });
@@ -586,11 +741,15 @@ function VaultScreen({
             <EntryForm
               key={view.id ?? "new"}
               id={view.id}
+              restore={view.restore}
+              handleRef={formHandle}
+              onDirtyChange={onDirtyChange}
               onCancel={() => setView(view.id ? { kind: "entry", id: view.id } : { kind: "empty" })}
               onSaved={(id) => {
+                formDirty.current = false;
                 reload();
                 onStatusChange();
-                setView({ kind: "entry", id });
+                setViewRaw({ kind: "entry", id });
               }}
             />
           )}
@@ -620,6 +779,7 @@ function VaultScreen({
               status={status}
               onImported={() => {
                 reload();
+                setRefreshKey((k) => k + 1);
                 onStatusChange();
               }}
               onSwitchVault={onSwitchVault}
@@ -642,12 +802,15 @@ function DiskProblemBanner({
   onRetry,
   onResolved,
   onMoved,
+  onChooseFile,
 }: {
   problem: AppError;
   status: Status;
   onRetry: () => void;
   onResolved: () => void;
   onMoved: (r: MoveView) => void;
+  /** Chọn một file kho CÓ SẴN (ví dụ ở vị trí mới sau khi máy kia chuyển kho) ⇒ khoá, mở khoá file đó. */
+  onChooseFile: () => void;
 }) {
   const toast = useToast();
   const [confirm, setConfirm] = useState(false);
@@ -707,7 +870,7 @@ function DiskProblemBanner({
               ) : (
                 <>
                   Tạo lại file kho ở <span className="path">{status.vault_path}</span> từ bản đang mở? Nếu kho đã được chuyển sang thư mục khác ở máy kia, hãy
-                  chọn “Chọn vị trí khác…” thay vì tạo lại ở đây.
+                  bấm “Chọn file kho…” và chọn file ở vị trí mới thay vì tạo lại ở đây (những gì đang mở trên máy này được giữ lại trên máy và tự gộp vào file đó nếu là cùng một kho).
                 </>
               )
             }
@@ -728,11 +891,16 @@ function DiskProblemBanner({
                 {code === "file_damaged" ? "Ghi đè bằng bản đang mở" : "Tạo lại file ở đây"}
               </button>
             )}
+            {code === "file_missing" && (
+              <button className="btn" onClick={onChooseFile} disabled={busy}>
+                <Icon name="folder" /> Chọn file kho…
+              </button>
+            )}
             <MoveVault
               status={status}
               rescue
               onMoved={onMoved}
-              label={code === "file_damaged" ? "Lưu sang vị trí khác…" : code === "file_missing" ? "Chọn vị trí khác…" : "Lưu bản đang mở sang vị trí khác…"}
+              label={code === "file_damaged" || code === "file_missing" ? "Lưu sang chỗ khác…" : "Lưu bản đang mở sang chỗ khác…"}
               buttonClass={canOverwrite ? "btn" : "btn primary"}
             />
           </div>

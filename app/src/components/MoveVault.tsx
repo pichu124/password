@@ -16,7 +16,7 @@ export function MoveVault({
   onMoved: (r: MoveView) => void;
   label?: string;
   buttonClass?: string;
-  /** Đang cứu dữ liệu vì file kho có vấn đề: lời giải thích khác đi. */
+  /** Đang cứu dữ liệu vì file kho có vấn đề: CHỈ ghi một bản sao (không đụng gì ở chỗ cũ), lời giải thích khác đi. */
   rescue?: boolean;
 }) {
   const [target, setTarget] = useState<string | null>(null);
@@ -46,7 +46,7 @@ export function MoveVault({
     setBusy(true);
     setError(null);
     try {
-      const r = await api.moveVault(target);
+      const r = await api.moveVault(target, rescue);
       setTarget(null);
       onMoved(r);
     } catch (e) {
@@ -77,11 +77,16 @@ export function MoveVault({
       </p>
       <ul className="small muted">
         {rescue ? (
-          <li>App ghi bản đang mở ra chỗ mới. Mọi thứ ở chỗ cũ được giữ nguyên, không bị xoá.</li>
+          <>
+            <li>App chỉ ghi một BẢN SAO của bản đang mở ra chỗ mới. Mọi thứ ở chỗ cũ (file kho, thư mục sao lưu) được giữ nguyên, không bị xoá hay ghi đè.</li>
+            <li>Từ giờ máy này dùng file ở chỗ mới. Các máy khác vẫn dùng file ở chỗ cũ cho tới khi bạn chọn lại file trên từng máy (“Dùng kho khác” ở màn hình mở khoá).</li>
+          </>
         ) : (
-          <li>App ghi kho sang chỗ mới, đọc lại để kiểm tra, rồi mới xoá file ở chỗ cũ. Thư mục sao lưu được chuyển theo.</li>
+          <>
+            <li>App ghi kho sang chỗ mới, đọc lại để kiểm tra, rồi mới xoá file ở chỗ cũ. Thư mục sao lưu được chuyển theo.</li>
+            <li>Trên máy khác, app sẽ báo không tìm thấy file kho: bấm “Chọn file kho…” và chọn file ở vị trí mới.</li>
+          </>
         )}
-        <li>Trên máy khác, mở app và chọn “Mở file kho có sẵn” ở vị trí mới.</li>
       </ul>
       {error && <p className="error">{error}</p>}
       <div className="row gap">
@@ -98,7 +103,8 @@ export function MoveVault({
 
 /** Lời báo sau khi chuyển kho. */
 export function moveMessage(r: MoveView): string {
-  if (r.rescued) return `Đã ghi một BẢN SAO của kho sang ${r.new_path}. Mọi thứ ở vị trí cũ được giữ nguyên, không bị xoá. Từ giờ app dùng kho ở vị trí mới.`;
+  if (r.rescued)
+    return `Đã ghi một BẢN SAO của kho sang ${r.new_path}. Từ giờ máy này dùng file ở vị trí mới. File ở vị trí cũ (${r.old_path}) được giữ nguyên, không bị xoá hay ghi đè — nó có thể còn chứa thay đổi mới hơn từ máy khác. Trên các máy khác, hãy chọn lại file ở vị trí mới (“Dùng kho khác” ở màn hình mở khoá).`;
   if (!r.old_removed) return `Đã chuyển kho sang ${r.new_path}. File ở vị trí cũ chưa xoá được — bạn có thể tự xoá.`;
   return `Đã chuyển kho sang ${r.new_path}.`;
 }

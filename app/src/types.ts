@@ -4,6 +4,8 @@
 export interface AppError {
   code: ErrorCode | string;
   message: string;
+  /** Chỉ có với `older_than_seen`. */
+  detail?: { file_modified_at: number; seen_modified_at: number } | null;
 }
 
 export type ErrorCode =
@@ -24,7 +26,15 @@ export type ErrorCode =
   /** Khôi phục: mật khẩu đúng, nhưng chỉ còn các bản sao lưu có từ TRƯỚC lần đổi mật khẩu chính gần nhất. */
   | "old_backups_only"
   /** Khôi phục: thư mục sao lưu không có bản nào dùng được. */
-  | "no_backup";
+  | "no_backup"
+  /** Khôi phục: bản dựng lại cũ hơn dữ liệu máy này từng thấy (`detail` mang hai mốc thời gian). */
+  | "older_than_seen"
+  /** Chuyển / lưu kho sang chỗ khác không được (lỗi ở chỗ mới) — KHÔNG phải vấn đề của file kho hiện tại. */
+  | "move_failed"
+  /** Bản nháp lớn hơn 256 KiB: không được giữ. */
+  | "draft_too_large"
+  /** Sao chép theo chỉ số: mục đã thay đổi so với lúc hiện. */
+  | "entry_changed";
 
 export interface Strength {
   score: number;
@@ -55,6 +65,10 @@ export interface Status {
   disk_problem: AppError | null;
   lock_note: string | null;
   auto_lock_minutes: number;
+  /** Kho đang khoá: máy này còn giữ bản lưu riêng của kho đã cấu hình (thời điểm ghi, ms). */
+  local_copy_at: number | null;
+  /** Nên đổi mật khẩu chính một lần để thay khoá (kho từng đổi mật khẩu bằng bản 0.1.x). */
+  rekey_advised: boolean;
 }
 
 export interface EntrySummary {
@@ -180,6 +194,26 @@ export interface UnlockInfo {
   /** Số bản cứu hộ chưa gộp được — vẫn được giữ lại, lần mở khoá sau thử lại. */
   rescue_kept: number;
   sync: SyncResult;
+  /** Bản nháp của form đang sửa dở (bí mật — không bao giờ ghi vào sessionStorage; xem App.afterUnlock). */
+  draft: string | null;
+  /** Đã gộp lại từ bản lưu riêng trên máy này những thay đổi mà file kho vừa mở thiếu. */
+  local_restored: { added: number; updated: number; deleted: number } | null;
+  /** File kho vừa được một máy còn chạy bản 0.1.x ghi lại. */
+  old_version_wrote: boolean;
+}
+
+/** File vừa chọn có vẻ là bản xung đột của một file kho khác cùng thư mục. */
+export interface ConflictHint {
+  picked_name: string;
+  original_path: string;
+  original_name: string;
+}
+
+/** Một mật khẩu vừa tạo (không kèm giá trị). */
+export interface GeneratedItem {
+  id: string;
+  at: number;
+  label: string | null;
 }
 
 export interface RecoverInfo {
@@ -190,6 +224,8 @@ export interface RecoverInfo {
   archived: string | null;
   /** Số bản cứu hộ chưa gộp được (vẫn được giữ lại). */
   rescue_kept: number;
+  /** Không còn bản sao lưu dùng được: dựng lại từ bản lưu riêng / bản cứu hộ trên máy này. */
+  from_local_copy: boolean;
 }
 
 export interface HealthItem {
@@ -224,6 +260,7 @@ export interface ImportView {
 }
 
 export interface MoveView {
+  old_path: string;
   new_path: string;
   backups_moved: boolean;
   old_removed: boolean;
@@ -238,6 +275,8 @@ export interface PasswordChangeView {
   backups_skipped: number;
   /** Mật khẩu ĐÃ đổi, nhưng chưa đọc lại kiểm tra được file vừa ghi. */
   unverified: boolean;
+  /** Bản sao lưu đọc được nhưng ghi lại không được: VẪN mở được bằng mật khẩu CŨ. */
+  backups_failed: string[];
 }
 
 /** Kết quả "dọn sạch thùng rác". */

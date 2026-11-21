@@ -4,6 +4,7 @@ import type {
   AppError,
   BackupEntryView,
   BackupView,
+  ConflictHint,
   CopyField,
   EmptyTrashView,
   EntryDetail,
@@ -11,6 +12,7 @@ import type {
   EntrySummary,
   GenRequest,
   Generated,
+  GeneratedItem,
   HealthView,
   HistoryView,
   ImportView,
@@ -50,7 +52,7 @@ const SESSION_LOST = new Set(["locked", "password_changed"]);
 /** Mã lỗi nghĩa là file kho trên đĩa đang có vấn đề (backend ghi nhận vào `disk_problem`). */
 const DISK_PROBLEM = new Set(["file_damaged", "file_missing", "different_vault", "unsupported_version"]);
 /** Các lệnh tự xử lý lỗi của mình (màn hình khoá / mở khoá) — không kích hoạt xử lý chung. */
-const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path"]);
+const OWN_HANDLING = new Set(["status", "page_loaded", "lock", "unlock", "recover_vault", "create_vault", "open_readonly", "set_vault_path", "vault_traces", "suggest_path", "restore_local_copy", "check_vault_choice", "set_draft", "record_generated", "check_rekey"]);
 
 let sessionLostHandler: ((e: AppError) => void) | null = null;
 let diskProblemHandler: ((e: AppError) => void) | null = null;
@@ -99,8 +101,17 @@ export const api = {
   pageLoaded: () => call<void>("page_loaded"),
   createVault: (path: string, password: string) => call<void>("create_vault", { path, password }),
   unlock: (path: string, password: string) => call<UnlockInfo>("unlock", { path, password }),
-  /** `allowOlder`: chủ kho đã chọn rõ ràng khôi phục từ các bản sao lưu tạo trước lần đổi mật khẩu chính gần nhất. */
-  recoverVault: (path: string, password: string, allowOlder = false) => call<RecoverInfo>("recover_vault", { path, password, allowOlder }),
+  /**
+   * Các lựa chọn rõ ràng của chủ kho: `allowOlder` — khôi phục từ các bản sao lưu tạo trước lần đổi mật khẩu chính gần nhất;
+   * `allowStale` — chấp nhận bản dựng lại cũ hơn dữ liệu máy này từng thấy; `replaceNewer` — file kho báo "định dạng mới hơn"
+   * vẫn được cất đi và thay bằng bản dựng lại.
+   */
+  recoverVault: (path: string, password: string, opts: { allowOlder?: boolean; allowStale?: boolean; replaceNewer?: boolean } = {}) =>
+    call<RecoverInfo>("recover_vault", { path, password, allowOlder: !!opts.allowOlder, allowStale: !!opts.allowStale, replaceNewer: !!opts.replaceNewer }),
+  /** Kho đang khoá, file kho không còn: ghi bản lưu riêng trên máy này ra đúng vị trí đó (không bao giờ ghi đè). */
+  restoreLocalCopy: () => call<void>("restore_local_copy"),
+  /** File vừa chọn có phải bản xung đột của một file kho khác cùng thư mục không. */
+  checkVaultChoice: (path: string) => call<ConflictHint | null>("check_vault_choice", { path }),
   acceptRollback: () => call<void>("accept_rollback"),
   lock: () => call<void>("lock"),
   setVaultPath: (path: string) => call<void>("set_vault_path", { path }),
@@ -111,7 +122,8 @@ export const api = {
   revealTotpSecret: (id: string) => call<string>("reveal_totp_secret", { id }),
   history: (id: string) => call<HistoryView[]>("password_history", { id }),
   totp: (id: string) => call<TotpCode>("totp_code", { id }),
-  copyField: (id: string, field: CopyField) => call<number>("copy_field", { id, field }),
+  /** `updatedAt`: thời điểm sửa của mục đang hiện — mục đã đổi ⇒ lỗi `entry_changed`. */
+  copyField: (id: string, field: CopyField, updatedAt?: number) => call<number>("copy_field", { id, field, updatedAt: updatedAt ?? null }),
   copyText: (text: string) => call<number>("copy_text", { text }),
   save: (entry: EntryInput) => call<[string, SyncResult]>("save_entry", { entry }).then((r) => reportWrite(r, r[1])),
   /** Chuyển vào thùng rác. */
@@ -134,7 +146,18 @@ export const api = {
   health: (online: boolean) => call<HealthView>("health_report", { online }),
   importCsv: (path: string) => call<ImportView>("import_csv", { path }),
   deleteImportedCsv: () => call<void>("delete_imported_csv"),
-  moveVault: (path: string) => call<MoveView>("move_vault", { path }),
+  /** `copyOnly`: chỉ ghi một BẢN SAO sang chỗ mới, không đụng gì ở chỗ cũ (cứu dữ liệu khi file kho có vấn đề). */
+  moveVault: (path: string, copyOnly = false) => call<MoveView>("move_vault", { path, copyOnly }),
+  // Bản nháp & mật khẩu vừa tạo (giữ trong backend, đã mã hoá bằng khoá kho; giữ qua lần khoá)
+  setDraft: (draft: string | null) => call<void>("set_draft", { draft }),
+  getDraft: () => call<string | null>("get_draft"),
+  recordGenerated: (value: string, label: string | null = null) => call<void>("record_generated", { value, label }),
+  listGenerated: () => call<GeneratedItem[]>("list_generated"),
+  revealGenerated: (id: string) => call<string>("reveal_generated", { id }),
+  copyGenerated: (id: string) => call<number>("copy_generated", { id }),
+  clearGenerated: () => call<void>("clear_generated"),
+  /** Kho từng đổi mật khẩu chính bằng bản 0.1.x (khoá chưa được thay)? Quét một lần cho mỗi khoá. */
+  checkRekey: () => call<boolean>("check_rekey"),
   listBackups: () => call<BackupView[]>("list_backups"),
   backupDiff: (name: string) => call<BackupEntryView[]>("backup_diff", { name }),
   restoreFromBackup: (name: string, ids: string[]) => call<number>("restore_from_backup", { name, ids }),
@@ -254,9 +277,16 @@ export function reloadPage(note?: string) {
   window.location.reload();
 }
 
+let beforeLock: (() => Promise<void>) | null = null;
+/** Việc cần làm ngay trước khi khoá bằng tay (ví dụ đẩy bản nháp của form đang sửa). Không bao giờ chặn việc khoá quá 1 giây. */
+export function onBeforeLock(h: (() => Promise<void>) | null) {
+  beforeLock = h;
+}
+
 /** Khoá kho rồi nạp lại trang. */
 export async function lockAndReload(note?: string) {
   if (reloading) return;
+  if (beforeLock) await Promise.race([beforeLock().catch(() => {}), new Promise((r) => setTimeout(r, 1000))]);
   try {
     await api.lock();
   } catch {

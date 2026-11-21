@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, errorText } from "../api";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
+import { api, errorCode, errorText, onBeforeLock } from "../api";
 import type { EntryDetail, EntryInput, Strength } from "../types";
 import { Generator } from "./Generator";
 import { Icon, StrengthMeter, useDebounced, useToast } from "./ui";
@@ -11,18 +11,94 @@ const cleanList = (s: string, sep: string) =>
     .filter(Boolean);
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
+/** Các ô của form có giá trị gốc (so với lúc mở) — để biết người dùng đã sửa ô nào. */
+interface FormFields {
+  title: string;
+  username: string;
+  urls: string;
+  tags: string;
+  notes: string;
+  favorite: boolean;
+}
+const EMPTY_FIELDS: FormFields = { title: "", username: "", urls: "", tags: "", notes: "", favorite: false };
+const FIELD_KEYS: (keyof FormFields)[] = ["title", "username", "urls", "tags", "notes", "favorite"];
+
+/**
+ * Bản nháp của form, giữ trong backend (mã hoá bằng khoá kho, qua được lần khoá / thoát app). `base` = giá trị lúc mở
+ * form: khi khôi phục, chỉ những ô người dùng ĐÃ SỬA (cur ≠ base) được áp lên dữ liệu hiện tại của mục — các ô khác lấy
+ * giá trị mới nhất (có thể vừa đồng bộ về từ máy khác).
+ */
+export interface FormDraft {
+  v: 1;
+  id: string | null;
+  /** `updated_at` của mục lúc mở form (null = mục mới). */
+  updated_at: number | null;
+  base: FormFields;
+  cur: FormFields;
+  password: string;
+  passwordTouched: boolean;
+  removePassword: boolean;
+  totp: string;
+  totpAction: "keep" | "set" | "remove";
+}
+
+export function parseDraft(raw: string | null): FormDraft | null {
+  if (!raw) return null;
+  try {
+    const d = JSON.parse(raw) as FormDraft;
+    return d && d.v === 1 && d.cur && d.base ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Cách khôi phục một bản nháp. */
+export interface Restore {
+  draft: FormDraft;
+  /** Mục đã thay đổi (máy khác, hoặc lần lưu đã xảy ra) kể từ lúc bắt đầu sửa. */
+  changedSince?: boolean;
+  /** Mục không còn trong kho ⇒ mở thành mục MỚI với cùng nội dung. */
+  asNew?: boolean;
+}
+
+export interface EntryFormHandle {
+  /** Lưu như bấm nút Lưu. true nếu đã lưu (hoặc không có gì để lưu). */
+  save: () => Promise<boolean>;
+  /** Bỏ thay đổi: ngừng giữ bản nháp và xoá nó khỏi backend (sau mọi lần đẩy đang dở). */
+  discard: () => Promise<void>;
+}
+
+const DRAFT_DEBOUNCE_MS = 400;
+const GEN_HINT = "Bấm Lưu trước khi đổi mật khẩu trên trang web — mật khẩu cũ vẫn nằm trong Lịch sử của mục.";
+
 /** Thêm mới (id = null) hoặc sửa một mục. */
-export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSaved: (id: string) => void; onCancel: () => void }) {
+export function EntryForm({
+  id,
+  restore,
+  onSaved,
+  onCancel,
+  onDirtyChange,
+  handleRef,
+}: {
+  id: string | null;
+  restore?: Restore | null;
+  onSaved: (id: string) => void;
+  onCancel: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  handleRef?: Ref<EntryFormHandle>;
+}) {
   const toast = useToast();
   const [orig, setOrig] = useState<EntryDetail | null>(null);
   /** Ghi chú lúc mở form (null = chưa tải / không tải được ⇒ không cho sửa để tránh ghi đè). */
   const [origNotes, setOrigNotes] = useState<string | null>(id ? null : "");
   const [notesError, setNotesError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [base, setBase] = useState<FormFields | null>(id ? null : EMPTY_FIELDS);
   const [title, setTitle] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [passwordTouched, setPasswordTouched] = useState(false);
+  const [removePassword, setRemovePassword] = useState(false);
   const [showPw, setShowPw] = useState(false);
   const [urls, setUrls] = useState("");
   const [tags, setTags] = useState("");
@@ -31,14 +107,40 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
   const [totp, setTotp] = useState("");
   const [totpAction, setTotpAction] = useState<"keep" | "set" | "remove">("keep");
   const [showGen, setShowGen] = useState(false);
+  const [genHint, setGenHint] = useState(false);
   const [strength, setStrength] = useState<Strength | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftError, setDraftError] = useState<string | null>(null);
   const dpw = useDebounced(password, 200);
+
+  /** Áp bản nháp lên dữ liệu vừa tải (chỉ những ô người dùng đã sửa). */
+  const applyRestore = useCallback(
+    (loaded: FormFields) => {
+      const d = restore?.draft;
+      const pick = <K extends keyof FormFields>(k: K): FormFields[K] => (d && d.cur[k] !== d.base[k] ? d.cur[k] : loaded[k]);
+      setTitle(pick("title"));
+      setUsername(pick("username"));
+      setUrls(pick("urls"));
+      setTags(pick("tags"));
+      setNotes(pick("notes"));
+      setFavorite(pick("favorite"));
+      if (d) {
+        setPassword(d.password);
+        setPasswordTouched(d.passwordTouched);
+        setRemovePassword(d.removePassword);
+        setTotp(d.totp);
+        setTotpAction(d.totpAction);
+        if (d.passwordTouched && d.password) setShowPw(false);
+      }
+    },
+    [restore],
+  );
 
   useEffect(() => {
     if (!id) {
-      setShowGen(true);
+      setShowGen(!restore);
+      applyRestore(EMPTY_FIELDS);
       return;
     }
     let alive = true;
@@ -46,41 +148,106 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
       .get(id)
       .then(async (e) => {
         if (!alive) return;
-        setOrig(e);
-        setTitle(e.title);
-        setUsername(e.username);
-        setUrls(e.urls.join("\n"));
-        setTags(e.tags.join(", "));
-        setFavorite(e.favorite);
-        if (!e.has_notes) {
+        const loaded: FormFields = { title: e.title, username: e.username, urls: e.urls.join("\n"), tags: e.tags.join(", "), notes: "", favorite: e.favorite };
+        if (e.has_notes) {
+          try {
+            const n = await api.revealNotes(id);
+            if (!alive) return;
+            loaded.notes = n;
+            setOrigNotes(n);
+          } catch (err) {
+            if (alive) setNotesError(`Không tải được ghi chú (${errorText(err)}) — ghi chú sẽ được giữ nguyên.`);
+          }
+        } else {
           setOrigNotes("");
-          return;
         }
-        try {
-          const n = await api.revealNotes(id);
-          if (!alive) return;
-          setOrigNotes(n);
-          setNotes(n);
-        } catch (err) {
-          if (alive) setNotesError(`Không tải được ghi chú (${errorText(err)}) — ghi chú sẽ được giữ nguyên.`);
-        }
+        if (!alive) return;
+        setOrig(e);
+        setBase(loaded);
+        applyRestore(loaded);
       })
       .catch((err) => alive && setLoadError(errorText(err)));
     return () => {
       alive = false;
     };
-  }, [id]);
+  }, [id, restore, applyRestore]);
 
   useEffect(() => {
     if (!dpw) return setStrength(null);
     api.strength(dpw).then(setStrength).catch(() => {});
   }, [dpw]);
 
+  // ------------------------------------------------------------------ bản nháp
+
+  const cur: FormFields = { title, username, urls, tags, notes, favorite };
+  const dirty =
+    base !== null &&
+    (FIELD_KEYS.some((k) => cur[k] !== base[k]) || (passwordTouched && password !== "") || removePassword || (totpAction === "set" && totp.trim() !== "") || totpAction === "remove");
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
+  const draftJson = dirty
+    ? JSON.stringify({ v: 1, id, updated_at: orig?.updated_at ?? null, base: base!, cur, password, passwordTouched, removePassword, totp, totpAction } satisfies FormDraft)
+    : null;
+  const latest = useRef<string | null>(null);
+  latest.current = draftJson;
+  /** Bản đã gửi gần nhất (undefined = chưa gửi gì: không có bản nháp nào của form này trong backend). */
+  const sent = useRef<string | null | undefined>(restore ? "restored" : undefined);
+  const inflight = useRef<Promise<void>>(Promise.resolve());
+  const closed = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flush = useCallback(async () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    if (closed.current) return;
+    const d = latest.current;
+    if (d === sent.current || (d === null && sent.current === undefined)) return inflight.current;
+    sent.current = d;
+    const p = inflight.current.then(() =>
+      api.setDraft(d).then(
+        () => setDraftError(null),
+        (e) => {
+          if (errorCode(e) === "draft_too_large") setDraftError("Bản nháp quá lớn, chưa được giữ — hãy bấm Lưu sớm.");
+        },
+      ),
+    );
+    inflight.current = p;
+    return p;
+  }, []);
+
+  // Đẩy bản nháp sau mỗi thay đổi (chờ ~400 ms), và NGAY khi người dùng rời cửa sổ (sang trình duyệt để đổi mật khẩu).
+  useEffect(() => {
+    if (base === null || closed.current) return;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(flush, DRAFT_DEBOUNCE_MS);
+  }, [draftJson, base, flush]);
+  useEffect(() => {
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHidden);
+    window.addEventListener("blur", flush);
+    onBeforeLock(flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("blur", flush);
+      onBeforeLock(null);
+      if (timer.current) clearTimeout(timer.current);
+    };
+  }, [flush]);
+
+  // ------------------------------------------------------------------ lưu
+
   async function loadCurrent() {
     if (!id) return;
     try {
       setPassword(await api.reveal(id));
       setPasswordTouched(false);
+      setRemovePassword(false);
       setShowPw(true);
     } catch (err) {
       toast(errorText(err), "error");
@@ -105,7 +272,9 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
     const input: EntryInput = { id };
     if (title.trim() !== orig.title) input.title = title.trim();
     if (username.trim() !== orig.username) input.username = username.trim();
-    if (passwordTouched) input.password = password;
+    // Ô mật khẩu trống luôn nghĩa là "giữ nguyên" (kể cả sau khi gõ rồi xoá); muốn xoá phải bấm "Xoá mật khẩu đã lưu".
+    if (removePassword) input.password = "";
+    else if (passwordTouched && password !== "") input.password = password;
     const u = cleanList(urls, "\n");
     if (!sameList(u, orig.urls)) input.urls = u;
     const t = cleanList(tags, ",");
@@ -116,29 +285,68 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
     return input;
   }
 
-  async function submit(ev: React.FormEvent) {
-    ev.preventDefault();
-    if (busy) return;
+  async function save(): Promise<boolean> {
+    if (busy) return false;
     setError(null);
     const input = buildInput();
     if (id && Object.keys(input).length === 1) {
       toast("Không có thay đổi nào", "info");
+      closed.current = true;
+      if (sent.current !== undefined && sent.current !== null) api.setDraft(null).catch(() => {});
       onSaved(id);
-      return;
+      return true;
+    }
+    if (!title.trim()) {
+      setError("Tiêu đề không được để trống");
+      return false;
     }
     setBusy(true);
+    // Không để một lần đẩy bản nháp đến SAU lần lưu (backend xoá bản nháp ngay trong lệnh lưu).
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    closed.current = true;
+    await inflight.current.catch(() => {});
     try {
       const [newId, sync] = await api.save(input);
       if (sync.changed) toast("Đã gộp thay đổi từ máy khác trước khi lưu", "info");
       toast(id ? "Đã lưu thay đổi" : "Đã thêm mục mới");
       setPassword("");
+      sent.current = null;
       onSaved(newId);
+      return true;
     } catch (e) {
-      // Form vẫn mở, giữ nguyên những gì người dùng đã nhập.
+      // Form vẫn mở, giữ nguyên những gì người dùng đã nhập (và bản nháp tiếp tục được giữ).
+      closed.current = false;
       setError(errorText(e));
+      flush();
+      return false;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function discard() {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    closed.current = true;
+    await inflight.current.catch(() => {});
+    await api.setDraft(null).catch(() => {});
+    sent.current = null;
+  }
+
+  useImperativeHandle(handleRef, () => ({ save, discard }));
+
+  async function submit(ev: React.FormEvent) {
+    ev.preventDefault();
+    await save();
+  }
+
+  function takeGenerated(v: string, hide: boolean) {
+    setPassword(v);
+    setPasswordTouched(true);
+    setRemovePassword(false);
+    setGenHint(true);
+    if (hide) setShowGen(false);
   }
 
   const editing = id !== null;
@@ -157,13 +365,32 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
   const loading = editing && !orig;
 
   return (
-    <form className="detail form" onSubmit={submit}>
+    <form
+      className="detail form"
+      onSubmit={submit}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && !busy) {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    >
       <header className="detail-head">
         <button type="button" className="icon-btn" onClick={onCancel} title="Quay lại" aria-label="Quay lại">
           <Icon name="back" />
         </button>
         <h2 className="grow">{editing ? `Sửa “${orig?.title ?? ""}”` : "Thêm mục mới"}</h2>
       </header>
+
+      {(restore?.changedSince || restore?.asNew || draftError) && (
+        <div className="fields-error">
+          {restore?.changedSince && <p className="warn-text">Mục này đã thay đổi sau khi bạn bắt đầu sửa — kiểm tra lại trước khi lưu.</p>}
+          {restore?.asNew && (
+            <p className="warn-text">Mục bạn đang sửa dở không còn trong kho (có thể đã bị xoá ở máy khác) — nội dung được mở thành một mục MỚI. Kiểm tra lại rồi bấm Lưu.</p>
+          )}
+          {draftError && <p className="error">{draftError}</p>}
+        </div>
+      )}
 
       <fieldset className="fields plain" disabled={busy || loading}>
         <label className="field">
@@ -177,45 +404,57 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
 
         <div className="field">
           <span>Mật khẩu</span>
-          <div className="row">
-            <input
-              type={showPw ? "text" : "password"}
-              className="mono"
-              value={password}
-              placeholder={editing && !passwordTouched ? "(giữ nguyên mật khẩu hiện tại)" : ""}
-              onChange={(e) => {
-                setPassword(e.target.value);
-                setPasswordTouched(true);
-              }}
-              autoComplete="off"
-              spellCheck={false}
-              data-secret
-              aria-label="Mật khẩu"
-            />
-            <button type="button" className="icon-btn" onClick={() => setShowPw(!showPw)} title={showPw ? "Ẩn" : "Hiện"} aria-label={showPw ? "Ẩn" : "Hiện"}>
-              <Icon name={showPw ? "eyeOff" : "eye"} />
-            </button>
-            <button type="button" className="btn" onClick={() => setShowGen(!showGen)}>
-              <Icon name="dice" /> Tạo
-            </button>
-          </div>
-          {password && <StrengthMeter strength={strength} />}
-          {editing && orig?.has_password && !passwordTouched && !password && (
-            <button type="button" className="btn link" onClick={loadCurrent}>
-              Hiện mật khẩu hiện tại để sửa
-            </button>
-          )}
-          {editing && passwordTouched && <small className="muted">Mật khẩu cũ sẽ được lưu vào lịch sử.</small>}
-          {showGen && (
-            <div className="inline-gen">
-              <Generator
-                compact
-                onUse={(v) => {
-                  setPassword(v);
+          {removePassword ? (
+            <div className="row gap">
+              <span className="muted">Mật khẩu đã lưu sẽ bị xoá khi lưu (nó vẫn nằm trong Lịch sử của mục).</span>
+              <button type="button" className="btn link" onClick={() => setRemovePassword(false)}>
+                Hoàn tác
+              </button>
+            </div>
+          ) : (
+            <div className="row">
+              <input
+                type={showPw ? "text" : "password"}
+                className="mono"
+                value={password}
+                placeholder={editing && orig?.has_password ? "(để trống = giữ nguyên mật khẩu hiện tại)" : ""}
+                onChange={(e) => {
+                  setPassword(e.target.value);
                   setPasswordTouched(true);
-                  setShowGen(false);
                 }}
+                autoComplete="off"
+                spellCheck={false}
+                data-secret
+                aria-label="Mật khẩu"
               />
+              <button type="button" className="icon-btn" onClick={() => setShowPw(!showPw)} title={showPw ? "Ẩn" : "Hiện"} aria-label={showPw ? "Ẩn" : "Hiện"}>
+                <Icon name={showPw ? "eyeOff" : "eye"} />
+              </button>
+              <button type="button" className="btn" onClick={() => setShowGen(!showGen)}>
+                <Icon name="dice" /> Tạo
+              </button>
+            </div>
+          )}
+          {password && !removePassword && <StrengthMeter strength={strength} />}
+          {editing && orig?.has_password && !passwordTouched && !password && !removePassword && (
+            <div className="row gap">
+              <button type="button" className="btn link" onClick={loadCurrent}>
+                Hiện mật khẩu hiện tại để sửa
+              </button>
+              <button type="button" className="btn link muted-link" onClick={() => setRemovePassword(true)}>
+                Xoá mật khẩu đã lưu
+              </button>
+            </div>
+          )}
+          {editing && passwordTouched && password !== "" && !genHint && <small className="muted">Mật khẩu cũ sẽ được lưu vào lịch sử.</small>}
+          {genHint && passwordTouched && password !== "" && (
+            <small className="gen-hint" role="note">
+              <Icon name="warn" size={14} /> {GEN_HINT}
+            </small>
+          )}
+          {showGen && !removePassword && (
+            <div className="inline-gen">
+              <Generator compact label={title} onUse={(v) => takeGenerated(v, true)} onCopied={(v) => takeGenerated(v, false)} />
             </div>
           )}
         </div>
@@ -262,7 +501,14 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
               />
               <small className="muted">Khi bật 2FA, trang web hiện mã QR kèm dòng “nhập thủ công / khoá bí mật” — dán dòng đó vào đây.</small>
               {editing && orig?.has_totp && (
-                <button type="button" className="btn link" onClick={() => { setTotp(""); setTotpAction("keep"); }}>
+                <button
+                  type="button"
+                  className="btn link"
+                  onClick={() => {
+                    setTotp("");
+                    setTotpAction("keep");
+                  }}
+                >
                   Giữ mã 2FA cũ
                 </button>
               )}
@@ -292,6 +538,7 @@ export function EntryForm({ id, onSaved, onCancel }: { id: string | null; onSave
           <input type="checkbox" checked={favorite} onChange={(e) => setFavorite(e.target.checked)} /> Yêu thích (hiện lên đầu danh sách)
         </label>
         {editing && <small className="muted">Chỉ những ô bạn sửa mới được lưu — thay đổi vừa đồng bộ từ máy khác ở các ô còn lại được giữ nguyên.</small>}
+        {dirty && <small className="muted">Bản nháp đang được giữ trên máy này (đã mã hoá) — kho có tự khoá thì lần mở sau vẫn còn.</small>}
       </fieldset>
 
       {error && (

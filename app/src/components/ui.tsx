@@ -146,7 +146,9 @@ export function useAutoHide<T>(value: T | null, clear: () => void, ms = AUTO_HID
 /**
  * Mọi thao tác sao chép trong app (bôi đen rồi Ctrl+C, chuột phải → Copy) đi qua Rust: không vào
  * lịch sử clipboard và tự xoá sau N giây. Ô mật khẩu (type=password) không cho sao chép; ô chứa bí
- * mật (có thuộc tính data-secret) không cho cắt (Ctrl+X).
+ * mật (có thuộc tính data-secret) không cho cắt (Ctrl+X). Cắt trong các ô thường (tiêu đề, tên đăng
+ * nhập…) vẫn đi qua clipboard của hệ điều hành như bình thường — Cài đặt nói đúng như vậy. Không cho
+ * kéo thả chữ ra ngoài cửa sổ.
  */
 export function useClipboardGuard() {
   const toast = useToast();
@@ -175,11 +177,16 @@ export function useClipboardGuard() {
       if (!t) return;
       if ((t instanceof HTMLInputElement && t.type === "password") || t.closest("[data-secret]")) e.preventDefault();
     };
+    // Kéo một đoạn chữ (mật khẩu vừa hiện, ghi chú…) ra ngoài cửa sổ sẽ chép nó sang app khác mà KHÔNG qua đường bảo vệ
+    // ở trên ⇒ app không cho kéo thả gì cả (không có chức năng nào cần kéo thả).
+    const onDrag = (e: DragEvent) => e.preventDefault();
     document.addEventListener("copy", onCopy);
     document.addEventListener("cut", onCut);
+    document.addEventListener("dragstart", onDrag);
     return () => {
       document.removeEventListener("copy", onCopy);
       document.removeEventListener("cut", onCut);
+      document.removeEventListener("dragstart", onDrag);
     };
   }, [toast]);
 }

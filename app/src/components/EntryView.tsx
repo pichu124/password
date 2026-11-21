@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errorText } from "../api";
+import { api, errorCode, errorText } from "../api";
 import type { CopyField, EntryDetail, HistoryView, TotpCode } from "../types";
 import { avatarHue, formatDate, Icon, initials, StrengthMeter, useAutoHide, useToast } from "./ui";
 
@@ -10,12 +10,15 @@ export function EntryView({
   onDeleted,
   onChanged,
   readOnly = false,
+  refreshKey = 0,
 }: {
   id: string;
   onEdit?: () => void;
   onDeleted?: () => void;
   onChanged?: () => void;
   readOnly?: boolean;
+  /** Đổi giá trị ⇒ tải lại mục (ví dụ vừa đồng bộ về thay đổi từ máy khác, hoặc vừa khôi phục từ sao lưu). */
+  refreshKey?: number;
 }) {
   const toast = useToast();
   const [e, setE] = useState<EntryDetail | null>(null);
@@ -26,7 +29,9 @@ export function EntryView({
   const [history, setHistory] = useState<HistoryView[] | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
+  // Tải (lại) mục. Những gì đang hiện (mật khẩu, ghi chú, lịch sử) bị ẩn đi: chúng có thể đã cũ.
   useEffect(() => {
     setRevealed(null);
     setNotes(null);
@@ -35,7 +40,7 @@ export function EntryView({
     setConfirmDelete(false);
     setTotp(null);
     api.get(id).then(setE).catch((err) => toast(errorText(err), "error"));
-  }, [id, toast]);
+  }, [id, toast, refreshKey, reloadKey]);
 
   // Mã 2FA cập nhật mỗi giây (chỉ khi secret đọc được).
   const totpUsable = !!e?.has_totp && !e?.totp_error;
@@ -61,10 +66,12 @@ export function EntryView({
 
   async function copy(field: CopyField, label: string) {
     try {
-      const secs = await api.copyField(id, field);
+      // Gửi kèm thời điểm sửa của mục đang hiện: mục vừa đổi thì backend từ chối thay vì chép nhầm (url:<i>, history:<i>).
+      const secs = await api.copyField(id, field, e?.updated_at);
       toast(`Đã sao chép ${label} — tự xoá sau ${secs} giây`);
     } catch (err) {
       toast(errorText(err), "error");
+      if (errorCode(err) === "entry_changed") setReloadKey((k) => k + 1);
     }
   }
 
@@ -92,8 +99,9 @@ export function EntryView({
 
   async function fav() {
     try {
-      const now = await api.toggleFavorite(id);
-      setE((cur) => (cur ? { ...cur, favorite: now } : cur));
+      await api.toggleFavorite(id);
+      const fresh = await api.get(id);
+      setE(fresh);
       onChanged?.();
     } catch (err) {
       toast(errorText(err), "error");

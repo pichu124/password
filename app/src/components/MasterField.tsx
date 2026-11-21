@@ -102,7 +102,13 @@ export function MasterPasswordField({
           <small>Hãy chép cụm từ này ra giấy ngay (đúng từng chữ và dấu gạch), cất ở nơi an toàn, rồi nhập lại ở ô bên dưới.</small>
         </div>
       )}
-      {mc.check && <small className={mc.check.ok ? "check-ok" : "error"}>{mc.check.ok ? "✓ Đạt yêu cầu" : mc.check.message}</small>}
+      {mc.check && (
+        <small className={mc.check.ok ? "check-ok" : "error"}>
+          {mc.check.ok
+            ? "✓ Đạt yêu cầu tối thiểu. App không biết tên, ngày sinh, số điện thoại của bạn — đừng dùng chúng. An toàn nhất: bấm «Gợi ý» để lấy cụm từ ngẫu nhiên."
+            : mc.check.message}
+        </small>
+      )}
       {mc.checkError && <small className="error">{mc.checkError}</small>}
       {genError && <small className="error">{genError}</small>}
       {hasNonAscii(value) && (

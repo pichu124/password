@@ -1279,3 +1279,64 @@ fieldset.fields.plain {
   padding-bottom: 7px;
   text-align: left;
 }
+
+/* ---- fix2 ---- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 18, 25, 0.55);
+}
+.modal-backdrop .lock-card {
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+.gen-hint {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.recent-gen {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.recent-gen h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+.recent-value {
+  display: block;
+  margin-top: 2px;
+  word-break: break-all;
+}
+.pane {
+  position: relative;
+}
+.unsaved-bar {
+  position: absolute;
+  top: 64px;
+  left: 16px;
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  box-shadow: var(--shadow);
+  background: var(--panel);
+  width: auto;
+  margin: 0;
+  box-sizing: border-box;
+}
+.lock-card .secondary-action {
+  margin-top: 6px;
+  text-align: left;
+}

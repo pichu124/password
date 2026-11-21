@@ -30,6 +30,23 @@
 //   ?traces                 thư mục định tạo kho mới đã có dấu vết kho cũ
 //   ?breacherr              kiểm tra rò rỉ qua mạng thất bại
 //   ?syncreject=locked|password_changed|error   đồng bộ nền bị từ chối
+//   --- fix2 ---
+//   ?draft | ?draft=edit | ?draft=changed | ?draft=gone   có sẵn một bản nháp (form đang sửa dở) trong "backend": mục mới /
+//                           sửa Gmail / sửa Gmail nhưng mục đã đổi kể từ lúc bắt đầu sửa / sửa một mục không còn trong kho.
+//                           Bản nháp + mật khẩu vừa tạo được giữ trong sessionStorage (giả lập backend giữ qua lần khoá)
+//   ?generated              có sẵn vài "mật khẩu vừa tạo gần đây"
+//   ?localrestored          sau khi mở khoá: đã gộp lại từ bản lưu riêng trên máy (UnlockInfo.local_restored)
+//   ?oldversion             sau khi mở khoá: file vừa được máy chạy 0.1.x ghi lại (UnlockInfo.old_version_wrote)
+//   ?rekey                  kho từng đổi mật khẩu chính bằng 0.1.x (check_rekey = true) cho tới khi đổi mật khẩu chính
+//   ?localcopy              (kèm ?missing) máy này còn bản lưu riêng: NotFoundScreen hiện nút "Tạo lại file kho từ bản lưu riêng"
+//   ?recover=stale          khôi phục: lỗi older_than_seen (kèm hai mốc), trừ khi gọi lại với allowStale = true
+//   ?recover=local          khôi phục: không còn bản sao lưu ⇒ dựng lại từ bản lưu riêng (RecoverInfo.from_local_copy)
+//   ?conflictpick           hộp chọn file trả về "vault (1).pwv" — check_vault_choice báo là bản xung đột của vault.pwv
+//   ?movefail               chuyển / lưu sang chỗ khác: lỗi move_failed (không phải vấn đề của file kho)
+//   ?pwfailed               đổi mật khẩu chính: 2 bản sao lưu chưa mã hoá lại được (backups_failed)
+//   ?entrychanged           lần sao chép đầu tiên: mục vừa thay đổi (entry_changed) — giao diện tải lại mục
+//   ?oldformat              (đã có) — khôi phục với replaceNewer = true thì được
+//   ?badheader              mở khoá luôn báo sai mật khẩu (header hỏng), nhưng khôi phục từ sao lưu bằng mật khẩu đúng thì được
 //   Điện thoại: ?readfail (mở khoá: không đọc được file), ?cache (dùng bản đã lưu),
 //               ?pwchanged (mật khẩu chính đã đổi trên máy tính),
 //               ?reloadfail=read_failed|password_changed|error (nút ⟳)
@@ -72,6 +89,8 @@ let modifiedAt = now - 2 * 3_600_000;
 let backupFailOnce = flag("backupfail");
 let oldKeyOnce = flag("oldkey") && params.get("oldkey") !== "done";
 let unverifiedOnce = flag("unverified");
+let rekeyAdvised = flag("rekey");
+let entryChangedOnce = flag("entrychanged");
 const OLDKEY_ERROR = "vault (1).pwv: bản này được ghi bằng mật khẩu chính CŨ nên không được tự gộp — đã cất vào thư mục sao lưu để bạn xem lại";
 /** Kết quả đồng bộ, kèm "bản ghi bằng mật khẩu cũ" ở lần đầu nếu có ?oldkey. */
 function syncResult(): SyncResult {
@@ -139,6 +158,50 @@ function mk(title: string, username: string, password: string, urls: string[], t
 }
 
 const live = () => entries.filter((e) => e.trashed_at === null);
+
+// ------------------------------------------------------------------ bản nháp & mật khẩu vừa tạo (giả lập backend)
+
+interface MockStash {
+  draft: string | null;
+  generated: { id: string; value: string; at: number; label: string | null }[];
+}
+const STASH_KEY = "pwv.mock.stash";
+function loadStash(): MockStash {
+  try {
+    return JSON.parse(sessionStorage.getItem(STASH_KEY) ?? "") as MockStash;
+  } catch {
+    return { draft: null, generated: [] };
+  }
+}
+function saveStash(st: MockStash) {
+  st.generated = st.generated.filter((g) => g.at > Date.now() - 30 * day).sort((a, b) => b.at - a.at).slice(0, 20);
+  sessionStorage.setItem(STASH_KEY, JSON.stringify(st));
+}
+{
+  const d = params.get("draft");
+  if (d !== null) {
+    const g = entries.find((e) => e.title === "Gmail")!;
+    const base = { title: g.title, username: g.username, urls: g.urls.join("\n"), tags: g.tags.join(", "), notes: g.notes, favorite: g.favorite };
+    const draft =
+      d === ""
+        ? { v: 1, id: null, updated_at: null, base: { title: "", username: "", urls: "", tags: "", notes: "", favorite: false }, cur: { title: "Techcombank", username: "0912345678", urls: "https://techcombank.com", tags: "Ngân hàng", notes: "", favorite: false }, password: "Moi-Tao-Khi-Dang-Sua-42!", passwordTouched: true, removePassword: false, totp: "", totpAction: "keep" }
+        : { v: 1, id: d === "gone" ? "khong-con-nua" : g.id, updated_at: d === "changed" ? g.updated_at - 60_000 : g.updated_at, base, cur: { ...base, notes: base.notes + "đổi mật khẩu 21/11" }, password: "Vua-Tao-Cho-Gmail-9x#Q", passwordTouched: true, removePassword: false, totp: "", totpAction: "keep" };
+    const st = loadStash();
+    st.draft = JSON.stringify(draft);
+    saveStash(st);
+    setUrlFlag("draft", false);
+  }
+  if (flag("generated")) {
+    const st = loadStash();
+    st.generated = [
+      { id: "g1", value: "Vua-Tao-Cho-Gmail-9x#Q", at: now - 5 * 60_000, label: "Gmail" },
+      { id: "g2", value: "k9$Vb2#Lq8!mZ3@xT7pp", at: now - 2 * 3_600_000, label: null },
+      { id: "g3", value: "orbit-canyon-tulip-harbor-pencil-7", at: now - 3 * day, label: "Vietcombank" },
+    ];
+    saveStash(st);
+    setUrlFlag("generated", false);
+  }
+}
 
 function strength(pw: string) {
   const score = pw.length === 0 ? 0 : pw.length < 8 ? 0 : pw.length < 10 ? 2 : pw.length < 14 ? 3 : 4;
@@ -255,6 +318,7 @@ export async function mockPickFile(opts: { save?: boolean; defaultPath?: string;
   if (opts.save) return opts.defaultPath ?? "D:\\Dropbox\\Passwords\\vault.pwv";
   if (opts.filters.some((f) => f.extensions.includes("csv"))) return "C:\\Users\\toi\\Downloads\\Chrome Passwords.csv";
   if (IS_PHONE) return "content://com.google.android.apps.docs.storage/document/acc%3D1%3Bdoc%3Dencoded%3Dvault.pwv";
+  if (flag("conflictpick")) return "G:\\My Drive\\Passwords\\vault (1).pwv";
   return "G:\\My Drive\\Passwords\\vault.pwv";
 }
 
@@ -269,6 +333,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
         conflict_copies: 0, memory_locked: true, entry_count: unlocked ? live().length : 0,
         trash_count: unlocked ? entries.length - live().length : 0, modified_at: unlocked ? modifiedAt : 0,
         disk_problem: unlocked ? diskProblem : null, lock_note: lockNote, auto_lock_minutes: settings.auto_lock_minutes,
+        local_copy_at: !unlocked && flag("localcopy") ? now - 2 * 3_600_000 : null, rekey_advised: unlocked && rekeyAdvised,
       };
     case "suggest_path": return "G:\\My Drive\\Passwords\\vault.pwv";
     case "vault_traces": return flag("traces") ? ["vault.pwv.backups", "vault (1).pwv"] : [];
@@ -281,7 +346,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       await sleep(700);
       if (flag("missing")) throw err("file_missing", `Không tìm thấy file kho: ${a.path}`);
       if (flag("oldformat")) throw err("unsupported_version", "File kho được ghi bởi phiên bản app mới hơn (định dạng 3). Hãy cập nhật app.");
-      if (a.password !== MASTER) throw err("wrong_password", "Sai mật khẩu chính hoặc file kho đã bị sửa đổi");
+      if (a.password !== MASTER || flag("badheader")) throw err("wrong_password", "Sai mật khẩu chính hoặc file kho đã bị sửa đổi");
       if (flag("damaged")) throw err("file_damaged", "File kho bị hỏng hoặc chưa tải xong (không đọc được phần dữ liệu)");
       unlocked = true; lockNote = null;
       setUrlFlag("unlocked", true); setUrlFlag("note", false);
@@ -296,12 +361,18 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
         rescued: flag("rescued") ? 2 : 0,
         rescue_kept: flag("rescuekept") ? 1 : 0,
         sync: syncResult(),
+        draft: loadStash().draft,
+        local_restored: flag("localrestored") ? { added: 1, updated: 2, deleted: 0 } : null,
+        old_version_wrote: flag("oldversion"),
       };
     }
     case "recover_vault": {
       await sleep(900);
       if (typeof a.allowOlder !== "boolean") throw err("error", "mock: recover_vault thiếu allowOlder");
       const mode = params.get("recover");
+      if (flag("oldformat") && !a.replaceNewer) throw err("unsupported_version", "File kho được ghi bởi phiên bản app mới hơn (định dạng 3). Hãy cập nhật app.");
+      if (mode === "stale" && a.password === MASTER && !a.allowStale)
+        throw { code: "older_than_seen", message: "Bản dựng lại được cũ hơn dữ liệu máy này từng thấy — có thể các bản sao lưu mới hơn chưa đồng bộ về máy này.", detail: { file_modified_at: now - 6 * day, seen_modified_at: now - 1 * day } };
       if (mode === "nobackup")
         throw err("no_backup", "không có bản sao lưu nào dùng được trong thư mục sao lưu của kho — hãy thử lịch sử phiên bản / thùng rác của Google Drive, Dropbox, OneDrive, hoặc một thiết bị khác còn giữ file kho");
       if (a.password !== MASTER) throw err("wrong_password", "Sai mật khẩu chính");
@@ -310,8 +381,8 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       if (mode === "older" && !a.allowOlder)
         throw err("older_password", "mật khẩu này chỉ mở được các bản sao lưu tạo TRƯỚC lần đổi mật khẩu chính gần nhất — hãy nhập mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)");
       unlocked = true; lockNote = null; vaultExists = true;
-      setUrlFlag("unlocked", true); setUrlFlag("damaged", false); setUrlFlag("missing", false); setUrlFlag("recover", false);
-      return { entries: live().length, files_used: 3, newest_backup_at: now - 3 * 3_600_000, archived: "G:\\My Drive\\Passwords\\vault.pwv.backups\\vault.damaged-20261120.pwv", rescue_kept: flag("rescuekept") ? 1 : 0 };
+      setUrlFlag("unlocked", true); setUrlFlag("damaged", false); setUrlFlag("missing", false); setUrlFlag("recover", false); setUrlFlag("oldformat", false); setUrlFlag("badheader", false);
+      return { entries: live().length, files_used: mode === "local" ? 1 : 3, newest_backup_at: now - 3 * 3_600_000, archived: "G:\\My Drive\\Passwords\\vault.pwv.backups\\vault.damaged-20261120.pwv", rescue_kept: flag("rescuekept") ? 1 : 0, from_local_copy: mode === "local" };
     }
     case "accept_rollback": needUnlocked(); setUrlFlag("rollback", false); return null;
     case "create_vault": {
@@ -350,11 +421,49 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       needUnlocked();
       const e = find(a.id);
       const f = String(a.field);
+      if (entryChangedOnce) { entryChangedOnce = false; e.updated_at = Date.now(); }
+      if (a.updatedAt != null && a.updatedAt !== e.updated_at) throw err("entry_changed", "Mục này vừa thay đổi (có thể do đồng bộ từ máy khác) nên đã được tải lại — hãy bấm sao chép lại.");
       const v = f === "password" ? e.password : f === "username" ? e.username : f === "notes" ? e.notes : f === "url" ? e.urls[0] : f === "totp" ? e.totp : f.startsWith("history:") ? e.history[Number(f.slice(8))]?.password : f.startsWith("url:") ? e.urls[Number(f.slice(4))] : undefined;
       if (v === undefined && !["password", "username", "notes", "url", "totp"].includes(f) && !f.startsWith("history:") && !f.startsWith("url:")) throw err("error", `Trường không hợp lệ: ${f}`);
       if (!v) throw err("error", "Trường này đang trống");
       return settings.clipboard_clear_secs;
     }
+    case "set_draft": {
+      needUnlocked();
+      const st = loadStash();
+      if (a.draft != null && String(a.draft).length > 256 * 1024) { st.draft = null; saveStash(st); throw err("draft_too_large", "Bản nháp quá lớn, chưa được giữ."); }
+      st.draft = a.draft ?? null;
+      saveStash(st);
+      return null;
+    }
+    case "get_draft": needUnlocked(); return loadStash().draft;
+    case "record_generated": {
+      needUnlocked();
+      const st = loadStash();
+      const g = st.generated.find((x) => x.value === a.value);
+      if (g) { g.at = Date.now(); if (a.label) g.label = a.label; }
+      else st.generated.push({ id: `g${Date.now()}`, value: a.value, at: Date.now(), label: a.label ?? null });
+      saveStash(st);
+      return null;
+    }
+    case "list_generated": needUnlocked(); return loadStash().generated.map(({ id, at, label }) => ({ id, at, label }));
+    case "reveal_generated": case "copy_generated": {
+      needUnlocked();
+      const g = loadStash().generated.find((x) => x.id === a.id);
+      if (!g) throw err("not_found", "Không còn mật khẩu này trong danh sách (đã quá 30 ngày hoặc đã bị xoá)");
+      return cmd === "reveal_generated" ? g.value : settings.clipboard_clear_secs;
+    }
+    case "clear_generated": { needUnlocked(); const st = loadStash(); st.generated = []; saveStash(st); return null; }
+    case "check_rekey": needUnlocked(); await sleep(300); return rekeyAdvised;
+    case "restore_local_copy":
+      if (unlocked) throw err("error", "Hãy khoá kho trước");
+      if (!flag("localcopy")) throw err("error", "Máy này không có bản lưu riêng của kho này");
+      await sleep(300);
+      vaultExists = true; setUrlFlag("missing", false); setUrlFlag("localcopy", false);
+      return null;
+    case "check_vault_choice":
+      await sleep(50);
+      return /\(1\)\.pwv$/.test(String(a.path)) ? { picked_name: "vault (1).pwv", original_name: "vault.pwv", original_path: "G:\\My Drive\\Passwords\\vault.pwv" } : null;
     case "copy_text":
       if (!a.text) throw err("error", "Không có gì để sao chép");
       return settings.clipboard_clear_secs;
@@ -456,7 +565,8 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       const c = masterCheck(a.new);
       if (!c.ok) throw err("weak_password", `Mật khẩu chính chưa đủ mạnh. ${c.message}`);
       if (a.current !== MASTER) throw err("wrong_password", "Mật khẩu chính hiện tại không đúng");
-      return { backups_reencrypted: 9, backups_skipped: 1, unverified: flag("unverified") };
+      rekeyAdvised = false; setUrlFlag("rekey", false);
+      return { backups_reencrypted: 9, backups_skipped: 1, unverified: flag("unverified"), backups_failed: flag("pwfailed") ? ["vault-1795100000000.pwv", "merged-1795000000000-vault (1).pwv"] : [] };
     }
     case "health_report": {
       needUnlocked();
@@ -481,10 +591,13 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       lastImport = null; return null;
     case "move_vault":
       needUnlocked(); await sleep(400);
+      if (typeof a.copyOnly !== "boolean") throw err("error", "mock: move_vault thiếu copyOnly");
+      if (flag("movefail")) throw err("move_failed", `Chưa ghi được sang vị trí mới: không tìm thấy ổ đĩa (${a.path}). Kho vẫn ở vị trí cũ.`);
       {
-        const rescued = diskProblem !== null;
+        const rescued = a.copyOnly || diskProblem !== null;
+        const old = vaultPath;
         diskProblem = null; vaultPath = a.path; vaultExists = true; setUrlFlag("problem", false);
-        return { new_path: a.path, backups_moved: !rescued, old_removed: !rescued, conflicts_merged: 0, rescued };
+        return { old_path: old, new_path: a.path, backups_moved: !rescued, old_removed: !rescued, conflicts_merged: 0, rescued };
       }
     case "list_backups": needUnlocked(); await sleep(100); return backups;
     case "backup_diff": needUnlocked(); await sleep(150); return diff(a.name);

@@ -15,8 +15,8 @@ export function SettingsView({
   onChanged,
 }: {
   status: Status;
-  /** Cuộn tới mục này khi mở (ví dụ từ thông báo "bản ghi bằng mật khẩu cũ"). */
-  section?: "backups";
+  /** Cuộn tới mục này khi mở (ví dụ từ thông báo "bản ghi bằng mật khẩu cũ" / "nên đổi mật khẩu chính"). */
+  section?: "backups" | "master";
   /** Đổi giá trị ⇒ cuộn lại (bấm lại cùng một nút khi trang cài đặt đang mở). */
   focusAt?: number;
   /** Dữ liệu kho vừa thay đổi (nhập CSV, khôi phục từ bản sao lưu) ⇒ tải lại danh sách. */
@@ -31,9 +31,11 @@ export function SettingsView({
   const [backups, setBackups] = useState<string | null>(null);
   const [moved, setMoved] = useState<MoveView | null>(null);
   const backupsRef = useRef<HTMLDivElement>(null);
+  const masterRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (section === "backups") backupsRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    const target = section === "backups" ? backupsRef : section === "master" ? masterRef : null;
+    target?.current?.scrollIntoView({ block: "start", behavior: "smooth" });
   }, [section, focusAt]);
 
   useEffect(() => {
@@ -95,15 +97,19 @@ export function SettingsView({
               <strong>Chụp màn hình:</strong> cửa sổ app được loại khỏi ảnh chụp và quay màn hình trên Windows 10 bản 2004 trở lên.
             </li>
             <li>
-              <strong>Clipboard:</strong> thứ bạn sao chép từ app không vào lịch sử clipboard (Win+V) và được xoá sau {s?.clipboard_clear_secs ?? "N"} giây
-              — kể cả khi app đã khoá hoặc bạn đã đóng cửa sổ (app chờ xoá xong rồi mới thoát hẳn).
+              <strong>Clipboard:</strong> thứ bạn sao chép từ app (nút sao chép, hoặc bôi đen rồi Ctrl+C) không vào lịch sử clipboard (Win+V) và được xoá
+              sau {s?.clipboard_clear_secs ?? "N"} giây — kể cả khi app đã khoá hoặc bạn đã đóng cửa sổ (app chờ xoá xong rồi mới thoát hẳn). Ô mật khẩu,
+              ghi chú và mã 2FA không cho cắt (Ctrl+X); cắt chữ trong các ô thường (tiêu đề, tên đăng nhập…) đi qua clipboard của Windows như bình thường.
+              Không kéo thả được chữ ra khỏi cửa sổ app.
             </li>
           </ul>
         </section>
 
         {s && <AboutUpdates settings={s} onChange={update} />}
 
-        <ChangeMaster />
+        <div ref={masterRef} className="scroll-anchor">
+          <ChangeMaster onChanged={onChanged} />
+        </div>
 
         <ImportCsv onImported={onImported} />
 
@@ -196,7 +202,7 @@ function AboutUpdates({ settings, onChange }: { settings: Settings; onChange: (s
   );
 }
 
-function ChangeMaster() {
+function ChangeMaster({ onChanged }: { onChanged: () => void }) {
   const [cur, setCur] = useState("");
   const [next, setNext] = useState("");
   const [next2, setNext2] = useState("");
@@ -215,6 +221,8 @@ function ChangeMaster() {
       if (!c?.ok) return;
       const r = await api.changeMaster(cur, next);
       setResult(r);
+      // (ví dụ: cảnh báo "nên đổi mật khẩu chính để thay khoá" hết hiện)
+      onChanged();
       setCur("");
       setNext("");
       setNext2("");
@@ -240,6 +248,20 @@ function ChangeMaster() {
           <div className="note-box">
             Đã lưu, nhưng chưa kiểm tra lại được file vừa ghi (có thể chương trình đồng bộ hoặc diệt virus đang giữ file). App sẽ tự kiểm tra lại ở lần
             đồng bộ tới. Mật khẩu mới vẫn là mật khẩu đúng từ bây giờ.
+          </div>
+        )}
+        {result.backups_failed.length > 0 && (
+          <div className="warning small" role="alert">
+            <p>
+              <strong>{result.backups_failed.length} bản sao lưu chưa mã hoá lại được</strong> (đĩa đầy, hoặc file đang bị chương trình đồng bộ / diệt virus giữ).
+              Chúng <strong>vẫn mở được bằng mật khẩu chính CŨ</strong>:
+            </p>
+            <ul className="name-list mono">
+              {result.backups_failed.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+            <p>Nếu mật khẩu cũ có thể đã bị lộ, hãy xoá các file này khỏi thư mục sao lưu ({"Cài đặt → File kho & đồng bộ"} ghi đường dẫn).</p>
           </div>
         )}
         {result.backups_skipped > 0 && (

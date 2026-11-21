@@ -335,7 +335,7 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
           <strong className="grow">Tạo mật khẩu</strong>
         </header>
         <div className="m-scroll">
-          <Generator />
+          <Generator recordable={false} />
         </div>
       </div>
     );

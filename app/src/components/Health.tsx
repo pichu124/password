@@ -93,7 +93,8 @@ export function Health({ onOpen }: { onOpen: (id: string) => void }) {
             ))}
           </ul>
         )}
-        <p className="muted small">Mẹo: mở mục, bấm “Sửa” → “Tạo” để thay bằng mật khẩu ngẫu nhiên mạnh, rồi đổi mật khẩu trên trang web tương ứng.</p>
+        <p className="muted small">Mẹo: mở mục, bấm “Sửa” → “Tạo” để thay bằng mật khẩu ngẫu nhiên mạnh → bấm <strong>“Lưu”</strong>, rồi mới đổi mật khẩu trên trang web tương
+          ứng (mật khẩu cũ vẫn nằm trong Lịch sử của mục).</p>
       </div>
     </div>
   );

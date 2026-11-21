@@ -1,8 +1,17 @@
 //! Lớp Tauri: chuyển lời gọi từ giao diện vào `Session`.
 //!
-//! Các lệnh có đọc/ghi đĩa đều chạy NGOÀI luồng giao diện (`command(async)`), để một thư mục đồng
-//! bộ chậm không làm đơ cửa sổ. Việc gọi mạng (kiểm tra rò rỉ, kiểm tra bản mới) được làm khi KHÔNG
-//! giữ khoá phiên, để mạng treo không chặn việc tự khoá.
+//! Điều được bảo đảm:
+//! - MỌI lệnh lấy khoá phiên đều chạy NGOÀI luồng giao diện (`command(async)` hoặc `async fn`):
+//!   một thư mục đồng bộ chậm / treo chỉ làm lệnh đó chờ, cửa sổ không bị đơ. `touch` (gửi khi rê
+//!   chuột) không lấy khoá phiên: đồng hồ hoạt động nằm ngoài nó (`session::Activity`).
+//! - Đóng cửa sổ không khoá / ghi trên luồng giao diện: việc đó chạy ở luồng nền rồi app mới thoát.
+//! - Tự khoá (hết giờ, máy vừa ngủ) KHÔNG chờ khoá phiên: nếu một luồng khác đang giữ nó, luồng tự
+//!   khoá ghi một yêu cầu khoá (`session::Shared::request_lock`), báo trang vứt bí mật NGAY, và khoá
+//!   giải mã được xoá khỏi RAM ngay khi khoá phiên rảnh. Mọi lệnh lấy khoá phiên sau đó đều thực hiện
+//!   yêu cầu khoá trước, nên không lệnh nào mang được màn hình đang mở khoá trở lại.
+//! - Việc gọi mạng (kiểm tra rò rỉ, kiểm tra bản mới) được làm khi KHÔNG giữ khoá phiên.
+//! - Không bảo đảm: một thao tác đĩa treo vĩnh viễn giữ khoá phiên thì khoá giải mã cũng nằm trong RAM
+//!   tới lúc đó (màn hình thì đã sạch); app bị "End task" thì không có gì chạy được nữa.
 
 mod session;
 mod update;
@@ -17,14 +26,12 @@ use session::*;
 use tauri::{Emitter, Manager, State};
 use zeroize::Zeroizing;
 
-type AppState = Mutex<Session>;
+type AppState = Shared;
 
-/// Lấy khoá phiên. Nếu một lệnh trước đó panic khi đang giữ khoá (mutex "nhiễm độc"), vẫn lấy được
-/// — nhờ vậy các đường KHOÁ KHO không bao giờ bị vô hiệu.
+/// Lấy khoá phiên (xem [`Shared::lock`]: vẫn lấy được khi mutex "nhiễm độc", và thực hiện yêu cầu
+/// khoá đang chờ trước) — nhờ vậy các đường KHOÁ KHO không bao giờ bị vô hiệu.
 fn lock_state(state: &AppState) -> MutexGuard<'_, Session> {
-    state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    state.lock()
 }
 
 fn with<T>(state: &State<AppState>, f: impl FnOnce(&mut Session) -> AppResult<T>) -> AppResult<T> {
@@ -61,12 +68,10 @@ fn vault_traces(path: String) -> Vec<String> {
     Session::existing_vault_traces(&PathBuf::from(path))
 }
 
+/// Không lấy khoá phiên: chỉ ghi đồng hồ hoạt động (nằm ngoài khoá phiên).
 #[tauri::command]
-fn touch(state: State<AppState>) -> AppResult<()> {
-    with(&state, |s| {
-        s.touch();
-        Ok(())
-    })
+fn touch(state: State<AppState>) {
+    state.activity.touch();
 }
 
 /// Giao diện vừa được nạp (lần đầu, hoặc WebView bị hệ điều hành tạo lại).
@@ -75,7 +80,7 @@ fn touch(state: State<AppState>) -> AppResult<()> {
 /// (đổi cỡ chữ, thu hồi bộ nhớ…) — mọi bộ đếm "khoá khi ở nền" trong trang cũ đã mất, nên khoá lại
 /// cho chắc. Trên máy tính thì app chủ động nạp lại trang sau khi mở khoá (để xoá master password
 /// khỏi bộ nhớ của WebView), nên không khoá.
-#[tauri::command]
+#[tauri::command(async)]
 fn page_loaded(state: State<AppState>) -> AppResult<()> {
     if cfg!(mobile) {
         with(&state, |s| {
@@ -112,20 +117,32 @@ async fn unlock(app: tauri::AppHandle, path: String, password: String) -> AppRes
     .await
 }
 
-/// File kho hỏng: dựng lại từ thư mục sao lưu. `allow_older` (JS: `allowOlder`): chủ kho đã chọn
-/// rõ ràng khôi phục từ các bản sao lưu tạo trước lần đổi mật khẩu chính gần nhất.
+/// File kho hỏng: dựng lại từ thư mục sao lưu. Các lựa chọn rõ ràng của chủ kho (JS: camelCase):
+/// `allow_older` — khôi phục từ các bản sao lưu tạo trước lần đổi mật khẩu chính gần nhất;
+/// `allow_stale` — chấp nhận bản dựng lại cũ hơn dữ liệu máy này từng thấy; `replace_newer` — file
+/// kho báo "định dạng mới hơn" vẫn được cất đi và thay.
 #[tauri::command]
 async fn recover_vault(
     app: tauri::AppHandle,
     path: String,
     password: String,
     allow_older: bool,
+    allow_stale: Option<bool>,
+    replace_newer: Option<bool>,
 ) -> AppResult<RecoverInfo> {
     let password = Zeroizing::new(password);
     blocking(move || {
         let state = app.state::<AppState>();
         let mut s = lock_state(&state);
-        s.recover(&PathBuf::from(path), &password, allow_older)
+        s.recover_with(
+            &PathBuf::from(path),
+            &password,
+            RecoverOpts {
+                allow_older,
+                allow_stale: allow_stale.unwrap_or(false),
+                replace_newer: replace_newer.unwrap_or(false),
+            },
+        )
     })
     .await
 }
@@ -151,52 +168,57 @@ fn set_vault_path(state: State<AppState>, path: String) -> AppResult<()> {
     with(&state, |s| s.set_vault_path(&PathBuf::from(path)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_entries(state: State<AppState>, query: String) -> AppResult<Vec<EntrySummary>> {
     with(&state, |s| s.list(&query))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_entry(state: State<AppState>, id: String) -> AppResult<EntryDetail> {
     with(&state, |s| s.detail(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reveal_password(state: State<AppState>, id: String) -> AppResult<String> {
     with(&state, |s| s.reveal_password(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reveal_notes(state: State<AppState>, id: String) -> AppResult<String> {
     with(&state, |s| s.reveal_notes(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reveal_totp_secret(state: State<AppState>, id: String) -> AppResult<String> {
     with(&state, |s| s.reveal_totp_secret(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn password_history(state: State<AppState>, id: String) -> AppResult<Vec<HistoryView>> {
     with(&state, |s| s.history(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn totp_code(state: State<AppState>, id: String) -> AppResult<TotpCode> {
     with(&state, |s| s.totp(&id))
 }
 
 /// Sao chép trực tiếp từ Rust vào clipboard: bí mật không đi qua JavaScript.
-/// `field`: password | username | totp | url | notes | history:<n>.
+/// `field`: password | username | totp | url | notes | url:<n> | history:<n>. `updated_at` (JS
+/// `updatedAt`): thời điểm sửa của mục đang hiện — mục đã đổi ⇒ lỗi `entry_changed`.
 #[tauri::command(async)]
 fn copy_field(
     app: tauri::AppHandle,
     state: State<AppState>,
     id: String,
     field: String,
+    updated_at: Option<i64>,
 ) -> AppResult<u32> {
     let (value, secs) = with(&state, |s| {
-        Ok((s.field_value(&id, &field)?, s.config.clipboard_clear_secs))
+        Ok((
+            s.field_value_checked(&id, &field, updated_at)?,
+            s.config.clipboard_clear_secs,
+        ))
     })?;
     copy_with_auto_clear(&app, value, secs)?;
     Ok(secs)
@@ -233,7 +255,7 @@ fn toggle_favorite(state: State<AppState>, id: String) -> AppResult<bool> {
     with(&state, |s| s.toggle_favorite(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_trash(state: State<AppState>) -> AppResult<Vec<TrashItem>> {
     with(&state, |s| s.list_trash())
 }
@@ -332,9 +354,78 @@ fn delete_imported_csv(state: State<AppState>) -> AppResult<()> {
     with(&state, |s| s.delete_imported_csv())
 }
 
+/// `copy_only` (JS `copyOnly`): chỉ ghi một bản sao sang chỗ mới, không đụng gì ở chỗ cũ.
 #[tauri::command(async)]
-fn move_vault(state: State<AppState>, path: String) -> AppResult<MoveView> {
-    with(&state, |s| s.move_vault(&PathBuf::from(path)))
+fn move_vault(
+    state: State<AppState>,
+    path: String,
+    copy_only: Option<bool>,
+) -> AppResult<MoveView> {
+    with(&state, |s| {
+        s.move_vault(&PathBuf::from(path), copy_only.unwrap_or(false))
+    })
+}
+
+// ----------------------------------------------------------------------------- bản nháp & mật khẩu vừa tạo
+
+/// Đặt (chuỗi) hoặc xoá (`null`) bản nháp của form đang sửa.
+#[tauri::command(async)]
+fn set_draft(state: State<AppState>, draft: Option<String>) -> AppResult<()> {
+    let draft = draft.map(Zeroizing::new);
+    with(&state, |s| s.set_draft(draft))
+}
+
+#[tauri::command(async)]
+fn get_draft(state: State<AppState>) -> AppResult<Option<String>> {
+    with(&state, |s| s.draft())
+}
+
+#[tauri::command(async)]
+fn record_generated(state: State<AppState>, value: String, label: Option<String>) -> AppResult<()> {
+    let value = Zeroizing::new(value);
+    with(&state, |s| s.record_generated(value, label))
+}
+
+#[tauri::command(async)]
+fn list_generated(state: State<AppState>) -> AppResult<Vec<GeneratedView>> {
+    with(&state, |s| s.list_generated())
+}
+
+#[tauri::command(async)]
+fn reveal_generated(state: State<AppState>, id: String) -> AppResult<String> {
+    with(&state, |s| Ok(s.generated_value(&id)?.to_string()))
+}
+
+#[tauri::command(async)]
+fn copy_generated(app: tauri::AppHandle, state: State<AppState>, id: String) -> AppResult<u32> {
+    let (value, secs) = with(&state, |s| {
+        Ok((s.generated_value(&id)?, s.config.clipboard_clear_secs))
+    })?;
+    copy_with_auto_clear(&app, value, secs)?;
+    Ok(secs)
+}
+
+#[tauri::command(async)]
+fn clear_generated(state: State<AppState>) -> AppResult<()> {
+    with(&state, |s| s.clear_generated())
+}
+
+/// Quét (một lần cho mỗi khoá) xem kho có cần đổi mật khẩu chính để thay khoá không (0.1.x).
+#[tauri::command(async)]
+fn check_rekey(state: State<AppState>) -> AppResult<bool> {
+    with(&state, |s| s.check_rekey())
+}
+
+/// Ghi bản lưu riêng trên máy này ra vị trí file kho đã cấu hình (không bao giờ ghi đè).
+#[tauri::command(async)]
+fn restore_local_copy(state: State<AppState>) -> AppResult<()> {
+    with(&state, |s| s.restore_local_copy())
+}
+
+/// File vừa chọn có phải bản xung đột của một file kho khác cùng thư mục không.
+#[tauri::command(async)]
+fn check_vault_choice(path: String) -> Option<ConflictHint> {
+    Session::conflict_hint(&PathBuf::from(path))
 }
 
 #[tauri::command(async)]
@@ -374,7 +465,7 @@ fn open_release_page(app: tauri::AppHandle, version: String) -> AppResult<()> {
         .map_err(|e| AppError::new("error", e.to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_settings(state: State<AppState>) -> AppResult<Settings> {
     with(&state, |s| Ok(s.settings()))
 }
@@ -384,7 +475,7 @@ fn set_settings(state: State<AppState>, settings: Settings) -> AppResult<()> {
     with(&state, |s| s.set_settings(settings))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn backups_dir(state: State<AppState>) -> AppResult<Option<String>> {
     with(&state, |s| {
         Ok(s.backups_dir().map(|p| p.display().to_string()))
@@ -607,20 +698,33 @@ impl ClipboardGuard {
             .is_some()
     }
 
-    fn remember(&self, value: Zeroizing<String>) -> u64 {
+    /// Đưa `value` vào clipboard (`set`) và ghi nhớ nó dưới CÙNG một khoá: không lần xoá nào chen
+    /// vào giữa được (nếu không, một bộ hẹn giờ cũ có thể "ghi nhớ" sai giá trị đang nằm trên clipboard).
+    fn set_and_remember(
+        &self,
+        value: Zeroizing<String>,
+        set: impl FnOnce(&str) -> AppResult<()>,
+    ) -> AppResult<u64> {
+        let mut p = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        set(&value)?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = Some((id, value));
-        id
+        *p = Some((id, value));
+        Ok(id)
     }
 
-    /// Lấy bí mật đang chờ xoá. `only`: chỉ lấy nếu đó vẫn là lần sao chép ấy (để bộ hẹn giờ cũ
-    /// không xoá sớm một lần sao chép mới hơn).
-    fn take(&self, only: Option<u64>) -> Option<Zeroizing<String>> {
+    /// Xoá bí mật đang chờ (`clear` nhận giá trị để chỉ xoá nếu clipboard vẫn giữ đúng nó). `only`:
+    /// chỉ khi đó vẫn là lần sao chép ấy (để bộ hẹn giờ cũ không xoá sớm một lần sao chép mới hơn).
+    /// Việc xoá diễn ra khi VẪN giữ khoá: `has_pending` chỉ trả false khi đã xoá xong, nên lần thoát
+    /// đang chờ không thể kết thúc tiến trình giữa chừng.
+    fn clear_with(&self, only: Option<u64>, clear: impl FnOnce(&str)) -> bool {
         let mut p = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         match (&*p, only) {
-            (Some((id, _)), Some(want)) if *id != want => None,
-            _ => p.take().map(|(_, v)| v),
+            (None, _) => return false,
+            (Some((id, _)), Some(want)) if *id != want => return false,
+            (Some((_, v)), _) => clear(v),
         }
+        *p = None;
+        true
     }
 }
 
@@ -629,8 +733,9 @@ fn copy_with_auto_clear(
     value: Zeroizing<String>,
     secs: u32,
 ) -> AppResult<()> {
-    set_clipboard(app, &value)?;
-    let id = app.state::<ClipboardGuard>().remember(value);
+    let id = app
+        .state::<ClipboardGuard>()
+        .set_and_remember(value, |v| set_clipboard(app, v))?;
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(u64::from(secs)));
@@ -641,9 +746,8 @@ fn copy_with_auto_clear(
 
 /// Xoá clipboard nếu nó vẫn đang giữ bí mật do app đưa vào.
 fn clear_clipboard_if_ours(app: &tauri::AppHandle, only: Option<u64>) {
-    if let Some(value) = app.state::<ClipboardGuard>().take(only) {
-        clear_clipboard(app, &value);
-    }
+    app.state::<ClipboardGuard>()
+        .clear_with(only, |value| clear_clipboard(app, value));
 }
 
 #[cfg(desktop)]
@@ -761,23 +865,6 @@ const LOCK_TICK: Duration = Duration::from_secs(5);
 /// điều hành "đóng băng" ở nền) ⇒ khoá ngay khi thức dậy, không chờ hết thời gian chờ.
 const SUSPEND_GAP: Duration = Duration::from_secs(40);
 
-fn lock_and_notify(app: &tauri::AppHandle, reason: &str, note: Option<&str>) {
-    let state = app.state::<AppState>();
-    let was_unlocked = {
-        let mut s = lock_state(&state);
-        let unlocked = s.vault.is_some();
-        match note {
-            Some(n) if unlocked => s.lock_because(n),
-            _ => s.lock(),
-        }
-        unlocked
-    };
-    if was_unlocked {
-        clear_clipboard_if_ours(app, None);
-        let _ = app.emit("vault-locked", reason);
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -785,10 +872,15 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // Mở lại app trong lúc nó đang ẩn chờ xoá clipboard: hiện lại cửa sổ và huỷ việc tự thoát.
-        app.state::<ClipboardGuard>()
+        let was_closing = app
+            .state::<ClipboardGuard>()
             .exit_when_cleared
-            .store(false, Ordering::SeqCst);
+            .swap(false, Ordering::SeqCst);
         if let Some(w) = app.get_webview_window("main") {
+            // Cửa sổ đang ẩn vì vừa đóng: chắc chắn trang không còn hiện gì của lần mở khoá cũ.
+            if was_closing {
+                let _ = w.eval("window.location.reload()");
+            }
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
@@ -799,7 +891,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
-        .manage::<AppState>(Mutex::new(Session::default()))
+        .manage::<AppState>(Shared::new(Session::default()))
         .manage(ClipboardGuard::default())
         .setup(|app| {
             // Điện thoại không có %APPDATA%: lưu cấu hình trong thư mục riêng của app.
@@ -817,59 +909,43 @@ pub fn run() {
             if let Ok(dir) = app.path().app_local_data_dir() {
                 lock_state(&app.state::<AppState>()).rescue_dir = Some(dir.join("rescue"));
             }
-            // Luồng tự khoá: chạy độc lập với giao diện, nên vẫn khoá kể cả khi JS bị treo.
+            // Luồng tự khoá: chạy độc lập với giao diện, nên vẫn khoá kể cả khi JS bị treo; và không
+            // bao giờ chờ khoá phiên (xem đầu file).
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                let mut last = SystemTime::now();
-                loop {
-                    std::thread::sleep(LOCK_TICK);
-                    let now = SystemTime::now();
-                    let gap = now.duration_since(last).unwrap_or(Duration::ZERO);
-                    last = now;
-                    if gap > SUSPEND_GAP {
-                        lock_and_notify(
-                            &handle,
-                            "suspend",
-                            Some("Kho đã tự khoá vì máy vừa ngủ hoặc app bị tạm dừng."),
-                        );
-                        continue;
-                    }
-                    let state = handle.state::<AppState>();
-                    let locked = lock_state(&state).auto_lock_if_idle();
-                    if locked {
-                        let _ = handle.emit("vault-locked", "idle");
-                    }
-                }
-            });
+            std::thread::spawn(move || auto_lock_loop(&handle));
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Đóng cửa sổ ⇒ xoá khoá khỏi RAM ngay.
-                lock_state(&window.state::<AppState>()).lock();
+                // Không khoá / ghi trên luồng giao diện: yêu cầu khoá (mọi lệnh đến sau đều thấy kho
+                // đã khoá), báo trang vứt bí mật, ẩn cửa sổ; luồng nền khoá + ghi rồi mới thoát.
+                api.prevent_close();
                 let app = window.app_handle().clone();
-                let guard = app.state::<ClipboardGuard>();
-                if cfg!(desktop) && guard.has_pending() {
-                    // Vừa chép một mật khẩu: nếu thoát ngay thì bộ hẹn giờ xoá clipboard chết theo
-                    // tiến trình và mật khẩu nằm lại vô thời hạn (lỗi của bản 0.1.2). Vì vậy chỉ ẨN
-                    // cửa sổ — người dùng vẫn kịp dán — rồi thoát hẳn ngay khi clipboard đã được xoá.
-                    api.prevent_close();
-                    let _ = window.hide();
-                    guard.exit_when_cleared.store(true, Ordering::SeqCst);
-                    std::thread::spawn(move || {
-                        let guard = app.state::<ClipboardGuard>();
+                app.state::<AppState>().request_lock(LOCK_CLOSE);
+                let _ = app.emit("vault-locked", "close");
+                let _ = window.hide();
+                app.state::<ClipboardGuard>()
+                    .exit_when_cleared
+                    .store(true, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    drop(lock_state(&app.state::<AppState>()));
+                    let guard = app.state::<ClipboardGuard>();
+                    if cfg!(desktop) {
+                        // Vừa chép một mật khẩu: nếu thoát ngay thì bộ hẹn giờ xoá clipboard chết theo
+                        // tiến trình (lỗi của bản 0.1.2). Cửa sổ đã ẩn — người dùng vẫn kịp dán — và app
+                        // thoát hẳn ngay khi clipboard đã được xoá xong.
                         let deadline = Instant::now()
                             + Duration::from_secs(u64::from(CLIPBOARD_CLEAR_SECS_MAX) + 5);
                         while guard.has_pending() && Instant::now() < deadline {
                             std::thread::sleep(Duration::from_millis(250));
                         }
-                        // Người dùng đã mở lại app trong lúc chờ ⇒ không thoát nữa.
-                        if guard.exit_when_cleared.swap(false, Ordering::SeqCst) {
-                            clear_clipboard_if_ours(&app, None);
-                            app.exit(0);
-                        }
-                    });
-                }
+                    }
+                    // Người dùng đã mở lại app trong lúc chờ ⇒ không thoát nữa.
+                    if guard.exit_when_cleared.swap(false, Ordering::SeqCst) {
+                        clear_clipboard_if_ours(&app, None);
+                        app.exit(0);
+                    }
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -922,6 +998,16 @@ pub fn run() {
             get_settings,
             set_settings,
             backups_dir,
+            set_draft,
+            get_draft,
+            record_generated,
+            list_generated,
+            reveal_generated,
+            copy_generated,
+            clear_generated,
+            check_rekey,
+            restore_local_copy,
+            check_vault_choice,
         ])
         .build(tauri::generate_context!())
         .expect("không khởi động được ứng dụng");
@@ -932,10 +1018,66 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
-            lock_state(&handle.state::<AppState>()).lock();
+            // Luồng chính: không chờ một thao tác đĩa đang treo.
+            let state = handle.state::<AppState>();
+            match state.try_lock() {
+                Some(mut s) => s.lock(),
+                None => {
+                    state.request_lock(LOCK_CLOSE);
+                }
+            }
             clear_clipboard_if_ours(handle, None);
         }
     });
+}
+
+/// Mỗi `LOCK_TICK`: tự khoá khi hết giờ hoặc khi máy vừa ngủ. Lấy khoá phiên bằng `try_lock`; nếu
+/// một luồng khác đang giữ (thao tác đĩa chậm), quyết định bằng đồng hồ hoạt động + trạng thái đã
+/// biết ở lần trước, rồi yêu cầu khoá mà không chờ.
+fn auto_lock_loop(handle: &tauri::AppHandle) {
+    let mut last = SystemTime::now();
+    // (đang mở khoá, số phút tự khoá) — đọc ở lần lấy được khoá phiên gần nhất.
+    let mut known = (false, 0u32);
+    loop {
+        std::thread::sleep(LOCK_TICK);
+        let now = SystemTime::now();
+        let gap = now.duration_since(last).unwrap_or(Duration::ZERO);
+        last = now;
+        let suspend = gap > SUSPEND_GAP;
+        let state = handle.state::<AppState>();
+        if let Some(mut s) = state.try_lock() {
+            known = (s.vault.is_some(), s.config.auto_lock_minutes);
+            if suspend && known.0 {
+                s.lock_because("Kho đã tự khoá vì máy vừa ngủ hoặc app bị tạm dừng.");
+                drop(s);
+                clear_clipboard_if_ours(handle, None);
+                let _ = handle.emit("vault-locked", "suspend");
+            } else if s.auto_lock_if_idle() {
+                drop(s);
+                let _ = handle.emit("vault-locked", "idle");
+            }
+            continue;
+        }
+        if should_lock_while_busy(known, suspend, state.activity.idle()) {
+            let reason = if suspend { LOCK_SUSPEND } else { LOCK_IDLE };
+            if state.request_lock(reason) {
+                // Màn hình sạch NGAY; khoá giải mã bị xoá ngay khi khoá phiên rảnh.
+                let _ = handle.emit("vault-locked", if suspend { "suspend" } else { "idle" });
+                if suspend {
+                    clear_clipboard_if_ours(handle, None);
+                }
+                let h = handle.clone();
+                std::thread::spawn(move || drop(lock_state(&h.state::<AppState>())));
+                known.0 = false;
+            }
+        }
+    }
+}
+
+/// Khoá phiên đang bị giữ: có phải khoá không? `known` = (đang mở khoá, số phút tự khoá).
+fn should_lock_while_busy(known: (bool, u32), suspend: bool, idle: Duration) -> bool {
+    let (unlocked, mins) = known;
+    unlocked && (suspend || (mins > 0 && idle >= Duration::from_secs(u64::from(mins) * 60)))
 }
 
 #[cfg(test)]
@@ -945,17 +1087,74 @@ mod tests {
     #[test]
     fn clipboard_guard_only_lets_the_newest_timer_clear() {
         let g = ClipboardGuard::default();
-        assert!(g.take(None).is_none());
-        let first = g.remember(Zeroizing::new("mật khẩu 1".into()));
-        let second = g.remember(Zeroizing::new("mật khẩu 2".into()));
+        let ok = |_: &str| Ok(());
+        assert!(!g.clear_with(None, |_| panic!("không có gì để xoá")));
+        let first = g
+            .set_and_remember(Zeroizing::new("mật khẩu 1".into()), ok)
+            .unwrap();
+        let second = g
+            .set_and_remember(Zeroizing::new("mật khẩu 2".into()), ok)
+            .unwrap();
         assert_ne!(first, second);
         // Bộ hẹn giờ của lần sao chép đầu hết giờ: không được đụng vào lần sao chép thứ hai.
-        assert!(g.take(Some(first)).is_none());
-        assert_eq!(*g.take(Some(second)).unwrap(), "mật khẩu 2");
-        assert!(g.take(Some(second)).is_none(), "chỉ xoá một lần");
-        // Thoát app / khoá: lấy bất kể là lần nào.
-        g.remember(Zeroizing::new("mật khẩu 3".into()));
-        assert_eq!(*g.take(None).unwrap(), "mật khẩu 3");
+        assert!(!g.clear_with(Some(first), |_| panic!("không được xoá")));
+        let mut cleared = String::new();
+        assert!(g.clear_with(Some(second), |v| cleared = v.to_string()));
+        assert_eq!(cleared, "mật khẩu 2");
+        assert!(!g.clear_with(Some(second), |_| panic!("chỉ xoá một lần")));
+        // Thoát app / khoá: xoá bất kể là lần nào.
+        g.set_and_remember(Zeroizing::new("mật khẩu 3".into()), ok)
+            .unwrap();
+        assert!(g.clear_with(None, |v| assert_eq!(v, "mật khẩu 3")));
+        // Không đặt được clipboard ⇒ không ghi nhớ gì.
+        assert!(g
+            .set_and_remember(Zeroizing::new("x".into()), |_| Err("lỗi".into()))
+            .is_err());
+        assert!(!g.has_pending());
+    }
+
+    /// Đang có lần xoá clipboard dở dang (giữ khoá của bộ bảo vệ) ⇒ `has_pending` chờ nó xong, nên
+    /// vòng chờ trước khi thoát không thể kết thúc tiến trình giữa chừng.
+    #[test]
+    fn pending_clear_is_visible_until_it_finishes() {
+        let g = std::sync::Arc::new(ClipboardGuard::default());
+        g.set_and_remember(Zeroizing::new("bí mật".into()), |_| Ok(()))
+            .unwrap();
+        let g2 = g.clone();
+        let t = std::thread::spawn(move || {
+            g2.clear_with(None, |_| std::thread::sleep(Duration::from_millis(200)))
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        assert!(!g.has_pending());
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "phải chờ lần xoá xong"
+        );
+        assert!(t.join().unwrap());
+    }
+
+    #[test]
+    fn busy_session_still_locks_on_time() {
+        let five = Duration::from_secs(5 * 60);
+        assert!(should_lock_while_busy((true, 5), false, five));
+        assert!(!should_lock_while_busy(
+            (true, 5),
+            false,
+            five - Duration::from_secs(1)
+        ));
+        assert!(
+            should_lock_while_busy((true, 5), true, Duration::ZERO),
+            "máy vừa ngủ"
+        );
+        assert!(
+            !should_lock_while_busy((true, 0), false, five * 100),
+            "tự khoá tắt"
+        );
+        assert!(
+            !should_lock_while_busy((false, 5), true, five),
+            "đã khoá sẵn"
+        );
     }
 
     #[test]

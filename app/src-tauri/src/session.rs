@@ -186,7 +186,9 @@ impl Activity {
     }
     /// Thời gian không hoạt động.
     pub fn idle(&self) -> Duration {
-        let d = self.now_ms().saturating_sub(self.last_ms.load(Ordering::SeqCst));
+        let d = self
+            .now_ms()
+            .saturating_sub(self.last_ms.load(Ordering::SeqCst));
         Duration::from_millis(u64::try_from(d).unwrap_or(0))
     }
     #[cfg(test)]
@@ -251,6 +253,7 @@ impl Shared {
             .is_ok()
     }
 
+    #[cfg(test)]
     pub fn lock_pending(&self) -> bool {
         self.pending.load(Ordering::SeqCst) != 0
     }
@@ -358,7 +361,7 @@ pub struct Session {
     /// Kho mà bản lưu riêng (`last-<id>.pwv`) đã được gộp / kiểm tra trong phiên này.
     local_checked: Option<String>,
     /// Trạng thái kho của lần ghi bản lưu riêng gần nhất (để không ghi lại khi không có gì mới).
-    local_written: Option<(String, i64, i64, u64)>,
+    local_written: Option<(String, i64, i64, u64, usize, usize)>,
     /// Có bản sao lưu mở được khoá hiện tại bằng một mật khẩu chính khác (đổi mật khẩu kiểu 0.1.x).
     rekey_advised: bool,
 }
@@ -899,6 +902,12 @@ impl Session {
             disk_problem: self.disk_problem.clone(),
             lock_note: self.lock_note.clone(),
             auto_lock_minutes: self.config.auto_lock_minutes,
+            local_copy_at: if v.is_some() {
+                None
+            } else {
+                self.configured_local_copy_at()
+            },
+            rekey_advised: v.is_some() && self.rekey_advised,
         }
     }
 
@@ -924,6 +933,7 @@ impl Session {
     /// hiện file bị thay bằng bản cũ hơn).
     fn after_success(&mut self) {
         self.disk_problem = None;
+        self.write_local_copy();
         let Some(v) = self.vault.as_ref().filter(|v| !v.is_read_only()) else {
             return;
         };
@@ -1002,6 +1012,15 @@ impl Session {
             Ok(v) => v,
             Err(e) => return Err(self.explain_unlock_error(path, e)),
         };
+        // Bản mới đã từng mở kho này (có dấu khoá) mà file lại là định dạng 1 và đã đổi kể từ lần
+        // thấy gần nhất ⇒ một máy còn chạy bản 0.1.x vừa ghi lại nó.
+        let old_version_wrote = v.opened_version() == 1
+            && self.config.seen_key_tag(v.vault_id()) != 0
+            && self
+                .config
+                .seen
+                .get(v.vault_id())
+                .is_some_and(|m| m.modified_at != v.modified_at());
         if self.config.vault.as_deref() != Some(v.path()) {
             let vault_path = v.path().to_path_buf();
             self.update_config(|c| c.set_vault_path(&vault_path))?;
@@ -1017,19 +1036,33 @@ impl Session {
         self.disk_problem = None;
         self.writebacks = 0;
         self.pending = SyncResult::default();
+        self.rekey_advised = false;
         self.touch();
+        // Bản lưu riêng trên máy này: gộp lại những gì máy này đã lưu mà file kho vừa mở thiếu (ví dụ
+        // một máy khác ghi đè file khi chưa đồng bộ xong). Gộp là phép hợp an toàn: không bao giờ
+        // làm sống lại mục đã xoá hay đè lên thay đổi mới hơn.
+        let local_restored = self.merge_local_copy().map(|m| LocalRestoredView {
+            added: m.added,
+            updated: m.updated,
+            deleted: m.deleted,
+        });
         let (merged, rescue_kept) = self.merge_rescue_copies();
-        // Ghi lại ngay những gì vừa gộp (bản cứu hộ, bản xung đột). Vấn đề với file trên đĩa không
-        // chặn việc mở kho (nằm trong `sync.problem`); chỉ "mật khẩu đã đổi ở máy khác" mới trả lỗi.
+        // Ghi lại ngay những gì vừa gộp (bản lưu riêng, bản cứu hộ, bản xung đột). Vấn đề với file
+        // trên đĩa không chặn việc mở kho (nằm trong `sync.problem`); chỉ "mật khẩu đã đổi ở máy
+        // khác" mới trả lỗi.
         let sync = self.sync()?;
         if sync.problem.is_none() {
             self.delete_rescue_copies(&merged);
         }
+        let draft = self.load_stash().draft.map(|d| d.to_string());
         Ok(UnlockInfo {
             rollback,
             rescued: merged.len(),
             rescue_kept,
             sync,
+            draft,
+            local_restored,
+            old_version_wrote,
         })
     }
 
@@ -1063,36 +1096,92 @@ impl Session {
     /// `allow_older`: chủ kho đã đọc giải thích và chọn rõ ràng khôi phục từ các bản sao lưu tạo
     /// TRƯỚC lần đổi mật khẩu chính gần nhất (mật khẩu vừa nhập là mật khẩu cũ). Không có cờ này thì
     /// trường hợp đó trả lỗi `older_password`.
+    #[cfg(test)]
     pub fn recover(
         &mut self,
         path: &Path,
         password: &str,
         allow_older: bool,
     ) -> AppResult<RecoverInfo> {
-        let (v, files_used, newest_backup_at) = Vault::recover_from_backups_opts(
+        self.recover_with(
             path,
-            password.as_bytes(),
-            self.open_opts(),
-            allow_older,
-        )?;
-        // Lõi chỉ so với các bản trong thư mục sao lưu — mà ai có quyền ghi vào thư mục đồng bộ cũng
-        // xoá được các bản mới hơn. Máy này còn nhớ mốc riêng (ngoài thư mục đồng bộ): nếu nó đã biết
-        // một lần đổi mật khẩu mới hơn, hoặc một khoá mà kho dựng lại không hề biết, thì mật khẩu vừa
-        // nhập là mật khẩu CŨ ⇒ không ghi gì, báo như lõi; chỉ làm tiếp khi chủ kho chọn rõ ràng.
-        if !allow_older
-            && v.rollback_against(&self.config)
-                .is_some_and(|r| r.older_password || r.unknown_key)
-        {
-            drop(v);
-            return Err(VaultError::OlderPasswordBackups.into());
-        }
+            password,
+            RecoverOpts {
+                allow_older,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Như [`Session::recover`], với mọi lựa chọn rõ ràng của chủ kho ([`RecoverOpts`]).
+    ///
+    /// Thứ tự: dựng lại từ thư mục sao lưu (không có bản nào dùng được ⇒ từ bản lưu riêng rồi các
+    /// bản cứu hộ trên máy này); kiểm tra "mật khẩu cũ"; gộp bản lưu riêng + bản cứu hộ; kiểm tra
+    /// "cũ hơn dữ liệu máy này từng thấy" (`older_than_seen`) — tất cả TRƯỚC khi ghi gì vào thư mục kho.
+    pub fn recover_with(
+        &mut self,
+        path: &Path,
+        password: &str,
+        o: RecoverOpts,
+    ) -> AppResult<RecoverInfo> {
+        let (v, files_used, newest_backup_at, from_local, local_archived) =
+            match Vault::recover_from_backups_opts(
+                path,
+                password.as_bytes(),
+                self.open_opts(),
+                o.allow_older,
+            ) {
+                Ok((v, n, t)) => {
+                    // Lõi chỉ so với các bản trong thư mục sao lưu — mà ai có quyền ghi vào thư mục
+                    // đồng bộ cũng xoá được các bản mới hơn. Máy này còn nhớ mốc riêng (ngoài thư
+                    // mục đồng bộ): nếu nó đã biết một lần đổi mật khẩu mới hơn, hoặc một khoá mà kho
+                    // dựng lại không hề biết, thì mật khẩu vừa nhập là mật khẩu CŨ ⇒ không ghi gì.
+                    if !o.allow_older
+                        && v.rollback_against(&self.config)
+                            .is_some_and(|r| r.older_password || r.unknown_key)
+                    {
+                        drop(v);
+                        return Err(VaultError::OlderPasswordBackups.into());
+                    }
+                    (v, n, t, false, None)
+                }
+                Err(VaultError::NoUsableBackup) => {
+                    let (v, archived) = self.recover_from_local(path, password, o)?;
+                    let t = v.modified_at();
+                    (v, 1, t, true, archived)
+                }
+                Err(e) => return Err(e.into()),
+            };
         self.vault = Some(v);
         self.lock_note = None;
         self.disk_problem = None;
         self.pending = SyncResult::default();
+        self.rekey_advised = false;
+        self.merge_local_copy();
         let (merged, rescue_kept) = self.merge_rescue_copies();
+        if !from_local && !o.allow_older && !o.allow_stale {
+            let stale = self
+                .vault()?
+                .rollback_against(&self.config)
+                .filter(|r| r.file_modified_at < r.seen_modified_at);
+            if let Some(r) = stale {
+                self.vault = None;
+                return Err(older_than_seen(r.file_modified_at, r.seen_modified_at));
+            }
+        }
+        if o.replace_newer && matches!(Vault::peek(path), Err(VaultError::UnsupportedVersion(_))) {
+            if let Err(e) = fsutil::archive_file(
+                path,
+                BackupKind::Damaged,
+                pwv_vault_core::model::now_ms(),
+                path,
+            ) {
+                self.vault = None;
+                return Err(err(e));
+            }
+        }
         let archived = match self.vault_mut()?.force_write() {
-            Ok(a) => a,
+            Ok(a) => a.or(local_archived),
             Err(e) => {
                 self.vault = None;
                 return Err(e.into());
@@ -1116,7 +1205,96 @@ impl Session {
             newest_backup_at,
             archived: archived.map(|p| p.display().to_string()),
             rescue_kept,
+            from_local_copy: from_local,
         })
+    }
+
+    /// Không có bản sao lưu dùng được: lấy bản lưu riêng, rồi các bản cứu hộ (mới nhất trước) của
+    /// kho làm gốc. Mọi kiểm tra được làm trên bản đọc từ RAM; chỉ khi qua hết mới cất file hỏng và
+    /// ghi gốc đó thành file kho (không bao giờ ghi đè: `write_new`). Trả về kho và nơi cất file hỏng.
+    fn recover_from_local(
+        &mut self,
+        path: &Path,
+        password: &str,
+        o: RecoverOpts,
+    ) -> AppResult<(Vault, Option<PathBuf>)> {
+        let no_backup = || AppError::from(VaultError::NoUsableBackup);
+        let configured = self.config.vault.as_deref() == Some(path);
+        let id = configured
+            .then(|| self.config.last_vault_id.clone())
+            .flatten()
+            .or_else(|| Vault::peek(path).ok().map(|i| i.vault_id));
+        let Some(id) = id else {
+            return Err(no_backup());
+        };
+        let mut files: Vec<PathBuf> = self
+            .local_copy_path(&id)
+            .filter(|p| p.is_file())
+            .into_iter()
+            .collect();
+        let mut rescues = self.rescue_files(&id);
+        rescues.sort();
+        rescues.reverse();
+        files.extend(rescues);
+        let mut wrong = false;
+        let mut found = None;
+        for f in files {
+            let Ok(Some(bytes)) = fsutil::read_retry_capped(&f, fsutil::MAX_VAULT_FILE) else {
+                continue;
+            };
+            match Vault::open_bytes_with(path, &bytes, password.as_bytes(), self.open_opts()) {
+                Ok(ro) if ro.vault_id() == id => {
+                    found = Some((ro, bytes));
+                    break;
+                }
+                Err(VaultError::Decrypt) => wrong = true,
+                _ => {}
+            }
+        }
+        let Some((ro, bytes)) = found else {
+            return Err(if wrong {
+                VaultError::Decrypt.into()
+            } else {
+                no_backup()
+            });
+        };
+        if let Some(r) = ro.rollback_against(&self.config) {
+            if !o.allow_older && (r.older_password || r.unknown_key) {
+                return Err(VaultError::OlderPasswordBackups.into());
+            }
+            if !o.allow_older && !o.allow_stale && r.file_modified_at < r.seen_modified_at {
+                return Err(older_than_seen(r.file_modified_at, r.seen_modified_at));
+            }
+        }
+        // File kho chính còn đọc được header: không bao giờ thay một file của kho khác, một file ghi
+        // lần đổi mật khẩu mới hơn bản này, hay (trừ khi chủ kho chọn) một file định dạng mới hơn.
+        match Vault::peek(path) {
+            Ok(info) if info.vault_id != id => return Err(VaultError::DifferentVault.into()),
+            Ok(info) if info.key_changed_at > ro.key_changed_at() && !o.allow_older => {
+                return Err(VaultError::OlderPasswordBackups.into())
+            }
+            Err(VaultError::UnsupportedVersion(n)) if !o.replace_newer => {
+                return Err(VaultError::UnsupportedVersion(n).into())
+            }
+            _ => {}
+        }
+        drop(ro);
+        let archived = if path.exists() {
+            Some(
+                fsutil::archive_file(
+                    path,
+                    BackupKind::Damaged,
+                    pwv_vault_core::model::now_ms(),
+                    path,
+                )
+                .map_err(err)?,
+            )
+        } else {
+            None
+        };
+        fsutil::write_new(path, &bytes)?;
+        let v = Vault::open_with(path, password.as_bytes(), self.open_opts())?;
+        Ok((v, archived))
     }
 
     /// Mở kho chỉ đọc từ dữ liệu thô (điện thoại).
@@ -1166,7 +1344,9 @@ impl Session {
                 }
             }
         }
+        self.write_local_copy();
         self.vault = None;
+        self.rekey_advised = false;
         self.disk_problem = None;
         self.pending = SyncResult::default();
         self.lock_note = note;
@@ -1340,9 +1520,28 @@ impl Session {
 
     /// Giá trị cần sao chép. `field`: "password" | "username" | "totp" | "notes" | "url" (địa chỉ
     /// đầu tiên) | "url:<số thứ tự>" | "history:<số thứ tự>" (mật khẩu cũ).
+    #[cfg(test)]
     pub fn field_value(&mut self, id: &str, field: &str) -> AppResult<Zeroizing<String>> {
+        self.field_value_checked(id, field, None)
+    }
+
+    /// Như [`Session::field_value`]. `shown_updated_at`: thời điểm sửa của mục mà giao diện đang
+    /// hiện — khác với mục hiện tại (vừa đồng bộ về thay đổi) ⇒ lỗi `entry_changed`, để chỉ số
+    /// (`url:<i>`, `history:<i>`) không bao giờ chép nhầm một mục khác với thứ đang hiện.
+    pub fn field_value_checked(
+        &mut self,
+        id: &str,
+        field: &str,
+        shown_updated_at: Option<i64>,
+    ) -> AppResult<Zeroizing<String>> {
         self.touch();
         let e = self.entry(id)?;
+        if shown_updated_at.is_some_and(|t| t != e.updated_at) {
+            return Err(AppError::new(
+                "entry_changed",
+                "Mục này vừa thay đổi (có thể do đồng bộ từ máy khác) nên đã được tải lại — hãy bấm sao chép lại.",
+            ));
+        }
         let v = match field {
             "password" => e.password.clone(),
             "username" => e.username.clone(),
@@ -1406,7 +1605,7 @@ impl Session {
         let urls = input.urls.as_deref().map(clean_list);
         let tags = input.tags.as_deref().map(clean_list);
         let existing = input.id.clone().filter(|id| !id.is_empty());
-        self.mutate(|v| match existing {
+        let saved = self.mutate(|v| match existing {
             Some(id) => {
                 v.update(&id, |e| {
                     if let Some(t) = title {
@@ -1455,7 +1654,11 @@ impl Session {
                 e.totp = totp.flatten();
                 Ok(v.add(e))
             }
-        })
+        })?;
+        // Đã lưu ⇒ bản nháp của form này không còn cần (xoá trong CÙNG lệnh, để một lần app chết
+        // giữa "đã lưu" và "đã xoá nháp" không thể làm sống lại một bản nháp cũ).
+        let _ = self.set_draft(None);
+        Ok(saved)
     }
 
     /// Xoá = chuyển vào thùng rác.
@@ -1627,6 +1830,8 @@ impl Session {
         let r = v.change_password(new.as_bytes(), kdf);
         match r {
             Ok(report) => {
+                // Khoá mới ⇒ không còn bản sao lưu nào mở được khoá này bằng mật khẩu khác.
+                self.rekey_advised = false;
                 self.after_success();
                 // Ghi chưa kiểm tra lại được vẫn là đổi XONG: báo trong kết quả, không báo lỗi.
                 self.defer_notices(SyncResult {
@@ -1637,6 +1842,7 @@ impl Session {
                     backups_reencrypted: report.backups_reencrypted,
                     backups_skipped: report.backups_skipped,
                     unverified: report.save.unverified,
+                    backups_failed: report.backups_failed,
                 })
             }
             Err(e) => Err(self.vault_error(e)),
@@ -1834,23 +2040,443 @@ impl Session {
 
     // ------------------------------------------------------------------ chuyển kho / cài đặt
 
-    /// Chuyển kho đang mở sang vị trí mới và ghi nhớ vị trí đó.
-    pub fn move_vault(&mut self, new_path: &Path) -> AppResult<MoveView> {
+    /// Chuyển kho đang mở sang vị trí mới và ghi nhớ vị trí đó. `copy_only` ("lưu sang chỗ khác"
+    /// từ cảnh báo file kho có vấn đề): CHỈ ghi một bản sao, không đụng gì ở chỗ cũ.
+    ///
+    /// Lỗi ở đây là lỗi của VIỆC CHUYỂN (thường là ở chỗ mới: ổ đĩa không có, file đã tồn tại…):
+    /// trả mã `move_failed` và KHÔNG ghi nhận thành vấn đề của file kho hiện tại.
+    pub fn move_vault(&mut self, new_path: &Path, copy_only: bool) -> AppResult<MoveView> {
         self.touch();
-        let r = self.vault_mut()?.move_to(new_path);
+        let old_path = self.vault()?.path().display().to_string();
+        let v = self.vault_mut()?;
+        let r = if copy_only {
+            v.copy_to(new_path)
+        } else {
+            v.move_to(new_path)
+        };
         let r = match r {
             Ok(r) => r,
-            Err(e) => return Err(self.vault_error(e)),
+            Err(VaultError::PasswordChangedElsewhere) => {
+                return Err(self.vault_error(VaultError::PasswordChangedElsewhere))
+            }
+            Err(e) => {
+                return Err(AppError::new(
+                    "move_failed",
+                    format!("Chưa ghi được sang vị trí mới: {e}. Kho vẫn ở vị trí cũ."),
+                ))
+            }
         };
         let new_path = self.vault()?.path().to_path_buf();
         self.update_config(|c| c.set_vault_path(&new_path))?;
         self.after_success();
         Ok(MoveView {
+            old_path,
             new_path: new_path.display().to_string(),
             backups_moved: r.backups_moved,
             old_removed: r.old_removed,
             conflicts_merged: r.conflicts_merged,
             rescued: r.rescued,
+        })
+    }
+
+    // ------------------------------------------------------------------ bản nháp & mật khẩu vừa tạo
+
+    fn stash_path(&self, id: &str) -> Option<PathBuf> {
+        Some(
+            self.rescue_dir
+                .as_ref()?
+                .join(format!("stash-{}.bin", safe_id(id)?)),
+        )
+    }
+
+    /// Kho đang mở, ghi được (bản nháp chỉ có ở máy tính).
+    fn writable_vault(&self) -> AppResult<&Vault> {
+        let v = self.vault()?;
+        if v.is_read_only() {
+            return Err(VaultError::ReadOnly.into());
+        }
+        Ok(v)
+    }
+
+    /// Mở stash của kho đang mở: bản trong RAM (giữ qua lần khoá) nếu là của kho này, không thì file
+    /// trong thư mục riêng của app. Không mở được (khoá khác, hỏng) ⇒ coi như trống; file đó được
+    /// để nguyên cho tới lần ghi đầu tiên, khi nó được đổi tên để giữ lại.
+    fn load_stash(&mut self) -> StashData {
+        let Ok(v) = self.writable_vault() else {
+            return StashData::default();
+        };
+        let id = v.vault_id().to_string();
+        let (sealed, from_disk) = match &self.stash {
+            Some(st) if st.vault_id == id => (Some(st.sealed.clone()), false),
+            _ => (
+                self.stash_path(&id)
+                    .and_then(|p| fsutil::read_retry_capped(&p, MAX_STASH_FILE).ok().flatten()),
+                true,
+            ),
+        };
+        let Some(sealed) = sealed else {
+            return StashData::default();
+        };
+        let opened = v
+            .open_local(STASH_PURPOSE, &sealed)
+            .and_then(|pt| serde_json::from_slice::<StashData>(&pt).ok());
+        match opened {
+            Some(mut data) => {
+                data.prune(pwv_vault_core::model::now_ms());
+                data
+            }
+            None => {
+                if from_disk {
+                    self.stash_unreadable = Some(id);
+                }
+                StashData::default()
+            }
+        }
+    }
+
+    /// Niêm phong và cất stash: trong RAM, và (cố gắng) ghi nguyên tử vào thư mục riêng của app.
+    fn store_stash(&mut self, mut data: StashData) -> AppResult<()> {
+        data.prune(pwv_vault_core::model::now_ms());
+        let v = self.writable_vault()?;
+        let id = v.vault_id().to_string();
+        let empty = data.is_empty();
+        let plain = Zeroizing::new(serde_json::to_vec(&data).map_err(err)?);
+        drop(data);
+        let sealed = v.seal_local(STASH_PURPOSE, &plain)?;
+        drop(plain);
+        if let Some(p) = self.stash_path(&id) {
+            if self.stash_unreadable.as_deref() == Some(id.as_str()) && p.exists() {
+                let kept = p.with_file_name(format!(
+                    "stash-{id}.unreadable-{}.bin",
+                    pwv_vault_core::model::now_ms()
+                ));
+                let _ = std::fs::rename(&p, kept);
+            }
+            self.stash_unreadable = None;
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if empty {
+                let _ = std::fs::remove_file(&p);
+            } else {
+                let _ = fsutil::atomic_write(&p, &sealed);
+            }
+        }
+        self.stash = Some(SealedStash {
+            vault_id: id,
+            sealed,
+        });
+        Ok(())
+    }
+
+    /// Đặt (`Some`) hoặc xoá (`None`) bản nháp. Bản nháp quá lớn ⇒ không giữ (bản cũ cũng bị xoá
+    /// để không bao giờ khôi phục một bản nháp lỗi thời) và trả lỗi `draft_too_large`.
+    pub fn set_draft(&mut self, draft: Option<Zeroizing<String>>) -> AppResult<()> {
+        self.writable_vault()?;
+        let too_large = draft.as_ref().is_some_and(|d| d.len() > MAX_DRAFT_BYTES);
+        let mut data = self.load_stash();
+        if data.draft.is_none() && draft.is_none() && !too_large {
+            return Ok(());
+        }
+        data.draft = if too_large { None } else { draft };
+        self.store_stash(data)?;
+        if too_large {
+            return Err(AppError::new(
+                "draft_too_large",
+                "Bản nháp quá lớn, chưa được giữ.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Bản nháp đang giữ (nếu có).
+    pub fn draft(&mut self) -> AppResult<Option<String>> {
+        self.writable_vault()?;
+        Ok(self.load_stash().draft.map(|d| d.to_string()))
+    }
+
+    /// Ghi nhớ một mật khẩu vừa rời bộ tạo mật khẩu (đã sao chép / đã dùng). `label`: tiêu đề mục
+    /// đang sửa, nếu có. Giữ 20 mật khẩu mới nhất, không quá 30 ngày.
+    pub fn record_generated(
+        &mut self,
+        value: Zeroizing<String>,
+        label: Option<String>,
+    ) -> AppResult<()> {
+        self.touch();
+        self.writable_vault()?;
+        if value.is_empty() {
+            return Err("Không có gì để ghi nhớ".into());
+        }
+        let label = label
+            .map(|l| l.trim().chars().take(200).collect::<String>())
+            .filter(|l| !l.is_empty());
+        let mut data = self.load_stash();
+        let now = pwv_vault_core::model::now_ms();
+        if let Some(g) = data.generated.iter_mut().find(|g| g.value == value) {
+            g.at = now;
+            if label.is_some() {
+                g.label = label;
+            }
+        } else {
+            let mut n = now;
+            while data.generated.iter().any(|g| g.id == format!("g{n}")) {
+                n += 1;
+            }
+            data.generated.push(GeneratedItem {
+                id: format!("g{n}"),
+                value,
+                at: now,
+                label,
+            });
+        }
+        self.store_stash(data)
+    }
+
+    /// Các mật khẩu vừa tạo (mới nhất trước), KHÔNG kèm giá trị.
+    pub fn list_generated(&mut self) -> AppResult<Vec<GeneratedView>> {
+        self.writable_vault()?;
+        Ok(self
+            .load_stash()
+            .generated
+            .iter()
+            .map(|g| GeneratedView {
+                id: g.id.clone(),
+                at: g.at,
+                label: g.label.clone(),
+            })
+            .collect())
+    }
+
+    /// Giá trị của một mật khẩu vừa tạo (để hiện hoặc sao chép).
+    pub fn generated_value(&mut self, id: &str) -> AppResult<Zeroizing<String>> {
+        self.touch();
+        self.writable_vault()?;
+        self.load_stash()
+            .generated
+            .iter()
+            .find(|g| g.id == id)
+            .map(|g| g.value.clone())
+            .ok_or_else(|| {
+                AppError::new(
+                    "not_found",
+                    "Không còn mật khẩu này trong danh sách (đã quá 30 ngày hoặc đã bị xoá)",
+                )
+            })
+    }
+
+    pub fn clear_generated(&mut self) -> AppResult<()> {
+        self.writable_vault()?;
+        let mut data = self.load_stash();
+        data.generated.clear();
+        self.store_stash(data)
+    }
+
+    // ------------------------------------------------------------------ bản lưu riêng trên máy này
+
+    fn local_copy_path(&self, id: &str) -> Option<PathBuf> {
+        Some(
+            self.rescue_dir
+                .as_ref()?
+                .join(format!("last-{}.pwv", safe_id(id)?)),
+        )
+    }
+
+    /// Thời điểm (ms) của bản lưu riêng của kho đã cấu hình, nếu có (cho màn hình "không thấy file").
+    fn configured_local_copy_at(&self) -> Option<i64> {
+        let id = self.config.last_vault_id.as_deref()?;
+        let m = std::fs::metadata(self.local_copy_path(id)?).ok()?;
+        let t = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(i64::try_from(t.as_millis()).unwrap_or(i64::MAX))
+    }
+
+    /// Đổi tên một bản lưu riêng không gộp được thành tên bản cứu hộ (`<vault_id>-<ms>.pwv`), để nó
+    /// vào luồng "bản cứu hộ" sẵn có (được giữ, đếm, thử gộp lại) thay vì bị ghi đè.
+    fn preserve_local_copy(&self, p: &Path, id: &str) {
+        let Some(dir) = p.parent() else {
+            return;
+        };
+        let mut ts = pwv_vault_core::model::now_ms();
+        let mut target = dir.join(format!("{id}-{ts}.pwv"));
+        while target.exists() {
+            ts += 1;
+            target = dir.join(format!("{id}-{ts}.pwv"));
+        }
+        let _ = std::fs::rename(p, target);
+    }
+
+    /// Ghi (nguyên tử, cố gắng) toàn bộ kho đang mở vào thư mục riêng của app: `last-<id>.pwv`.
+    /// Gọi sau mỗi lần đọc/ghi thành công và khi khoá; chỉ ghi khi trạng thái kho đổi.
+    fn write_local_copy(&mut self) {
+        let Some(v) = self.vault.as_ref().filter(|v| !v.is_read_only()) else {
+            return;
+        };
+        let id = v.vault_id().to_string();
+        // Dấu nhận biết "trạng thái kho đã đổi". Số mục / số mục trong thùng rác cũng tham gia: một lần
+        // gộp chỉ mang về thứ CŨ hơn lần sửa gần nhất của máy này (mục máy khác thêm, lệnh xoá của
+        // máy khác) không làm đổi `modified_at`, nhưng bản lưu riêng vẫn nên có nó.
+        let sig = (
+            id.clone(),
+            v.modified_at(),
+            v.key_changed_at(),
+            v.key_tag(),
+            v.entries().len(),
+            v.trash().len(),
+        );
+        let Some(p) = self.local_copy_path(&id) else {
+            return;
+        };
+        if self.local_written.as_ref() == Some(&sig) && p.exists() {
+            return;
+        }
+        let Ok(bytes) = v.export_bytes() else {
+            return;
+        };
+        // Bản có sẵn mà phiên này chưa gộp / kiểm tra được thì không bao giờ bị ghi đè.
+        if self.local_checked.as_deref() != Some(id.as_str()) && p.exists() {
+            self.preserve_local_copy(&p, &id);
+        }
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if fsutil::atomic_write(&p, &bytes).is_ok() {
+            self.local_written = Some(sig);
+            self.local_checked = Some(id);
+        }
+    }
+
+    /// Gộp bản lưu riêng của kho đang mở. Trả về số mục thay đổi nếu nó thêm được gì. Không gộp được
+    /// (khoá mà kho này không biết, hỏng) ⇒ đổi tên thành bản cứu hộ ngay (được giữ và đếm).
+    fn merge_local_copy(&mut self) -> Option<MergeStats> {
+        let id = self
+            .vault
+            .as_ref()
+            .filter(|v| !v.is_read_only())?
+            .vault_id()
+            .to_string();
+        let p = self.local_copy_path(&id)?;
+        if !p.exists() {
+            self.local_checked = Some(id);
+            return None;
+        }
+        let r = self.vault.as_mut()?.merge_file(&p);
+        self.local_checked = Some(id.clone());
+        match r {
+            Ok(m) => m.changed().then_some(m),
+            Err(_) => {
+                self.preserve_local_copy(&p, &id);
+                self.local_written = None;
+                None
+            }
+        }
+    }
+
+    /// Kho đang khoá và file kho đã cấu hình không còn: ghi bản lưu riêng của nó ra đúng vị trí đó.
+    /// Không bao giờ ghi đè một file đã có (kể cả file vừa được dịch vụ đồng bộ đưa về).
+    pub fn restore_local_copy(&mut self) -> AppResult<()> {
+        if self.vault.is_some() {
+            return Err("Hãy khoá kho trước".into());
+        }
+        let path = self.config.vault.clone().ok_or("Chưa chọn file kho")?;
+        let id = self
+            .config
+            .last_vault_id
+            .clone()
+            .ok_or("Máy này không có bản lưu riêng của kho này")?;
+        let src = self
+            .local_copy_path(&id)
+            .ok_or("Máy này không có bản lưu riêng của kho này")?;
+        let bytes = fsutil::read_retry_capped(&src, fsutil::MAX_VAULT_FILE)
+            .map_err(err)?
+            .ok_or("Bản lưu riêng quá lớn")?;
+        match Vault::peek(&src) {
+            Ok(info) if info.vault_id == id => {}
+            _ => return Err("Bản lưu riêng trên máy này không đọc được".into()),
+        }
+        fsutil::write_new(&path, &bytes).map_err(|e| match e {
+            VaultError::AlreadyExists(_) => AppError::new(
+                "error",
+                "Đã có một file ở vị trí kho (có thể dịch vụ đồng bộ vừa đưa file về) — app không ghi đè. Hãy bấm “Thử lại”.",
+            ),
+            other => AppError::from(other),
+        })?;
+        self.lock_note = None;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ đổi khoá một lần (0.1.x)
+
+    /// Kho này từng được đổi mật khẩu chính bằng bản 0.1.x (đổi mật khẩu mà giữ nguyên khoá)? Quét
+    /// thư mục sao lưu một lần cho mỗi khoá (ghi nhớ trong cấu hình khi không thấy gì).
+    pub fn check_rekey(&mut self) -> AppResult<bool> {
+        let v = self.vault()?;
+        if v.is_read_only() {
+            return Ok(false);
+        }
+        let (id, tag) = (v.vault_id().to_string(), v.key_tag());
+        if self.config.wrap_scan_clean(&id, tag) {
+            self.rekey_advised = false;
+            return Ok(false);
+        }
+        let Ok(n) = v.backups_under_other_password() else {
+            return Ok(self.rekey_advised);
+        };
+        if n == 0 {
+            self.rekey_advised = false;
+            let _ = self.update_config(|c| {
+                c.set_wrap_scan_clean(&id, tag);
+            });
+        } else {
+            self.rekey_advised = true;
+        }
+        Ok(self.rekey_advised)
+    }
+
+    // ------------------------------------------------------------------ chọn file kho
+
+    /// File vừa chọn có vẻ là BẢN XUNG ĐỘT (do dịch vụ đồng bộ tạo) của một file kho khác trong cùng
+    /// thư mục: cùng mã kho, và tên của nó bắt đầu bằng tên file kia rồi dài hơn (`vault (1)`,
+    /// `vault (conflicted copy …)`, `vault-PC2`). Chỉ đọc header, không cần mật khẩu.
+    pub fn conflict_hint(picked: &Path) -> Option<ConflictHint> {
+        let info = Vault::peek(picked).ok()?;
+        let stem = picked.file_stem()?.to_string_lossy().to_string();
+        let dir = picked.parent()?;
+        let mut best: Option<(usize, PathBuf)> = None;
+        for p in std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .take(2000)
+        {
+            if p == picked || p.extension().is_none_or(|e| !e.eq_ignore_ascii_case("pwv")) {
+                continue;
+            }
+            let Some(other) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if other.is_empty() || stem.len() <= other.len() || !stem.starts_with(&other) {
+                continue;
+            }
+            if best.as_ref().is_some_and(|(n, _)| *n >= other.len()) {
+                continue;
+            }
+            if Vault::peek(&p).is_ok_and(|o| o.vault_id == info.vault_id) {
+                best = Some((other.len(), p));
+            }
+        }
+        let (_, orig) = best?;
+        let name = |p: &Path| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        };
+        Some(ConflictHint {
+            picked_name: name(picked),
+            original_name: name(&orig),
+            original_path: orig.display().to_string(),
         })
     }
 
@@ -1870,6 +2496,18 @@ impl Session {
                 .clamp(CLIPBOARD_CLEAR_SECS_MIN, CLIPBOARD_CLEAR_SECS_MAX);
             c.check_updates = s.check_updates;
         })
+    }
+}
+
+/// Lỗi `older_than_seen`: bản dựng lại cũ hơn dữ liệu máy này từng thấy (kèm hai mốc thời gian).
+fn older_than_seen(file_modified_at: i64, seen_modified_at: i64) -> AppError {
+    AppError {
+        code: "older_than_seen".into(),
+        message: "Bản dựng lại được cũ hơn dữ liệu máy này từng thấy — có thể các bản sao lưu mới hơn chưa đồng bộ về máy này.".into(),
+        detail: Some(ErrorDetail {
+            file_modified_at,
+            seen_modified_at,
+        }),
     }
 }
 
@@ -2280,11 +2918,9 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"dong bo do", "không tự ghi đè");
 
         // Tự khoá trong lúc file còn hỏng: bản tốt duy nhất (trong RAM) được ghi thành bản cứu hộ…
+        let id = vid(&s);
         s.lock();
-        assert_eq!(
-            std::fs::read_dir(d.path().join("rescue")).unwrap().count(),
-            1
-        );
+        assert_eq!(s.rescue_files(&id).len(), 1);
         // …mở khoá thì báo file hỏng; "khôi phục" dựng lại từ sao lưu + bản cứu hộ, không thiếu gì.
         assert_eq!(s.unlock(&p, MP).unwrap_err().code, "file_damaged");
         let r = s.recover(&p, MP, false).unwrap();
@@ -2292,10 +2928,7 @@ mod tests {
         assert!(r.archived.is_some());
         assert_eq!(titles(&s), ["A", "B"]);
         assert_eq!(other_device(&p).entries().len(), 2);
-        assert_eq!(
-            std::fs::read_dir(d.path().join("rescue")).unwrap().count(),
-            0
-        );
+        assert_eq!(s.rescue_files(&id).len(), 0);
         assert!(s.status().disk_problem.is_none());
     }
 
@@ -2351,8 +2984,20 @@ mod tests {
             .rollback
             .expect("phải cảnh báo file cũ hơn bản đã thấy");
         assert!(rb.file_modified_at < rb.seen_modified_at && !rb.older_password);
+        // Bản lưu riêng trên máy này gộp lại B (và file kho được ghi lại).
+        assert_eq!(info.local_restored.map(|l| l.added), Some(1));
+        assert_eq!(titles(&s), ["A", "B"]);
+        s.lock();
+        assert!(s.unlock(&p, MP).unwrap().rollback.is_none(), "đã tự lành");
+        // Máy này không có bản lưu riêng (ví dụ vừa cập nhật từ bản cũ): cảnh báo lặp lại ở mỗi lần
+        // mở cho tới khi người dùng bấm "đã hiểu".
+        let id = vid(&s);
+        s.lock();
+        std::fs::write(&p, &old).unwrap();
+        std::fs::remove_file(local_file(&d, &id)).unwrap();
+        let info = s.unlock(&p, MP).unwrap();
+        assert!(info.rollback.is_some() && info.local_restored.is_none());
         assert_eq!(titles(&s), ["A"]);
-        // Cảnh báo lặp lại ở mỗi lần mở cho tới khi người dùng bấm "đã hiểu".
         s.lock();
         assert!(s.unlock(&p, MP).unwrap().rollback.is_some());
         s.accept_rollback().unwrap();
@@ -2414,10 +3059,10 @@ mod tests {
         let p = open(&mut s, &d);
         s.save_entry(input("A", Some("a"))).unwrap();
         s.save_entry(input("B", Some("b"))).unwrap();
-        assert!(s.move_vault(&backup_dir(&p).join("v.pwv")).is_err());
+        assert!(s.move_vault(&backup_dir(&p).join("v.pwv"), false).is_err());
         assert_eq!(other_device(&p).entries().len(), 2, "kho cũ còn nguyên");
         let target = d.path().join("Dropbox").join("vault.pwv");
-        let r = s.move_vault(&target).unwrap();
+        let r = s.move_vault(&target, false).unwrap();
         assert!(r.old_removed && r.backups_moved && !r.rescued);
         assert_eq!(s.list("").unwrap().len(), 2);
         assert_eq!(s.config.vault.as_deref(), Some(target.as_path()));
@@ -2691,6 +3336,8 @@ mod tests {
         s2.create_vault(&p2, MP).unwrap();
         s2.lock();
         let _ = std::fs::remove_dir_all(backup_dir(&p2));
+        // (và máy này cũng không còn bản lưu riêng nào của kho)
+        let _ = std::fs::remove_dir_all(d2.path().join("rescue"));
         std::fs::write(&p2, b"hong").unwrap();
         assert_eq!(s2.recover(&p2, MP, false).unwrap_err().code, "no_backup");
     }
@@ -2826,5 +3473,543 @@ mod tests {
         assert_eq!(traces, ["v.pwv"]);
         std::fs::remove_file(&p).unwrap();
         assert_eq!(Session::existing_vault_traces(&p), ["v.pwv.backups"]);
+    }
+
+    // ------------------------------------------------------------------ fix2: bản nháp (P1)
+
+    fn vid(s: &Session) -> String {
+        s.vault.as_ref().unwrap().vault_id().to_string()
+    }
+
+    fn stash_file(d: &tempfile::TempDir, id: &str) -> PathBuf {
+        d.path().join("rescue").join(format!("stash-{id}.bin"))
+    }
+
+    fn local_file(d: &tempfile::TempDir, id: &str) -> PathBuf {
+        d.path().join("rescue").join(format!("last-{id}.pwv"))
+    }
+
+    /// Một lần chạy app mới trên cùng máy (cùng thư mục riêng, cùng cấu hình).
+    fn restart(s: &Session) -> (Session, tempfile::TempDir) {
+        let (mut s2, d2) = session();
+        s2.rescue_dir = s.rescue_dir.clone();
+        s2.config = s.config.clone();
+        (s2, d2)
+    }
+
+    #[test]
+    fn draft_survives_lock_and_restart_and_is_never_on_disk_in_clear() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        assert!(s.unlock(&p, MP).is_ok());
+        s.set_draft(z("{\"pw\":\"mat-khau-vua-tao-XYZ\"}")).unwrap();
+        let id = vid(&s);
+        let on_disk = std::fs::read(stash_file(&d, &id)).unwrap();
+        assert!(!String::from_utf8_lossy(&on_disk).contains("mat-khau-vua-tao-XYZ"));
+        s.lock();
+        assert_eq!(s.draft().unwrap_err().code, "locked");
+        let info = s.unlock(&p, MP).unwrap();
+        assert_eq!(
+            info.draft.as_deref(),
+            Some("{\"pw\":\"mat-khau-vua-tao-XYZ\"}")
+        );
+        // App thoát / máy khởi động lại: đọc lại từ file trong thư mục riêng.
+        s.lock();
+        let (mut s2, _d2) = restart(&s);
+        drop(s);
+        let info = s2.unlock(&p, MP).unwrap();
+        assert_eq!(
+            info.draft.as_deref(),
+            Some("{\"pw\":\"mat-khau-vua-tao-XYZ\"}")
+        );
+    }
+
+    #[test]
+    fn draft_is_cleared_by_a_successful_save_and_by_discard() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.set_draft(z("dang sua")).unwrap();
+        // Lưu không thành công (tiêu đề trống) ⇒ bản nháp còn nguyên.
+        assert!(s.save_entry(EntryInput::default()).is_err());
+        assert_eq!(s.draft().unwrap().as_deref(), Some("dang sua"));
+        s.save_entry(input("A", Some("a"))).unwrap();
+        assert_eq!(s.draft().unwrap(), None);
+        s.lock();
+        assert_eq!(s.unlock(&p, MP).unwrap().draft, None);
+        s.set_draft(z("lan hai")).unwrap();
+        s.set_draft(None).unwrap();
+        s.lock();
+        assert_eq!(s.unlock(&p, MP).unwrap().draft, None);
+    }
+
+    #[test]
+    fn a_draft_is_never_offered_to_another_vault() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.set_draft(z("cua kho A")).unwrap();
+        let a = vid(&s);
+        s.lock();
+        let q = d.path().join("khac").join("b.pwv");
+        s.create_vault(&q, MP).unwrap();
+        let b = vid(&s);
+        assert_eq!(s.draft().unwrap(), None, "bản nháp trong RAM là của kho A");
+        // Chép file stash của A sang tên của B: không mở được (gắn với mã kho), và được để nguyên.
+        s.lock();
+        std::fs::copy(stash_file(&d, &a), stash_file(&d, &b)).unwrap();
+        let planted = std::fs::read(stash_file(&d, &b)).unwrap();
+        assert_eq!(s.unlock(&q, MP).unwrap().draft, None);
+        assert_eq!(std::fs::read(stash_file(&d, &b)).unwrap(), planted);
+        // Ghi lần đầu cho B: file không mở được được đổi tên để giữ lại, không bị ghi đè.
+        s.set_draft(z("cua kho B")).unwrap();
+        let kept: Vec<_> = std::fs::read_dir(d.path().join("rescue"))
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.to_string_lossy().contains(".unreadable-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), planted);
+        s.lock();
+        assert_eq!(
+            s.unlock(&p, MP).unwrap().draft.as_deref(),
+            Some("cua kho A")
+        );
+    }
+
+    #[test]
+    fn oversize_drafts_are_not_kept() {
+        let (mut s, d) = session();
+        open(&mut s, &d);
+        s.set_draft(z("cu")).unwrap();
+        let big = "x".repeat(MAX_DRAFT_BYTES + 1);
+        assert_eq!(s.set_draft(z(&big)).unwrap_err().code, "draft_too_large");
+        assert_eq!(s.draft().unwrap(), None, "không giữ bản nháp cũ lỗi thời");
+        s.set_draft(z(&"x".repeat(MAX_DRAFT_BYTES))).unwrap();
+        assert!(s.draft().unwrap().is_some());
+    }
+
+    #[test]
+    fn generated_passwords_are_capped_expire_and_never_listed_with_their_value() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        for i in 0..25 {
+            s.record_generated(
+                Zeroizing::new(format!("gen-{i:02}")),
+                Some(format!("Mục {i}")),
+            )
+            .unwrap();
+        }
+        let list = s.list_generated().unwrap();
+        assert_eq!(list.len(), MAX_GENERATED);
+        assert!(!serde_json::to_string(&list).unwrap().contains("gen-"));
+        let values: Vec<String> = list
+            .iter()
+            .map(|g| s.generated_value(&g.id).unwrap().to_string())
+            .collect();
+        assert!(values.contains(&"gen-24".to_string()) && !values.contains(&"gen-00".to_string()));
+        // Ghi lại cùng một giá trị: không thành hai dòng.
+        s.record_generated(Zeroizing::new("gen-24".into()), None)
+            .unwrap();
+        assert_eq!(s.list_generated().unwrap().len(), MAX_GENERATED);
+        // Giữ qua lần khoá; xoá danh sách thì hết.
+        s.lock();
+        s.unlock(&p, MP).unwrap();
+        assert_eq!(s.list_generated().unwrap().len(), MAX_GENERATED);
+        s.clear_generated().unwrap();
+        assert!(s.list_generated().unwrap().is_empty());
+        // Quá 30 ngày ⇒ bị bỏ.
+        let now = pwv_vault_core::model::now_ms();
+        let mut data = StashData::default();
+        for (i, age) in [1, GENERATED_MAX_AGE_MS - 1000, GENERATED_MAX_AGE_MS + 1000]
+            .into_iter()
+            .enumerate()
+        {
+            data.generated.push(GeneratedItem {
+                id: format!("g{i}"),
+                value: Zeroizing::new("v".into()),
+                at: now - age,
+                label: None,
+            });
+        }
+        data.prune(now);
+        let ids: Vec<&str> = data.generated.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["g0", "g1"]);
+    }
+
+    #[test]
+    fn a_stash_sealed_before_a_password_change_still_opens() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.set_draft(z("truoc khi doi")).unwrap();
+        s.record_generated(Zeroizing::new("gen-1".into()), None)
+            .unwrap();
+        s.change_master_password(MP, MP2).unwrap();
+        s.lock();
+        let info = s.unlock(&p, MP2).unwrap();
+        assert_eq!(info.draft.as_deref(), Some("truoc khi doi"));
+        // Đổi ở máy khác (máy này đang khoá, sau một lần khởi động lại).
+        s.lock();
+        let mut pc2 = Vault::open_with(
+            &p,
+            MP2.as_bytes(),
+            OpenOptions {
+                allow_weak_kdf: true,
+            },
+        )
+        .unwrap();
+        pc2.change_password(MP.as_bytes(), KdfParams::INSECURE_TEST)
+            .unwrap();
+        let (mut s2, _d2) = restart(&s);
+        let info = s2.unlock(&p, MP).unwrap();
+        assert_eq!(info.draft.as_deref(), Some("truoc khi doi"));
+        assert_eq!(s2.list_generated().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn read_only_sessions_have_no_stash() {
+        let (mut s, d) = session();
+        let p = d.path().join("v.pwv");
+        Vault::create(&p, MP.as_bytes(), s.create_opts).unwrap();
+        s.unlock_bytes("content://x", &std::fs::read(&p).unwrap(), MP)
+            .unwrap();
+        assert_eq!(s.set_draft(z("x")).unwrap_err().code, "read_only");
+        assert!(!d.path().join("rescue").exists());
+    }
+
+    // ------------------------------------------------------------------ fix2: tự khoá khi phiên bận (P2)
+
+    /// Một luồng giữ khoá phiên (thao tác đĩa treo): yêu cầu khoá được ghi mà không cần khoá phiên,
+    /// và lệnh đầu tiên lấy được khoá phiên sau đó (ví dụ `status` của trang vừa nạp lại) chỉ thấy
+    /// kho ĐÃ khoá.
+    #[test]
+    fn a_lock_requested_while_the_session_is_busy_is_applied_before_any_command() {
+        let (mut s, d) = session();
+        open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let shared = Arc::new(Shared::new(s));
+        let busy = shared.lock();
+        assert!(shared.try_lock().is_none());
+        assert!(shared.request_lock(LOCK_IDLE));
+        assert!(!shared.request_lock(LOCK_SUSPEND), "chỉ một yêu cầu");
+        assert!(shared.lock_pending());
+        let sh = shared.clone();
+        let cmd = std::thread::spawn(move || sh.lock().status());
+        std::thread::sleep(Duration::from_millis(50));
+        drop(busy);
+        let st = cmd.join().unwrap();
+        assert!(!st.unlocked);
+        assert_eq!(
+            st.lock_note.as_deref(),
+            Some("Kho đã tự khoá do không sử dụng.")
+        );
+        assert!(!shared.lock_pending());
+        // touch không cần khoá phiên.
+        shared.activity.backdate(Duration::from_secs(600));
+        shared.activity.touch();
+        assert!(shared.activity.idle() < Duration::from_secs(5));
+    }
+
+    // ------------------------------------------------------------------ fix2: lưu sang chỗ khác (P3)
+
+    #[test]
+    fn rescue_copy_never_touches_the_old_place_and_move_errors_are_not_disk_problems() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        // Đích không ghi được (thư mục cha là một file) ⇒ lỗi của việc chuyển, không phải của kho.
+        let bad = p.join("x.pwv");
+        let e = s.move_vault(&bad, true).unwrap_err();
+        assert_eq!(e.code, "move_failed", "{e:?}");
+        assert!(s.status().disk_problem.is_none());
+        let e = s.move_vault(&p.with_file_name("v.pwv.backups").join("x.pwv"), false);
+        assert!(e.is_err() && s.status().disk_problem.is_none());
+        let before = std::fs::read(&p).unwrap();
+        let target = d.path().join("cuu").join("v.pwv");
+        let r = s.move_vault(&target, true).unwrap();
+        assert!(r.rescued && !r.old_removed && !r.backups_moved);
+        assert_eq!(r.old_path, p.display().to_string());
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        assert_eq!(s.config.vault.as_deref(), Some(target.as_path()));
+        s.save_entry(input("B", Some("b"))).unwrap();
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            before,
+            "lần lưu sau cũng không đụng chỗ cũ"
+        );
+    }
+
+    // ------------------------------------------------------------------ fix2: bản lưu riêng (P4)
+
+    /// (1) Máy khác (chưa đồng bộ xong) ghi đè file kho bằng một bản thiếu mục X nhưng MỚI hơn ⇒ khi
+    /// mở khoá, X quay lại từ bản lưu riêng, được báo, và file kho được ghi lại.
+    #[test]
+    fn a_lost_update_is_healed_from_the_local_copy() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let mut stale = other_device(&p);
+        std::thread::sleep(Duration::from_millis(3));
+        let (x, _) = s.save_entry(input("X", Some("x"))).unwrap();
+        s.lock();
+        std::thread::sleep(Duration::from_millis(3));
+        stale.add(Entry::new("Y từ máy kia"));
+        std::fs::write(&p, stale.export_bytes().unwrap()).unwrap();
+        let info = s.unlock(&p, MP).unwrap();
+        assert!(
+            info.rollback.is_none(),
+            "file mới hơn ⇒ không có cảnh báo cũ hơn"
+        );
+        let lr = info.local_restored.expect("phải báo đã gộp lại");
+        assert_eq!(lr.added, 1);
+        assert_eq!(titles(&s), ["A", "X", "Y từ máy kia"]);
+        assert!(
+            other_device(&p).get(&x).is_some(),
+            "file kho đã được ghi lại"
+        );
+        // Lần sau không còn gì để gộp.
+        s.lock();
+        assert!(s.unlock(&p, MP).unwrap().local_restored.is_none());
+    }
+
+    /// (2) Mục bị xoá vĩnh viễn ở máy khác không sống lại từ bản lưu riêng.
+    #[test]
+    fn an_entry_purged_elsewhere_stays_purged() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        let (x, _) = s.save_entry(input("X", Some("x"))).unwrap();
+        s.save_entry(input("A", Some("a"))).unwrap();
+        s.lock();
+        let mut pc2 = other_device(&p);
+        pc2.transact(|v| {
+            v.delete(&x)?;
+            v.purge(&x)
+        })
+        .unwrap();
+        let info = s.unlock(&p, MP).unwrap();
+        assert!(info.local_restored.is_none());
+        assert_eq!(titles(&s), ["A"]);
+        assert!(s.list_trash().unwrap().is_empty());
+    }
+
+    /// (3) Bản lưu riêng ghi bằng khoá cũ vẫn gộp được sau khi mật khẩu được đổi ở máy khác.
+    #[test]
+    fn a_local_copy_under_a_retired_key_merges_after_a_password_change_elsewhere() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let before_x = std::fs::read(&p).unwrap();
+        s.save_entry(input("X", Some("x"))).unwrap();
+        s.lock();
+        // Máy kia chỉ có bản trước X, rồi đổi mật khẩu.
+        std::fs::write(&p, &before_x).unwrap();
+        let mut pc2 = other_device(&p);
+        pc2.change_password(MP2.as_bytes(), KdfParams::INSECURE_TEST)
+            .unwrap();
+        drop(pc2);
+        let info = s.unlock(&p, MP2).unwrap();
+        assert_eq!(info.local_restored.map(|l| l.added), Some(1));
+        assert_eq!(titles(&s), ["A", "X"]);
+    }
+
+    /// (4) Bản lưu riêng không gộp được được giữ lại thành bản cứu hộ, không bị ghi đè.
+    #[test]
+    fn an_unmergeable_local_copy_is_kept_as_a_rescue_copy() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let id = vid(&s);
+        s.lock();
+        let fork = d.path().join("fork").join("v.pwv");
+        std::fs::create_dir_all(fork.parent().unwrap()).unwrap();
+        std::fs::copy(&p, &fork).unwrap();
+        let mut f = other_device(&fork);
+        f.change_password(MP2.as_bytes(), KdfParams::INSECURE_TEST)
+            .unwrap();
+        let foreign = f.export_bytes().unwrap();
+        std::fs::write(local_file(&d, &id), &foreign).unwrap();
+        let info = s.unlock(&p, MP).unwrap();
+        assert!(info.local_restored.is_none());
+        assert_eq!(info.rescue_kept, 1, "được đếm như một bản cứu hộ");
+        let kept = s.rescue_files(&id);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), foreign);
+        // Bản lưu riêng mới là của kho đang mở.
+        assert_ne!(std::fs::read(local_file(&d, &id)).unwrap(), foreign);
+    }
+
+    /// (5) Tạo lại file kho từ bản lưu riêng: không bao giờ ghi đè.
+    #[test]
+    fn restoring_the_local_copy_never_overwrites() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        s.lock();
+        assert!(s.status().local_copy_at.is_some());
+        std::fs::remove_file(&p).unwrap();
+        s.restore_local_copy().unwrap();
+        s.unlock(&p, MP).unwrap();
+        assert_eq!(titles(&s), ["A"]);
+        assert!(s.restore_local_copy().is_err(), "đang mở khoá");
+        s.lock();
+        let now = std::fs::read(&p).unwrap();
+        assert!(s.restore_local_copy().is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), now);
+    }
+
+    /// (6) Không còn bản sao lưu nào: dựng lại từ bản lưu riêng trên máy này.
+    #[test]
+    fn recovery_uses_the_local_copy_when_backups_are_gone() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        s.save_entry(input("B", Some("b"))).unwrap();
+        s.lock();
+        std::fs::remove_dir_all(backup_dir(&p)).unwrap();
+        std::fs::write(&p, b"hong").unwrap();
+        assert_eq!(
+            s.recover(&p, "sai-mat-khau-hoan-toan", false)
+                .unwrap_err()
+                .code,
+            "wrong_password"
+        );
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            b"hong",
+            "sai mật khẩu ⇒ không ghi gì"
+        );
+        let r = s.recover(&p, MP, false).unwrap();
+        assert!(r.from_local_copy);
+        assert_eq!(r.entries, 2);
+        let archived = r.archived.expect("file hỏng được cất");
+        assert_eq!(std::fs::read(&archived).unwrap(), b"hong");
+        assert_eq!(other_device(&p).entries().len(), 2);
+    }
+
+    // ------------------------------------------------------------------ fix2: không đi lùi (P5)
+
+    #[test]
+    fn recovery_refuses_to_go_back_in_time_unless_asked() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        s.save_entry(input("B", Some("b"))).unwrap();
+        let id = vid(&s);
+        for b in s.list_backups().unwrap() {
+            if b.entries == Some(2) {
+                std::fs::remove_file(backup_dir(&p).join(&b.name)).unwrap();
+            }
+        }
+        s.lock();
+        // Máy này không còn bản lưu riêng (ví dụ vừa cập nhật từ bản cũ); bản sao lưu còn lại thiếu B.
+        std::fs::remove_file(local_file(&d, &id)).unwrap();
+        std::fs::write(&p, b"hong").unwrap();
+        let e = s.recover(&p, MP, false).unwrap_err();
+        assert_eq!(e.code, "older_than_seen", "{e:?}");
+        let det = e.detail.unwrap();
+        assert!(det.file_modified_at < det.seen_modified_at);
+        assert!(s.vault.is_none());
+        assert_eq!(std::fs::read(&p).unwrap(), b"hong", "không ghi gì");
+        let r = s
+            .recover_with(
+                &p,
+                MP,
+                RecoverOpts {
+                    allow_stale: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(r.entries, 1);
+        // Mốc "đã thấy" mới = bản vừa khôi phục: lần mở sau không cảnh báo nữa.
+        s.lock();
+        assert!(s.unlock(&p, MP).unwrap().rollback.is_none());
+    }
+
+    #[test]
+    fn recovery_with_the_local_copy_merged_is_not_stale() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        s.save_entry(input("B", Some("b"))).unwrap();
+        s.lock();
+        std::fs::write(&p, b"hong").unwrap();
+        let r = s.recover(&p, MP, false).unwrap();
+        assert!(!r.from_local_copy);
+        assert_eq!(r.entries, 2, "bản sao lưu thiếu B, bản lưu riêng bù lại");
+    }
+
+    // ------------------------------------------------------------------ fix2: đổi khoá (P7)
+
+    #[test]
+    fn rekey_scan_is_remembered_and_the_same_password_is_accepted() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let id = vid(&s);
+        let tag = s.vault.as_ref().unwrap().key_tag();
+        assert!(!s.config.wrap_scan_clean(&id, tag));
+        assert!(!s.check_rekey().unwrap());
+        assert!(
+            s.config.wrap_scan_clean(&id, tag),
+            "lần quét sạch được ghi nhớ"
+        );
+        assert!(!s.status().rekey_advised);
+        // Nhập lại đúng mật khẩu đang dùng: được chấp nhận, và khoá được thay.
+        let r = s.change_master_password(MP, MP).unwrap();
+        assert!(r.backups_failed.is_empty());
+        assert_ne!(s.vault.as_ref().unwrap().key_tag(), tag);
+        s.lock();
+        s.unlock(&p, MP).unwrap();
+        assert!(!s.check_rekey().unwrap());
+    }
+
+    // ------------------------------------------------------------------ fix2: chọn file kho (P8)
+
+    #[test]
+    fn picking_a_conflict_copy_is_detected() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let dir = p.parent().unwrap();
+        let copy = dir.join("v (conflicted copy 2026-11-20).pwv");
+        std::fs::copy(&p, &copy).unwrap();
+        let h = Session::conflict_hint(&copy).unwrap();
+        assert_eq!(h.original_name, "v.pwv");
+        assert_eq!(h.picked_name, "v (conflicted copy 2026-11-20).pwv");
+        assert!(Session::conflict_hint(&p).is_none(), "chọn đúng file gốc");
+        // Cùng tiền tố nhưng là kho khác ⇒ không phải bản xung đột.
+        let other = dir.join("v-rieng.pwv");
+        Vault::create(&other, MP.as_bytes(), s.create_opts).unwrap();
+        assert!(Session::conflict_hint(&other).is_none());
+        assert!(Session::conflict_hint(&dir.join("khong-co.pwv")).is_none());
+    }
+
+    // ------------------------------------------------------------------ fix2: sao chép theo chỉ số (P9)
+
+    #[test]
+    fn index_based_copies_refuse_an_entry_that_changed_since_it_was_shown() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        let (id, _) = s.save_entry(input("A", Some("a"))).unwrap();
+        let shown = s.detail(&id).unwrap().updated_at;
+        assert_eq!(
+            *s.field_value_checked(&id, "url:0", Some(shown)).unwrap(),
+            "https://a.vn"
+        );
+        std::thread::sleep(Duration::from_millis(3));
+        let mut pc2 = other_device(&p);
+        pc2.transact(|v| v.update(&id, |e| e.urls = vec!["https://khac.vn".into()]))
+            .unwrap();
+        s.sync().unwrap();
+        let e = s
+            .field_value_checked(&id, "url:0", Some(shown))
+            .unwrap_err();
+        assert_eq!(e.code, "entry_changed");
+        let now = s.detail(&id).unwrap().updated_at;
+        assert_eq!(
+            *s.field_value_checked(&id, "url:0", Some(now)).unwrap(),
+            "https://khac.vn"
+        );
     }
 }
