@@ -3,7 +3,9 @@
 docs/FORMAT.md — phải đọc được:
 
   1. file định dạng v2 do app hiện tại vừa tạo, SAU một lần đổi master password (đổi khoá kho);
-  2. các file định dạng v1 do bản phát hành 0.1.2 tạo (nằm sẵn trong repo).
+  2. các bản sao lưu cạnh nó (`<fixture>.pwv.backups/`): bản có từ TRƯỚC lần đổi mang dấu
+     `pre_change` ⇒ công cụ phải in cảnh báo; bản ghi sau lần đổi ⇒ không cảnh báo;
+  3. các file định dạng v1 do bản phát hành 0.1.2 tạo (nằm sẵn trong repo).
 
 Dùng: python tools/check_recover.py <fixture.pwv tạo bởi `cargo run --example make_fixture -- fixture.pwv "pässwörd" "mật khẩu mới"`>
 """
@@ -17,7 +19,7 @@ import unicodedata
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from nacl.exceptions import CryptoError  # noqa: E402
-from pwv_recover import decrypt_vault  # noqa: E402
+from pwv_recover import decrypt_vault, is_pre_change, read_header  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "crates" / "vault-core" / "tests" / "fixtures"
@@ -55,8 +57,10 @@ def check_v2(path: str) -> None:
     nfd = unicodedata.normalize("NFD", new_pw)
     assert nfd != new_pw
     assert decrypt_vault(data, nfd)["entries"] == d["entries"]
+    assert not is_pre_change(read_header(data)[0]), "file kho chính không bao giờ mang dấu pre_change"
     print("v2 OK:", path)
     check_command_line(path, new_pw, d)
+    check_pre_change_backups(path, new_pw)
 
 
 def check_command_line(path: str, password: str, expected: dict) -> None:
@@ -88,6 +92,49 @@ def check_command_line(path: str, password: str, expected: dict) -> None:
     print("lệnh cứu hộ (-o) OK")
 
 
+def run_tool(path, password: str, out=None):
+    tool = pathlib.Path(__file__).resolve().parent / "pwv_recover.py"
+    cmd = [sys.executable, "-I", str(tool), str(path), "--password-stdin"]
+    if out is not None:
+        cmd += ["-o", str(out)]
+    return subprocess.run(cmd, input=(password + "\n").encode("utf-8"), capture_output=True)
+
+
+def check_pre_change_backups(path: str, password: str) -> None:
+    """make_fixture đổi master password sau vài lần lưu: các bản sao lưu có từ trước lần đổi được mã
+    hoá lại bằng khoá mới và mang dấu `pre_change`; bản ghi sau lần đổi thì không. Công cụ mở được cả
+    hai bằng mật khẩu mới, nhưng phải CẢNH BÁO (trên stderr, cả khi có lẫn không có -o) với bản mang dấu."""
+    backups = sorted(pathlib.Path(path + ".backups").glob("*.pwv"))
+    marked = [b for b in backups if is_pre_change(read_header(b.read_bytes())[0])]
+    plain = [b for b in backups if b not in marked]
+    assert marked, f"lẽ ra phải có bản sao lưu mang dấu pre_change trong {path}.backups"
+    assert plain, f"lẽ ra phải có bản sao lưu ghi sau lần đổi mật khẩu trong {path}.backups"
+    titles = set()
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, b in enumerate(marked + plain):
+            out = pathlib.Path(tmp) / f"b{i}.json"
+            r = run_tool(b, password, out)
+            err = r.stderr.decode("utf-8")
+            assert r.returncode == 0, err
+            got = json.loads(out.read_text(encoding="utf-8"))
+            assert "old_keys" not in got and isinstance(got["entries"], list), got
+            if b in marked:
+                titles.update(e["title"] for e in got["entries"])
+            warned = "CẢNH BÁO" in err and "pre_change" in err
+            assert warned == (b in marked), f"{b.name}: cảnh báo pre_change = {warned}\n{err}"
+        # Không có -o (in ra màn hình): cảnh báo vẫn ở stderr, JSON ở stdout không bị lẫn.
+        r = run_tool(marked[0], password)
+        assert r.returncode == 0 and "CẢNH BÁO" in r.stderr.decode("utf-8")
+        assert "CẢNH BÁO" not in r.stdout.decode("utf-8")
+        json.loads(r.stdout.decode("utf-8"))
+        # Sai mật khẩu trên bản mang dấu: vẫn chỉ là lỗi "không mở được", không ghi gì.
+        out = pathlib.Path(tmp) / "wrong.json"
+        r = run_tool(marked[0], "sai mật khẩu", out)
+        assert r.returncode == 1 and not out.exists()
+    assert "Ngân hàng Việt" in titles, "các bản có từ trước lần đổi phải còn mục đã lưu trước đó"
+    print(f"cảnh báo pre_change OK ({len(marked)} bản mang dấu, {len(plain)} bản không)")
+
+
 def check_v1() -> None:
     g = (FIXTURES / "v1-golden-0.1.2.pwv").read_bytes()
     assert g[4:6] == b"\x01\x00"
@@ -98,6 +145,7 @@ def check_v1() -> None:
     assert bank["password_history"][0]["password"] == "Mật-khẩu-1-🔐"
     assert len(d["tombstones"]) == 1
     must_fail(g, "golden-old-password")
+    assert not is_pre_change(read_header(g)[0]), "định dạng v1 không có dấu pre_change"
 
     # Kho v1 tạo bằng mật khẩu gõ kiểu tổ hợp (NFD): mở được bằng cả hai kiểu gõ.
     m = (FIXTURES / "v1-mixed.pwv").read_bytes()

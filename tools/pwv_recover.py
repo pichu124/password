@@ -15,6 +15,13 @@ có dấu (và có thể làm công cụ dừng giữa chừng).
 
 Dùng được cho cả file trong thư mục sao lưu (vault.pwv.backups\\...).
 Trong JSON: "entries" là các mục đang dùng, "trash" là thùng rác.
+
+Bản sao lưu có từ TRƯỚC lần đổi master password gần nhất mang dấu "pre_change" trong header: công cụ
+vẫn mở được (bằng mật khẩu hiện tại) nhưng in một CẢNH BÁO — nội dung của bản đó có thể do người biết
+mật khẩu cũ ghi. Nên dùng một bản không có dấu này nếu còn.
+
+Công cụ chỉ mở file bằng đúng master password đã khoá file đó (mật khẩu của thời điểm file được ghi);
+nó không dùng các khoá cũ ("old_keys") lưu bên trong kho để mở file khác.
 """
 import argparse
 import base64
@@ -62,15 +69,36 @@ def password_candidates(password) -> list:
     return out
 
 
-def decrypt_vault(data: bytes, password) -> dict:
-    """Giải mã file kho. `password` là str (hoặc bytes UTF-8)."""
+def read_header(data: bytes):
+    """Đọc phần đầu file (không cần mật khẩu): trả về (header dạng dict, vị trí kết thúc header)."""
     if data[:4] != b"PWV1":
         raise ValueError("không phải file pwv")
     version, header_len = struct.unpack_from("<HI", data, 4)
     if version not in SUPPORTED_VERSIONS:
         raise ValueError(f"phiên bản định dạng {version} chưa hỗ trợ — hãy dùng bản mới hơn của công cụ này")
     header_end = 10 + header_len
-    header = json.loads(data[10:header_end])
+    return json.loads(data[10:header_end]), header_end
+
+
+def is_pre_change(header: dict) -> bool:
+    """Dấu "pre_change" (FORMAT.md mục 3): bản sao lưu có từ trước lần đổi master password gần nhất."""
+    return header.get("pre_change") is True
+
+
+PRE_CHANGE_WARNING = """
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+CẢNH BÁO: file này là một bản sao lưu có từ TRƯỚC lần đổi master password gần nhất (dấu "pre_change").
+Nội dung của nó có thể đã được ghi bởi một người biết mật khẩu CŨ (ví dụ: người đã khiến bạn phải đổi
+mật khẩu) — địa chỉ trang web, tên đăng nhập hay mật khẩu trong đó có thể đã bị sửa.
+Nên dùng một bản sao lưu KHÔNG có dấu này (bản ghi sau lần đổi mật khẩu) nếu còn. Nếu buộc phải dùng
+bản này, hãy kiểm tra kỹ địa chỉ trang web và mật khẩu của các tài khoản quan trọng trước khi dùng.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"""
+
+
+def decrypt_vault(data: bytes, password) -> dict:
+    """Giải mã file kho. `password` là str (hoặc bytes UTF-8)."""
+    header, header_end = read_header(data)
     aad = data[:header_end]
     body_nonce = data[header_end:header_end + 24]
     body_ct = data[header_end + 24:]
@@ -124,6 +152,10 @@ def main() -> None:
 
     with open(args.vault, "rb") as f:
         data = f.read()
+    try:
+        pre_change = is_pre_change(read_header(data)[0])
+    except Exception:  # file hỏng / không phải file pwv: decrypt_vault bên dưới báo lỗi rõ ràng
+        pre_change = False
     if args.password_stdin:
         pw = sys.stdin.buffer.readline().decode("utf-8").rstrip("\r\n")
     else:
@@ -136,6 +168,9 @@ def main() -> None:
     # Khoá của các lần đổi master password trước: không cần cho việc cứu dữ liệu, không in ra.
     vault.pop("old_keys", None)
     text = json.dumps(vault, ensure_ascii=False, indent=2)
+    if pre_change:
+        # In trước (để thấy ngay) và nhắc lại ở cuối (để không bị trôi mất sau phần JSON / dòng "Đã ghi").
+        print(PRE_CHANGE_WARNING, file=sys.stderr)
     if args.output:
         try:
             # "x": báo lỗi nếu file đã có, để không vô tình ghi đè thứ gì khác.
@@ -147,9 +182,13 @@ def main() -> None:
         n = len(vault.get("entries", []))
         print(f"Đã ghi {n} mục ra {args.output}. File này chứa mật khẩu ở dạng rõ — xoá ngay sau khi dùng.",
               file=sys.stderr)
-        return
-    # Không có -o: in ra màn hình (đã ép UTF-8 ở đầu hàm).
-    print(text)
+    else:
+        # Không có -o: in ra màn hình (đã ép UTF-8 ở đầu hàm).
+        print(text)
+        sys.stdout.flush()
+    if pre_change:
+        print("CẢNH BÁO (nhắc lại): file này có từ TRƯỚC lần đổi master password gần nhất — xem cảnh báo ở trên.",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":
