@@ -20,7 +20,7 @@ interface FormFields {
   notes: string;
   favorite: boolean;
 }
-const EMPTY_FIELDS: FormFields = { title: "", username: "", urls: "", tags: "", notes: "", favorite: false };
+export const EMPTY_FIELDS: FormFields = { title: "", username: "", urls: "", tags: "", notes: "", favorite: false };
 const FIELD_KEYS: (keyof FormFields)[] = ["title", "username", "urls", "tags", "notes", "favorite"];
 
 /**
@@ -40,6 +40,11 @@ export interface FormDraft {
   removePassword: boolean;
   totp: string;
   totpAction: "keep" | "set" | "remove";
+  /**
+   * Mục đã thay đổi kể từ khi bắt đầu sửa (đã phát hiện ở một lần khôi phục trước). Giữ lại qua các lần khoá tiếp theo —
+   * cùng `updated_at` GỐC — cho tới khi lưu hoặc bỏ thay đổi, để cảnh báo không biến mất.
+   */
+  changedSince?: boolean;
 }
 
 export function parseDraft(raw: string | null): FormDraft | null {
@@ -190,7 +195,20 @@ export function EntryForm({
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const draftJson = dirty
-    ? JSON.stringify({ v: 1, id, updated_at: orig?.updated_at ?? null, base: base!, cur, password, passwordTouched, removePassword, totp, totpAction } satisfies FormDraft)
+    ? JSON.stringify({
+        v: 1,
+        id,
+        // Bản nháp khôi phục lại: giữ `updated_at` GỐC (lúc bắt đầu sửa) và dấu "đã thay đổi".
+        updated_at: restore && !restore.asNew ? restore.draft.updated_at : (orig?.updated_at ?? null),
+        base: base!,
+        cur,
+        password,
+        passwordTouched,
+        removePassword,
+        totp,
+        totpAction,
+        changedSince: !!restore?.changedSince,
+      } satisfies FormDraft)
     : null;
   const latest = useRef<string | null>(null);
   latest.current = draftJson;
@@ -237,6 +255,8 @@ export function EntryForm({
       window.removeEventListener("blur", flush);
       onBeforeLock(null);
       if (timer.current) clearTimeout(timer.current);
+      // Rời form (Huỷ, bấm mục khác…) trong lúc đang chờ đẩy: đẩy nốt — form đã sạch lại thì bản nháp cũ bị xoá.
+      if (!closed.current) flush();
     };
   }, [flush]);
 
@@ -292,7 +312,12 @@ export function EntryForm({
     if (id && Object.keys(input).length === 1) {
       toast("Không có thay đổi nào", "info");
       closed.current = true;
-      if (sent.current !== undefined && sent.current !== null) api.setDraft(null).catch(() => {});
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      // Chờ lần đẩy đang dở xong rồi mới xoá, để nó không đến SAU lệnh xoá.
+      await inflight.current.catch(() => {});
+      if (sent.current !== undefined) await api.setDraft(null).catch(() => {});
+      sent.current = null;
       onSaved(id);
       return true;
     }
@@ -386,7 +411,10 @@ export function EntryForm({
         <div className="fields-error">
           {restore?.changedSince && <p className="warn-text">Mục này đã thay đổi sau khi bạn bắt đầu sửa — kiểm tra lại trước khi lưu.</p>}
           {restore?.asNew && (
-            <p className="warn-text">Mục bạn đang sửa dở không còn trong kho (có thể đã bị xoá ở máy khác) — nội dung được mở thành một mục MỚI. Kiểm tra lại rồi bấm Lưu.</p>
+            <p className="warn-text">
+              Mục bạn đang sửa dở không còn trong kho (có thể đã bị xoá ở máy khác) — toàn bộ nội dung lần cuối được mở thành một mục MỚI. Mật khẩu chỉ có
+              nếu bạn đã nhập nó trong lúc sửa; nếu mục còn trong Thùng rác, bạn cũng có thể khôi phục nó từ đó. Kiểm tra lại rồi bấm Lưu.
+            </p>
           )}
           {draftError && <p className="error">{draftError}</p>}
         </div>

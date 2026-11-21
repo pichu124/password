@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorCode, errorText, isReloading, lockAndReload, onDiskProblem, onEvent, onSessionLost, onWriteResult, reloadPage, STASHED_LOCK_NOTE, STASHED_UNLOCK_INFO, stashForReload } from "./api";
-import { EntryForm, type EntryFormHandle, parseDraft, type Restore } from "./components/EntryForm";
+import { EMPTY_FIELDS, EntryForm, type EntryFormHandle, parseDraft, type Restore } from "./components/EntryForm";
 import { EntryView } from "./components/EntryView";
 import { Generator } from "./components/Generator";
 import { Health } from "./components/Health";
@@ -16,7 +16,7 @@ type View =
   | { kind: "empty" }
   | { kind: "entry"; id: string }
   /** `restore`: bản nháp giữ từ trước khi kho bị khoá. */
-  | { kind: "edit"; id: string | null; restore?: Restore }
+  | { kind: "edit"; id: string | null; restore?: Restore; nonce?: number }
   | { kind: "generator" }
   | { kind: "health" }
   | { kind: "trash" }
@@ -205,7 +205,11 @@ function VaultScreen({
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [entries, setEntries] = useState<EntrySummary[]>([]);
-  const [view, setViewRaw] = useState<View>({ kind: "empty" });
+  const [view, setViewState] = useState<View>({ kind: "empty" });
+  // Mỗi lần vào form là một form MỚI (khoá component có `nonce`): "Bỏ thay đổi" rồi mở lại cùng form luôn được một form
+  // sạch, đang giữ bản nháp bình thường — không bao giờ là form cũ đã đóng.
+  const nonce = useRef(0);
+  const setViewRaw = useCallback((v: View) => setViewState(v.kind === "edit" ? { ...v, nonce: ++nonce.current } : v), []);
   const [syncing, setSyncing] = useState(false);
   /** Đổi ⇒ mục đang mở được tải lại (đồng bộ vừa đổi dữ liệu, vừa khôi phục từ sao lưu). */
   const [refreshKey, setRefreshKey] = useState(0);
@@ -359,13 +363,14 @@ function VaultScreen({
       if (draft.id) {
         try {
           const e = await api.get(draft.id);
-          setViewRaw({ kind: "edit", id: draft.id, restore: { draft, changedSince: e.updated_at !== draft.updated_at } });
+          setViewRaw({ kind: "edit", id: draft.id, restore: { draft, changedSince: !!draft.changedSince || e.updated_at !== draft.updated_at } });
           addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá.", "info");
           return;
         } catch (e) {
           if (errorCode(e) !== "not_found") return;
         }
-        setViewRaw({ kind: "edit", id: null, restore: { draft: { ...draft, id: null, updated_at: null }, asNew: true } });
+        // Mở thành mục MỚI với TOÀN BỘ nội dung lần cuối (gốc rỗng ⇒ mọi ô đều được áp, kể cả ô chưa sửa).
+        setViewRaw({ kind: "edit", id: null, restore: { draft: { ...draft, id: null, updated_at: null, base: EMPTY_FIELDS }, asNew: true } });
         addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá. Mục đó không còn trong kho (có thể đã bị xoá ở máy khác) nên được mở thành một mục MỚI.", "warn");
         return;
       }
@@ -739,7 +744,7 @@ function VaultScreen({
           )}
           {view.kind === "edit" && (
             <EntryForm
-              key={view.id ?? "new"}
+              key={`${view.id ?? "new"}-${view.nonce ?? 0}`}
               id={view.id}
               restore={view.restore}
               handleRef={formHandle}
