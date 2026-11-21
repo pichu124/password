@@ -244,6 +244,30 @@ fn read_vault_file(path: &Path) -> Result<Vec<u8>> {
     fsutil::read_retry_capped(path, fsutil::MAX_VAULT_FILE)?.ok_or(Error::VaultFileDamaged)
 }
 
+/// Như [`read_copy`] nhưng giữ lỗi: file quá lớn ⇒ lỗi `InvalidData` (không đọc vào RAM).
+fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
+    fsutil::read_retry_capped(path, fsutil::MAX_VAULT_FILE)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file lớn hơn {} MiB", fsutil::MAX_VAULT_FILE >> 20),
+        )
+    })
+}
+
+/// Gộp `src` (đọc từ một file định dạng `version`) vào `target`. Bản v1 (0.1.x): tombstone chỉ có
+/// hiệu lực với mục KHÔNG được sửa sau lần xoá — so với chính `target` (quy tắc gộp của 0.1.2), vì
+/// file v1 có thể chỉ mang lần xoá mà không mang lần sửa sau đó (bản sao lưu ghi giữa hai việc,
+/// bản xung đột còn sót).
+fn merge_versioned(target: &mut VaultData, src: &VaultData, version: u16) -> MergeStats {
+    if version == 1 {
+        let mut s = src.clone();
+        s.drop_v1_tombstones_superseded_by(target);
+        target.merge_from(&s)
+    } else {
+        target.merge_from(src)
+    }
+}
+
 /// Đọc một bản (bản sao lưu / bản cạnh kho) để thử; không đọc được hoặc quá lớn ⇒ `None`.
 fn read_copy(path: &Path) -> Option<Vec<u8>> {
     fsutil::read_retry_capped(path, fsutil::MAX_VAULT_FILE)
@@ -379,10 +403,12 @@ enum Decrypted {
     Current {
         data: VaultData,
         adopt_header: Option<Header>,
+        /// Phiên bản định dạng của file (1 = bản 0.1.x: xem [`merge_versioned`]).
+        version: u16,
     },
     /// Chỉ mở được bằng một khoá cũ. Một máy chưa biết lần đổi mật khẩu ghi ra được file như vậy,
     /// nhưng ai biết mật khẩu CŨ và giữ một bản sao cũ cũng làm được ⇒ KHÔNG BAO GIỜ tự gộp.
-    Retired { data: VaultData },
+    Retired { data: VaultData, version: u16 },
 }
 
 /// Tham số Argon2 của `a` không tốn kém hơn `b` ở bất kỳ chiều nào (bộ nhớ, số vòng, số luồng).
@@ -615,7 +641,7 @@ impl Vault {
     fn absorb_forked_copies(&mut self, password: &[u8]) {
         let cap = self.header.kdf;
         for p in Self::newer_epoch_siblings(&self.path, &self.header, &cap) {
-            let Ok(bytes) = fsutil::read_retry(&p) else {
+            let Some(bytes) = read_copy(&p) else {
                 continue;
             };
             let Ok(u) = unlock_bytes(&bytes, password, self.allow_weak_kdf) else {
@@ -625,7 +651,7 @@ impl Vault {
             if u.header.key_changed_at <= self.header.key_changed_at {
                 continue;
             }
-            self.data.merge_from(&u.data);
+            merge_versioned(&mut self.data, &u.data, u.version);
             if *u.key != **self.vault_key {
                 let old: Key = Zeroizing::new(**self.vault_key);
                 self.data.push_old_key(&old, u.header.key_changed_at);
@@ -758,7 +784,7 @@ impl Vault {
             );
             match used {
                 KeyUsed::Current => {
-                    v.data.merge_from(&main_data);
+                    merge_versioned(&mut v.data, &main_data, main.version);
                 }
                 KeyUsed::Retired => v.queue_old_key_archive(main_fp, main_bytes),
             }
@@ -1010,15 +1036,19 @@ impl Vault {
         if Some(fp) == self.disk_fingerprint {
             return Ok(false);
         }
-        let (remote, adopt) = match self.decrypt_same_vault(bytes)? {
-            Decrypted::Current { data, adopt_header } => (data, adopt_header),
+        let (remote, adopt, version) = match self.decrypt_same_vault(bytes)? {
+            Decrypted::Current {
+                data,
+                adopt_header,
+                version,
+            } => (data, adopt_header, version),
             Decrypted::Retired { .. } => {
                 self.disk_fingerprint = Some(fp);
                 return Ok(false);
             }
         };
         let before = self.data.clone();
-        self.data.merge_from(&remote);
+        merge_versioned(&mut self.data, &remote, version);
         if let Some(h) = adopt {
             self.header = h;
         }
@@ -1361,8 +1391,12 @@ impl Vault {
             Ok((data, KeyUsed::Current)) => Ok(Decrypted::Current {
                 data,
                 adopt_header: newer_epoch.then(|| raw.header.clone()),
+                version: raw.version,
             }),
-            Ok((data, KeyUsed::Retired)) => Ok(Decrypted::Retired { data }),
+            Ok((data, KeyUsed::Retired)) => Ok(Decrypted::Retired {
+                data,
+                version: raw.version,
+            }),
             Err(Error::Decrypt) if newer_epoch => Err(Error::PasswordChangedElsewhere),
             Err(Error::Decrypt) | Err(Error::BadFormat) | Err(Error::Json) => {
                 Err(Error::VaultFileDamaged)
@@ -1416,8 +1450,12 @@ impl Vault {
         let Some((bytes, fp)) = self.read_changed_file()? else {
             return Ok(Refreshed::default());
         };
-        let (remote, adopt) = match self.decrypt_same_vault(&bytes)? {
-            Decrypted::Current { data, adopt_header } => (data, adopt_header),
+        let (remote, adopt, version) = match self.decrypt_same_vault(&bytes)? {
+            Decrypted::Current {
+                data,
+                adopt_header,
+                version,
+            } => (data, adopt_header, version),
             Decrypted::Retired { .. } => {
                 self.queue_old_key_archive(fp, &bytes);
                 self.disk_fingerprint = Some(fp);
@@ -1425,7 +1463,7 @@ impl Vault {
             }
         };
         let disk_header = format::peek_header(&bytes)?;
-        let stats = self.data.merge_from(&remote);
+        let stats = merge_versioned(&mut self.data, &remote, version);
         let adopted = adopt.is_some();
         if let Some(h) = adopt {
             self.header = h;
@@ -1568,7 +1606,7 @@ impl Vault {
         if let Some(f) = READBACK_FAULTS.with(|q| q.borrow_mut().pop_front()) {
             return f;
         }
-        fsutil::read_retry(&self.path)
+        read_capped(&self.path)
     }
 
     /// File vừa ghi có đúng là `bytes` không. Đọc lại; sai/lỗi ⇒ chờ một chút rồi đọc lại lần nữa
@@ -1902,9 +1940,14 @@ impl Vault {
     }
 
     /// Gộp dữ liệu đã giải mã (và nhận header, nếu có) vào RAM.
-    fn merge_remote(&mut self, remote: &VaultData, adopt: Option<Header>) -> (MergeStats, bool) {
+    fn merge_remote(
+        &mut self,
+        remote: &VaultData,
+        adopt: Option<Header>,
+        version: u16,
+    ) -> (MergeStats, bool) {
         let before = self.data.clone();
-        let stats = self.data.merge_from(remote);
+        let stats = merge_versioned(&mut self.data, remote, version);
         let adopted = adopt.is_some();
         if let Some(h) = adopt {
             self.header = h;
@@ -1919,7 +1962,7 @@ impl Vault {
     /// đọc (SHA-256 `fp`). Nếu dịch vụ đồng bộ vừa thay file bằng bản khác thì để nguyên — lần đồng
     /// bộ sau sẽ xét lại.
     fn archive_if_unchanged(&self, path: &Path, fp: [u8; 32], kind: BackupKind) -> bool {
-        let unchanged = fsutil::read_retry(path).is_ok_and(|b| fingerprint(&b) == fp);
+        let unchanged = read_capped(path).is_ok_and(|b| fingerprint(&b) == fp);
         unchanged && fsutil::archive_file(&self.path, kind, now_ms(), path).is_ok()
     }
 
@@ -1949,7 +1992,7 @@ impl Vault {
         let mut merged: Vec<(usize, [u8; 32])> = Vec::new();
         let mut retired: Vec<(PathBuf, [u8; 32])> = Vec::new();
         for path in self.conflict_copies() {
-            let bytes = match fsutil::read_retry(&path) {
+            let bytes = match read_capped(&path) {
                 Ok(b) => b,
                 Err(e) => {
                     report.conflicts.push(ConflictOutcome {
@@ -1962,8 +2005,12 @@ impl Vault {
             };
             let fp = fingerprint(&bytes);
             let result = match self.decrypt_same_vault(&bytes) {
-                Ok(Decrypted::Current { data, adopt_header }) => {
-                    let (stats, adopted) = self.merge_remote(&data, adopt_header);
+                Ok(Decrypted::Current {
+                    data,
+                    adopt_header,
+                    version,
+                }) => {
+                    let (stats, adopted) = self.merge_remote(&data, adopt_header, version);
                     report.adopted_remote_password |= adopted;
                     merged.push((report.conflicts.len(), fp));
                     Ok(stats)
@@ -2034,7 +2081,7 @@ impl Vault {
         if !fsutil::is_within(path, &fsutil::backup_dir(&self.path)) {
             return Err(Error::BadFormat);
         }
-        let bytes = fsutil::read_retry(path)?;
+        let bytes = read_capped(path)?;
         let raw = format::parse(&bytes)?;
         if raw.header.vault_id != self.header.vault_id {
             return Err(Error::DifferentVault);
@@ -2046,7 +2093,7 @@ impl Vault {
     // ------------------------------------------------------------------ chuyển kho
 
     fn file_matches_memory(&self, path: &Path) -> bool {
-        fsutil::read_retry(path).ok().is_some_and(|b| {
+        read_capped(path).ok().is_some_and(|b| {
             format::parse(&b)
                 .and_then(|raw| raw.decrypt_body(&self.vault_key))
                 .is_ok_and(|d| d == self.data)
@@ -2163,21 +2210,25 @@ impl Vault {
     /// khác mất vài giây): khi đó gộp nó (chỉ nhận khoá hiện tại) vào kho ở chỗ mới và lưu, rồi mới
     /// xoá. Bất kỳ bước nào không chắc chắn ⇒ để nguyên file cũ (trả về false).
     fn remove_old_location(&mut self, old: &Path, left_behind: Option<[u8; 32]>) -> bool {
-        let Ok(bytes) = fsutil::read_retry(old) else {
+        let Ok(bytes) = read_capped(old) else {
             return false;
         };
         let fp = fingerprint(&bytes);
         if Some(fp) != left_behind {
-            let Ok(Decrypted::Current { data, adopt_header }) = self.decrypt_same_vault(&bytes)
+            let Ok(Decrypted::Current {
+                data,
+                adopt_header,
+                version,
+            }) = self.decrypt_same_vault(&bytes)
             else {
                 return false;
             };
-            self.merge_remote(&data, adopt_header);
+            self.merge_remote(&data, adopt_header, version);
             if self.dirty && self.save().is_err() {
                 return false;
             }
             // Lại vừa bị ghi nữa: để lần sau.
-            if fsutil::read_retry(old).ok().map(|b| fingerprint(&b)) != Some(fp) {
+            if read_capped(old).ok().map(|b| fingerprint(&b)) != Some(fp) {
                 return false;
             }
         }

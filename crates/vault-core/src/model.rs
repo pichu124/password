@@ -745,6 +745,20 @@ impl VaultData {
         });
     }
 
+    /// Như [`VaultData::drop_tombstones_superseded_in_v1`], nhưng so với dữ liệu ĐÍCH sắp nhận bản
+    /// v1 này: bỏ các tombstone (của bản v1) mà `target` còn giữ mục cùng id — đang dùng hay trong
+    /// thùng rác — được sửa SAU lần xoá (`deleted_at < updated_at`, đúng quy tắc 0.1.2 khi gộp). Chỉ
+    /// gọi trên dữ liệu đọc từ một file định dạng v1, ngay trước khi gộp nó vào `target`.
+    pub(crate) fn drop_v1_tombstones_superseded_by(&mut self, target: &VaultData) {
+        self.tombstones.retain(|t| {
+            !target
+                .entries
+                .iter()
+                .chain(target.trash.iter())
+                .any(|e| e.id == t.id && t.deleted_at < e.updated_at)
+        });
+    }
+
     /// Ghi nhớ một khoá kho vừa ngừng dùng (khi đổi master password).
     pub(crate) fn push_old_key(&mut self, key: &[u8; KEY_LEN], retired_at: i64) {
         if !self.old_keys.iter().any(|k| &k.key == key) {
