@@ -14,9 +14,13 @@
 //! - Xoá vĩnh viễn để lại một *tombstone*: mục đó biến mất trên MỌI máy và không bao giờ quay lại
 //!   qua đồng bộ (muốn lấy lại phải khôi phục từ bản sao lưu — khi đó nó là một mục mới).
 //!
-//! Phép gộp có tính giao hoán, kết hợp và luỹ đẳng (kiểm chứng bằng property test trong
-//! `tests/merge_props.rs`), nên các máy gộp theo thứ tự nào cũng ra đúng một kết quả, và hai máy
-//! không bao giờ "ghi đè qua lại" vô hạn.
+//! - Mục nhập từ CSV mang thời điểm [`IMPORTED_AT`] ở mọi trường: thua mọi lần sửa thật.
+//!
+//! Phép gộp có tính giao hoán, kết hợp và luỹ đẳng — kể cả khi lịch sử mật khẩu đã chạm trần
+//! [`MAX_HISTORY`] (xem `Entry::canon_history`) — kiểm chứng bằng property test trong
+//! `tests/merge_props.rs`. Nhờ vậy các máy gộp theo thứ tự nào cũng ra đúng một kết quả, và hai máy
+//! không bao giờ "ghi đè qua lại" vô hạn. (Giả định: dữ liệu do app ghi ra; với thời điểm cực đoan
+//! như `i64::MIN` — chỉ có ở dữ liệu méo — không bảo đảm.)
 
 use std::collections::btree_map::Entry as MapEntry;
 use std::collections::{BTreeMap, HashMap};
@@ -27,10 +31,23 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::crypto::KEY_LEN;
 use crate::error::{Error, Result};
 
-/// Số bản mật khẩu cũ giữ lại cho mỗi mục.
+/// Số bản mật khẩu cũ giữ lại cho mỗi mục (thêm 1 nếu mật khẩu hiện tại rỗng — xem
+/// `Entry::canon_history`).
 pub const MAX_HISTORY: usize = 20;
 /// Số khoá cũ (của các lần đổi master password trước) giữ lại để còn mở được bản sao lưu cũ.
 pub const MAX_OLD_KEYS: usize = 16;
+
+/// Thời điểm (ms) gán cho MỌI trường nội dung của một mục vừa nhập từ file CSV ("mục nguyên bản").
+///
+/// Nhập cùng một file CSV trên hai máy cho ra cùng một id (id suy ra từ nội dung). Nếu các trường
+/// mang thời điểm nhập (`now`) thì lần nhập thứ hai trên một máy chưa đồng bộ sẽ "thắng" mọi lần sửa
+/// thật đã làm trước đó ở máy kia — ghi chú và mã 2FA (không có lịch sử) mất luôn. Với thời điểm cố
+/// định rất nhỏ này, hai lần nhập giống hệt nhau thì hoà (cùng giá trị), và BẤT KỲ lần sửa thật nào
+/// cũng thắng. Mọi lần sửa thật đều được đóng dấu ≥ `IMPORTED_AT + 1`; 0 vẫn nghĩa là "chưa biết"
+/// (file v1).
+pub const IMPORTED_AT: i64 = 1;
+/// Thời điểm nhỏ nhất của một lần sửa thật.
+const MIN_REAL_STAMP: i64 = IMPORTED_AT + 1;
 
 /// Thời gian hiện tại, mili-giây kể từ 1970 (UTC).
 pub fn now_ms() -> i64 {
@@ -43,7 +60,12 @@ pub fn now_ms() -> i64 {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct HistoryItem {
     pub password: String,
-    /// Thời điểm mật khẩu này bị thay thế.
+    /// Thời điểm (ms) gắn với mật khẩu cũ này, dùng để xếp thứ tự và để gộp. Có HAI nguồn:
+    /// - sửa mật khẩu trên một máy: thời điểm nó bị thay = 1 ms trước thời điểm của mật khẩu mới;
+    /// - thua khi gộp hai lần sửa đồng thời từ hai máy: thời điểm nó đã được ĐẶT (không thể dùng thời
+    ///   điểm của bên thắng: kết quả sẽ phụ thuộc thứ tự gộp).
+    ///
+    /// Trong dạng chuẩn luôn nhỏ hơn (thời điểm, giá trị) của mật khẩu hiện tại.
     pub replaced_at: i64,
 }
 
@@ -56,7 +78,8 @@ impl std::fmt::Debug for HistoryItem {
 }
 
 /// Thời điểm sửa cuối (ms) của từng trường trong một mục. 0 = chưa biết (file định dạng v1):
-/// khi nạp sẽ được thay bằng `updated_at` của mục.
+/// khi nạp sẽ được thay bằng `updated_at` của mục. [`IMPORTED_AT`] = giá trị nhập từ CSV, chưa
+/// từng được sửa.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FieldTimes {
@@ -129,9 +152,12 @@ pub struct Entry {
     pub favorite: bool,
     #[serde(default)]
     pub password_history: Vec<HistoryItem>,
+    /// Lúc tạo mục (ms). Khi gộp: giá trị nhỏ nhất của hai bên, bỏ qua 0 (= chưa biết).
     #[serde(default)]
     pub created_at: i64,
-    /// Lần sửa nội dung gần nhất = giá trị lớn nhất trong `field_times` (trừ `deleted`).
+    /// Lần sửa nội dung gần nhất = max(`created_at`, giá trị lớn nhất trong `field_times` trừ
+    /// `deleted`) — để mục vừa nhập (các trường mang [`IMPORTED_AT`]) không hiện "sửa năm 1970".
+    /// (Nếu còn trường mang 0 = "chưa biết" thì chỉ tính `field_times`, như file v1.)
     #[serde(default)]
     pub updated_at: i64,
     #[serde(default)]
@@ -196,6 +222,29 @@ impl Entry {
         self.field_times.deleted
     }
 
+    /// Giá trị đúng của `updated_at` (xem tài liệu của trường đó).
+    fn derived_updated_at(&self) -> i64 {
+        let ft = &self.field_times;
+        let unknown = [
+            ft.title,
+            ft.username,
+            ft.password,
+            ft.urls,
+            ft.notes,
+            ft.totp,
+            ft.tags,
+            ft.favorite,
+        ]
+        .contains(&0);
+        // Còn trường "chưa biết" (chỉ xảy ra với dữ liệu có thời điểm ≤ 0): không lấy created_at,
+        // nếu không lần chuẩn hoá sau sẽ lấy chính giá trị đó lấp vào ⇒ chuẩn hoá không luỹ đẳng.
+        if unknown {
+            ft.content_max()
+        } else {
+            ft.content_max().max(self.created_at)
+        }
+    }
+
     /// Điền thời điểm cho các trường chưa có (file v1) và tính lại `updated_at`.
     fn normalize_times(&mut self) {
         // max(...) để chuẩn hoá hai lần cũng cho cùng một kết quả.
@@ -215,24 +264,48 @@ impl Entry {
                 *t = base;
             }
         }
-        self.updated_at = ft.content_max();
+        self.updated_at = self.derived_updated_at();
     }
 
-    /// Đưa lịch sử mật khẩu về dạng chuẩn: mỗi mật khẩu một dòng (giữ thời điểm muộn nhất), không
-    /// chứa mật khẩu hiện tại, không có dòng nào "muộn hơn" mật khẩu hiện tại, mới nhất trước,
-    /// tối đa [`MAX_HISTORY`] dòng. (Hai điều kiện giữa là thứ làm cho phép gộp có tính kết hợp.)
+    /// Đưa lịch sử mật khẩu về dạng chuẩn.
+    ///
+    /// Hãy nghĩ về trạng thái mật khẩu của một mục như một TẬP các cặp *(mật khẩu, thời điểm)* gồm
+    /// cả mật khẩu hiện tại (nếu khác rỗng) lẫn các dòng lịch sử, mỗi mật khẩu một cặp (giữ thời điểm
+    /// muộn nhất), xếp theo MỘT thứ tự toàn phần: *(thời điểm, mật khẩu)* — đúng thứ tự mà phép gộp
+    /// dùng để chọn mật khẩu hiện tại. Dạng chuẩn = [`MAX_HISTORY`] + 1 cặp lớn nhất của tập đó;
+    /// lịch sử = các cặp ấy trừ mật khẩu hiện tại (nên tối đa [`MAX_HISTORY`] dòng, hoặc
+    /// `MAX_HISTORY + 1` khi mật khẩu hiện tại rỗng — ô của nó không bị chiếm).
+    ///
+    /// Để mật khẩu hiện tại luôn là cặp LỚN NHẤT, dòng nào không đứng dưới nó bị hạ xuống ngay dưới
+    /// nó (dữ liệu cũ: bản ≤ 0.2 ghi `replaced_at` = đúng thời điểm của mật khẩu mới). Nhờ vậy phép
+    /// gộp = hợp hai tập rồi lấy phần đầu ⇒ giao hoán, kết hợp và luỹ đẳng kể cả khi lịch sử đã chạm
+    /// trần. (Cách cũ cắt còn 20 dòng SAU khi bỏ mật khẩu hiện tại, nên một dòng về sau trở thành
+    /// mật khẩu hiện tại đã "chiếm chỗ" ở một thứ tự gộp mà không chiếm ở thứ tự khác.)
     fn canon_history(&mut self) {
         let mut hist = std::mem::take(&mut self.password_history);
         let current_since = self.field_times.password;
         for h in &mut hist {
-            h.replaced_at = h.replaced_at.min(current_since);
+            // (thời điểm, mật khẩu) của mỗi dòng phải nhỏ hơn của mật khẩu hiện tại.
+            let limit = if h.password < self.password {
+                current_since
+            } else {
+                current_since.saturating_sub(1)
+            };
+            h.replaced_at = h.replaced_at.min(limit);
         }
+        // Mới nhất trước; cùng thời điểm thì theo thứ tự ngược của mật khẩu — đúng thứ tự "lớn hơn
+        // thắng" của phép gộp.
         hist.sort_by(|a, b| {
             b.replaced_at
                 .cmp(&a.replaced_at)
-                .then_with(|| a.password.cmp(&b.password))
+                .then_with(|| b.password.cmp(&a.password))
         });
-        let mut out: Vec<HistoryItem> = Vec::with_capacity(hist.len().min(MAX_HISTORY));
+        let cap = if self.password.is_empty() {
+            MAX_HISTORY + 1
+        } else {
+            MAX_HISTORY
+        };
+        let mut out: Vec<HistoryItem> = Vec::with_capacity(hist.len().min(cap));
         for h in hist {
             if h.password.is_empty()
                 || h.password == self.password
@@ -240,7 +313,7 @@ impl Entry {
             {
                 continue; // `h` bị drop ⇒ tự xoá khỏi RAM (ZeroizeOnDrop)
             }
-            if out.len() < MAX_HISTORY {
+            if out.len() < cap {
                 out.push(h);
             }
         }
@@ -417,7 +490,7 @@ fn join(parts: &[&VaultData]) -> VaultData {
             continue; // đã xoá vĩnh viễn ở đâu đó ⇒ xoá ở mọi nơi
         }
         st.e.canon_history();
-        st.e.updated_at = st.e.field_times.content_max();
+        st.e.updated_at = st.e.derived_updated_at();
         let State { e, deleted } = st;
         if deleted {
             out.trash.push(e);
@@ -495,13 +568,25 @@ impl VaultData {
 
     /// Thêm mục mới, trả về id. Id trùng (kể cả với mục trong thùng rác / đã xoá vĩnh viễn) hoặc
     /// rỗng thì được cấp id mới.
-    pub fn add_at(&mut self, mut entry: Entry, now: i64) -> String {
+    pub fn add_at(&mut self, entry: Entry, now: i64) -> String {
+        let now = now.max(MIN_REAL_STAMP);
+        self.insert_new(entry, now, now)
+    }
+
+    /// Thêm một mục vừa nhập từ CSV ("nguyên bản"): như [`VaultData::add_at`] nhưng mọi trường nội
+    /// dung mang thời điểm [`IMPORTED_AT`] (thua mọi lần sửa thật, xem tài liệu của hằng số đó);
+    /// `created_at = now`.
+    pub fn add_imported_at(&mut self, entry: Entry, now: i64) -> String {
+        self.insert_new(entry, now.max(MIN_REAL_STAMP), IMPORTED_AT)
+    }
+
+    fn insert_new(&mut self, mut entry: Entry, now: i64, field_time: i64) -> String {
         if entry.id.is_empty() || self.id_in_use(&entry.id) {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
         entry.created_at = now;
-        entry.updated_at = now;
-        entry.field_times = FieldTimes::all_content(now);
+        entry.field_times = FieldTimes::all_content(field_time);
+        entry.updated_at = entry.derived_updated_at();
         entry.canon_history();
         let id = entry.id.clone();
         self.entries.push(entry);
@@ -531,7 +616,9 @@ impl VaultData {
         macro_rules! stamp {
             ($($f:ident),+) => {$(
                 if e.$f != before.$f {
-                    e.field_times.$f = now.max(before.field_times.$f.saturating_add(1));
+                    e.field_times.$f = now
+                        .max(before.field_times.$f.saturating_add(1))
+                        .max(MIN_REAL_STAMP);
                     changed = true;
                 }
             )+};
@@ -539,14 +626,16 @@ impl VaultData {
         stamp!(title, username, password, urls, notes, totp, tags, favorite);
         if e.password != before.password {
             if !before.password.is_empty() {
+                // "Bị thay lúc" = ngay trước thời điểm của mật khẩu mới (1 ms), để mật khẩu hiện tại
+                // luôn đứng trên mọi dòng lịch sử (xem `canon_history`).
                 e.password_history.push(HistoryItem {
                     password: before.password.clone(),
-                    replaced_at: e.field_times.password,
+                    replaced_at: e.field_times.password.saturating_sub(1),
                 });
             }
             e.canon_history();
         }
-        e.updated_at = e.field_times.content_max();
+        e.updated_at = e.derived_updated_at();
         let t = e.updated_at;
         if changed {
             self.touch(t);
@@ -562,7 +651,9 @@ impl VaultData {
             .position(|e| e.id == id)
             .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
         let mut e = self.entries.remove(idx);
-        e.field_times.deleted = now.max(e.field_times.deleted.saturating_add(1));
+        e.field_times.deleted = now
+            .max(e.field_times.deleted.saturating_add(1))
+            .max(MIN_REAL_STAMP);
         let t = e.field_times.deleted;
         self.trash.push(e);
         sort_entries(&mut self.trash);
@@ -578,7 +669,9 @@ impl VaultData {
             .position(|e| e.id == id)
             .ok_or_else(|| Error::EntryNotFound(id.to_string()))?;
         let mut e = self.trash.remove(idx);
-        e.field_times.deleted = now.max(e.field_times.deleted.saturating_add(1));
+        e.field_times.deleted = now
+            .max(e.field_times.deleted.saturating_add(1))
+            .max(MIN_REAL_STAMP);
         let t = e.field_times.deleted;
         self.entries.push(e);
         sort_entries(&mut self.entries);
@@ -895,6 +988,59 @@ mod tests {
         assert!(e.password_history.iter().all(|h| h.password != "p29"));
     }
 
+    /// Rà soát "F-assoc": khi lịch sử chạm trần 20 dòng, (a∘b)∘c ≠ a∘(b∘c) — một dòng của b∘c trùng
+    /// với mật khẩu hiện tại của a đã chiếm một chỗ rồi bị bỏ, nên một thứ tự gộp mất `p26`.
+    /// (Phản ví dụ thu gọn do property test tìm ra.)
+    #[test]
+    fn merge_is_associative_when_history_is_at_the_cap() {
+        let hist = |items: &[(&str, i64)]| -> Vec<HistoryItem> {
+            items
+                .iter()
+                .map(|(p, t)| HistoryItem {
+                    password: p.to_string(),
+                    replaced_at: *t,
+                })
+                .collect()
+        };
+        let a = data(vec![entry("b", "p01", 6)]);
+        let mut eb = entry("b", "", 1);
+        eb.password_history = hist(&[
+            ("p02", 0),
+            ("p07", 0),
+            ("p08", 0),
+            ("p21", 0),
+            ("p24", 0),
+            ("p25", 0),
+        ]);
+        let b = data(vec![eb]);
+        let mut ec = entry("b", "", 2);
+        let mut items = vec![("p15", 1)];
+        for p in [
+            "p01", "p03", "p04", "p05", "p09", "p10", "p11", "p12", "p13", "p14", "p16", "p18",
+            "p19", "p26",
+        ] {
+            items.push((p, 0));
+        }
+        ec.password_history = hist(&items);
+        let c = data(vec![ec]);
+        let m = |x: &VaultData, y: &VaultData| {
+            let mut z = x.clone();
+            z.merge_from(y);
+            z
+        };
+        let left = m(&m(&a, &b), &c);
+        let right = m(&a, &m(&b, &c));
+        assert_eq!(left, right);
+        let e = left.get("b").unwrap();
+        assert_eq!(e.password, "p01");
+        assert_eq!(e.password_history.len(), MAX_HISTORY);
+        assert!(e.password_history.iter().any(|h| h.password == "p26"));
+        assert!(e.password_history.iter().all(|h| h.password != "p01"));
+        // Mật khẩu hiện tại rỗng: ô của nó không bị chiếm ⇒ giữ MAX_HISTORY + 1 dòng.
+        let bc = m(&b, &c);
+        assert_eq!(bc.get("b").unwrap().password_history.len(), MAX_HISTORY + 1);
+    }
+
     #[test]
     fn reinstate_from_backup_is_a_new_edit_that_wins_everywhere() {
         let mut d = data(vec![entry("x", "good", 10)]);
@@ -1043,6 +1189,119 @@ mod tests {
         );
         assert_eq!(keys(&v["tombstones"][0]), ["deleted_at", "id"]);
         assert_eq!(keys(&v["old_keys"][0]), ["key", "retired_at"]);
+    }
+
+    const CSV: &str = "name,url,username,password\nBank,https://bank.example,me,oldpw\n";
+
+    fn imported() -> Entry {
+        crate::import::import_csv(CSV.as_bytes(), &[])
+            .unwrap()
+            .entries[0]
+            .clone()
+    }
+
+    /// Rà soát "import-race": máy A nhập CSV rồi sửa mật khẩu + ghi chú + mã 2FA; máy B (chưa đồng bộ)
+    /// nhập lại CÙNG file CSV sau đó (theo đồng hồ). Trước đây bản nhập của B thắng mọi trường: ghi
+    /// chú và mã 2FA mất hẳn (không có lịch sử), mật khẩu mới chỉ còn trong lịch sử.
+    #[test]
+    fn reimporting_the_same_csv_on_a_stale_device_never_reverts_real_edits() {
+        let mut a = VaultData::default();
+        let mut b = VaultData::default();
+        let id = a.add_imported_at(imported(), 1000);
+        a.update_at(&id, 2000, |e| {
+            e.password = "NEW-from-A".into();
+            e.notes = "recovery codes: 1111 2222".into();
+            e.totp = Some("JBSWY3DPEHPK3PXP".into());
+        })
+        .unwrap();
+        assert_eq!(
+            b.add_imported_at(imported(), 3000),
+            id,
+            "id suy ra từ nội dung"
+        );
+        let mut ab = a.clone();
+        ab.merge_from(&b);
+        let mut ba = b.clone();
+        ba.merge_from(&a);
+        assert_eq!(ab, ba);
+        let e = ab.get(&id).unwrap();
+        assert_eq!(e.password, "NEW-from-A");
+        assert_eq!(e.notes, "recovery codes: 1111 2222");
+        assert_eq!(e.totp.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+        assert_eq!(
+            e.password_history
+                .iter()
+                .map(|h| h.password.as_str())
+                .collect::<Vec<_>>(),
+            ["oldpw"]
+        );
+        assert_eq!(e.created_at, 1000);
+        assert_eq!(e.updated_at, 2000);
+    }
+
+    #[test]
+    fn the_same_csv_imported_on_two_devices_is_one_entry_without_history_noise() {
+        let mut a = VaultData::default();
+        let mut b = VaultData::default();
+        let id = a.add_imported_at(imported(), 5000);
+        b.add_imported_at(imported(), 3000);
+        for x in [&a, &b] {
+            let e = x.get(&id).unwrap();
+            assert_eq!(e.field_times, FieldTimes::all_content(IMPORTED_AT));
+            assert_eq!(e.updated_at, e.created_at, "không hiện 'sửa năm 1970'");
+        }
+        let mut ab = a.clone();
+        ab.merge_from(&b);
+        let mut ba = b.clone();
+        ba.merge_from(&a);
+        assert_eq!(ab, ba);
+        assert_eq!(ab.entries.len(), 1);
+        let e = ab.get(&id).unwrap();
+        assert!(e.password_history.is_empty());
+        // created_at nhỏ nhất của hai máy; updated_at = created_at.
+        assert_eq!((e.created_at, e.updated_at), (3000, 3000));
+        let mut again = ab.clone();
+        again.normalize();
+        assert_eq!(again, ab);
+    }
+
+    #[test]
+    fn an_edit_after_import_wins_and_keeps_the_csv_password_in_history() {
+        let mut a = VaultData::default();
+        let id = a.add_imported_at(imported(), 1000);
+        a.update_at(&id, 1500, |e| e.password = "doi-sau-khi-nhap".into())
+            .unwrap();
+        // Máy khác nhập cùng file CSV muộn hơn nhiều (theo đồng hồ của nó).
+        let mut b = VaultData::default();
+        b.add_imported_at(imported(), 9000);
+        for (x, y) in [(&a, &b), (&b, &a)] {
+            let mut m = x.clone();
+            m.merge_from(y);
+            let e = m.get(&id).unwrap();
+            assert_eq!(e.password, "doi-sau-khi-nhap");
+            assert_eq!(e.password_history.len(), 1);
+            assert_eq!(e.password_history[0].password, "oldpw");
+            assert_eq!((e.created_at, e.updated_at), (1000, 1500));
+        }
+    }
+
+    /// Đồng hồ trước 1970 (hoặc dữ liệu méo) không được đóng dấu 0 ("chưa biết") hay IMPORTED_AT
+    /// cho một lần sửa thật.
+    #[test]
+    fn real_edits_are_always_stamped_after_imported_at() {
+        let mut d = VaultData::default();
+        let id = d.add_at(entry("x", "p", 0), -5);
+        assert_eq!(d.get(&id).unwrap().field_times.title, IMPORTED_AT + 1);
+        let mut e = entry("y", "p", -1);
+        e.id = "y".into();
+        let mut d = data(vec![e]);
+        d.update_at("y", -100, |e| e.notes = "n".into()).unwrap();
+        assert_eq!(d.get("y").unwrap().field_times.notes, IMPORTED_AT + 1);
+        d.trash_at("y", -100).unwrap();
+        assert!(d.get_trashed("y").unwrap().field_times.deleted > IMPORTED_AT);
+        let mut n = d.clone();
+        n.normalize();
+        assert_eq!(n, d);
     }
 
     #[test]

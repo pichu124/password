@@ -11,11 +11,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
-use pwv_vault_core::model::MAX_HISTORY;
+use pwv_vault_core::model::{IMPORTED_AT, MAX_HISTORY};
 use pwv_vault_core::{Entry, FieldTimes, HistoryItem, OldKey, Tombstone, VaultData};
 
 fn pick(choices: &'static [&'static str]) -> impl Strategy<Value = String> {
     proptest::sample::select(choices).prop_map(String::from)
+}
+
+/// Mật khẩu từ một "kho" nhỏ ~30 giá trị (kể cả rỗng), để lịch sử chạm trần [`MAX_HISTORY`] và
+/// trùng nhau giữa các máy / với mật khẩu hiện hành.
+fn pool_pw() -> impl Strategy<Value = String> {
+    (0u8..30).prop_map(|i| {
+        if i == 0 {
+            String::new()
+        } else {
+            format!("p{i:02}")
+        }
+    })
 }
 
 fn arb_entry() -> impl Strategy<Value = Entry> {
@@ -24,7 +36,7 @@ fn arb_entry() -> impl Strategy<Value = Entry> {
         (
             pick(&["", "t1", "t2"]),
             pick(&["", "u1"]),
-            pick(&["", "p1", "p2", "p3"]),
+            pool_pw(),
             proptest::collection::vec(pick(&["x", "y"]), 0..2),
             pick(&["", "n1"]),
         ),
@@ -33,9 +45,12 @@ fn arb_entry() -> impl Strategy<Value = Entry> {
             proptest::collection::vec(pick(&["g1", "g2"]), 0..2),
             any::<bool>(),
         ),
-        proptest::collection::vec((pick(&["", "p1", "p2", "p3", "p4"]), 0i64..7), 0..3),
+        // 0..26 dòng: vượt trần 20 dòng (trước đây 0..3 nên không bao giờ chạm trần).
+        proptest::collection::vec((pool_pw(), 0i64..7), 0..26),
         (0i64..5, 0i64..7),
         proptest::array::uniform9(0i64..7),
+        // Mục "nguyên bản" vừa nhập từ CSV: mọi trường nội dung mang IMPORTED_AT.
+        proptest::bool::weighted(0.2),
     )
         .prop_map(
             |(
@@ -45,6 +60,7 @@ fn arb_entry() -> impl Strategy<Value = Entry> {
                 hist,
                 times,
                 ft,
+                pristine,
             )| {
                 let mut e = Entry::new(title);
                 e.id = id;
@@ -75,6 +91,20 @@ fn arb_entry() -> impl Strategy<Value = Entry> {
                     favorite: ft[7],
                     deleted: ft[8],
                 };
+                if pristine {
+                    let t = IMPORTED_AT;
+                    e.field_times = FieldTimes {
+                        title: t,
+                        username: t,
+                        password: t,
+                        urls: t,
+                        notes: t,
+                        totp: t,
+                        tags: t,
+                        favorite: t,
+                        deleted: ft[8],
+                    };
+                }
                 e
             },
         )
@@ -111,6 +141,14 @@ fn arb_data() -> impl Strategy<Value = VaultData> {
         })
 }
 
+/// Số ca thử: mặc định `n`, hoặc `PROPTEST_CASES` nếu được đặt (ví dụ 20000 cho lần chạy dài).
+fn cases(n: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(n)
+}
+
 /// `Debug` của dữ liệu kho cố ý che bí mật; khi so sánh trong test thì in JSON đầy đủ.
 fn js(d: &VaultData) -> String {
     serde_json::to_string(d).unwrap()
@@ -123,7 +161,7 @@ fn merged(a: &VaultData, b: &VaultData) -> VaultData {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 3000, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: cases(3000), ..ProptestConfig::default() })]
 
     #[test]
     fn normalize_is_idempotent(a in arb_data()) {
@@ -193,6 +231,12 @@ enum Op {
         id: usize,
         now: i64,
     },
+    /// Máy `r` nhập cùng một dòng CSV (nội dung cố định, giống nhau trên mọi máy).
+    Import {
+        r: usize,
+        id: usize,
+        now: i64,
+    },
     /// Máy `r` đọc file do máy `from` ghi.
     Sync {
         r: usize,
@@ -209,6 +253,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         2 => (r.clone(), id.clone(), now.clone()).prop_map(|(r, id, now)| Op::Trash { r, id, now }),
         1 => (r.clone(), id.clone(), now.clone()).prop_map(|(r, id, now)| Op::Restore { r, id, now }),
         1 => (r.clone(), id.clone(), now.clone()).prop_map(|(r, id, now)| Op::Purge { r, id, now }),
+        2 => (r.clone(), id.clone(), now.clone()).prop_map(|(r, id, now)| Op::Import { r, id, now }),
         3 => (r, 0usize..3).prop_map(|(r, from)| Op::Sync { r, from }),
     ]
 }
@@ -327,6 +372,17 @@ fn run(ops: &[Op]) -> (Vec<VaultData>, Observed) {
             Op::Purge { r, id, now } => {
                 let _ = reps[r].purge_at(IDS[id], now);
             }
+            Op::Import { r, id, now } => {
+                // Ứng dụng chỉ nhập khi máy này chưa có mục trùng (bỏ trùng theo nội dung).
+                if reps[r].get(IDS[id]).is_none() && reps[r].get_trashed(IDS[id]).is_none() {
+                    let mut e = Entry::new("csv");
+                    e.id = IDS[id].to_string();
+                    e.username = "csv-user".into();
+                    e.password = "P-csv".into();
+                    e.notes = "csv-note".into();
+                    reps[r].add_imported_at(e, now);
+                }
+            }
             Op::Sync { r, from } => {
                 if r != from {
                     let other = reps[from].clone();
@@ -350,7 +406,7 @@ fn run(ops: &[Op]) -> (Vec<VaultData>, Observed) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 1500, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: cases(1500), ..ProptestConfig::default() })]
 
     #[test]
     fn three_devices_converge_and_never_lose_an_edit(ops in proptest::collection::vec(arb_op(), 1..40)) {
@@ -390,7 +446,10 @@ proptest! {
             };
             let e = e.unwrap_or_else(|| panic!("{id} biến mất"));
             prop_assert_eq!(registers(e).to_vec(), expected, "mục {}", id);
-            prop_assert_eq!(e.updated_at, registers(e).iter().map(|(t, _)| *t).max().unwrap());
+            // updated_at = max(created_at, thời điểm lớn nhất của các trường) — mục nhập từ CSV không
+            // hiện "sửa năm 1970".
+            let content_max = registers(e).iter().map(|(t, _)| *t).max().unwrap();
+            prop_assert_eq!(e.updated_at, content_max.max(e.created_at));
 
             // 3. Lịch sử mật khẩu: không bịa ra mật khẩu, không chứa mật khẩu hiện hành, không quá
             //    dài, và mật khẩu nào từng được dùng rồi bị thay thì phải còn trong đó.

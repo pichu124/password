@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 89a0c5a01b1969738e6a6721d4b749ebae0523b4b61cccc92df6c233f56d3983 # shrinks to a = VaultData { entries: [Entry { id: "b", title: "", updated_at: 6, .. }], trash: [], tombstones: [], modified_at: 0, old_keys: [] }, b = VaultData { entries: [Entry { id: "b", title: "", updated_at: 0, .. }], trash: [], tombstones: [], modified_at: 0, old_keys: [] }, c = VaultData { entries: [], trash: [Entry { id: "b", title: "", updated_at: 2, .. }], tombstones: [], modified_at: 0, old_keys: [] }

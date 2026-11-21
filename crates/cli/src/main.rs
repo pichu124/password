@@ -552,7 +552,7 @@ fn vault_cmd(v: &mut Vault, cmd: Cmd) -> Result<()> {
             let n = entries.len();
             commit(v, move |v| {
                 for e in entries {
-                    v.add(e);
+                    v.add_imported(e);
                 }
                 Ok(())
             })?;
@@ -1004,23 +1004,38 @@ fn unlock(path: &Path, warn_conflicts: bool) -> Result<Vault> {
 }
 
 fn warn_if_rollback(v: &Vault) {
-    if let Some(r) = Config::load().rollback_of(v.vault_id(), v.modified_at(), v.key_changed_at()) {
+    if let Some(r) = v.rollback_against(&Config::load()) {
         eprintln!("{}", rollback_warning(&r));
     }
 }
 
 fn rollback_warning(r: &Rollback) -> String {
-    let mut s = format!(
-        "⚠  CẢNH BÁO: file kho này CŨ HƠN bản mà máy này đã từng thấy (máy này đã thấy nội dung sửa \
-         lúc {}, còn file hiện tại chỉ tới {}).\n   Có thể dịch vụ đồng bộ (Drive/Dropbox/OneDrive) \
-         đã khôi phục một bản cũ, hoặc ai đó đã chép đè file cũ lên — các mục thêm/sửa gần đây có \
-         thể bị THIẾU.",
-        format_utc(r.seen_modified_at),
-        format_utc(r.file_modified_at)
-    );
-    if r.older_password {
+    let mut s = String::new();
+    if r.file_modified_at < r.seen_modified_at || r.older_password {
+        s.push_str(&format!(
+            "⚠  CẢNH BÁO: file kho này CŨ HƠN bản mà máy này đã từng thấy (máy này đã thấy nội dung \
+             sửa lúc {}, còn file hiện tại chỉ tới {}).\n   Có thể dịch vụ đồng bộ \
+             (Drive/Dropbox/OneDrive) đã khôi phục một bản cũ, hoặc ai đó đã chép đè file cũ lên — \
+             các mục thêm/sửa gần đây có thể bị THIẾU.",
+            format_utc(r.seen_modified_at),
+            format_utc(r.file_modified_at)
+        ));
+        if r.older_password {
+            s.push_str(
+                "\n   File này còn dùng master password CŨ hơn lần đổi mật khẩu gần nhất mà máy này biết.",
+            );
+        }
+    }
+    if r.unknown_key {
+        if !s.is_empty() {
+            s.push('\n');
+        }
         s.push_str(
-            "\n   File này còn dùng master password CŨ hơn lần đổi mật khẩu gần nhất mà máy này biết.",
+            "⚠  CẢNH BÁO: kho vừa mở KHÔNG nối tiếp từ kho mà máy này dùng lần trước — bạn vừa nhập \
+             một master password CŨ, hoặc file kho đã bị thay bằng một file khác (người biết mật khẩu \
+             cũ làm được việc này).\n   Nếu bạn đã đổi master password: đừng dùng kho này, hãy mở \
+             lại bằng mật khẩu HIỆN TẠI. Đừng tin các địa chỉ trang web / mật khẩu trong kho này cho \
+             tới khi kiểm tra xong.",
         );
     }
     s.push_str(
@@ -1033,7 +1048,7 @@ fn rollback_warning(r: &Rollback) -> String {
 /// Ghi nhận mốc mới nhất đã thấy của kho (để lần sau phát hiện file bị thay bằng bản cũ).
 fn remember_seen(v: &Vault) {
     let mut c = Config::load();
-    if c.note_seen(v.vault_id(), v.modified_at(), v.key_changed_at()) {
+    if v.note_seen_in(&mut c) {
         if let Err(e) = c.save() {
             eprintln!("(Không ghi được file cấu hình: {e})");
         }
@@ -1091,14 +1106,12 @@ fn recover(path: &Path, yes: bool) -> Result<()> {
     // Người dùng đã chủ động dựng lại kho: lấy trạng thái này làm mốc mới (không cảnh báo
     // "file kho CŨ HƠN" ở mỗi lệnh sau đó nữa).
     let mut c = Config::load();
-    if c.rollback_of(v.vault_id(), v.modified_at(), v.key_changed_at())
-        .is_some()
-    {
+    if v.rollback_against(&c).is_some() {
         eprintln!(
             "(Kho dựng lại cũ hơn bản máy này từng thấy — hãy kiểm tra xem có mục nào bị thiếu.)"
         );
     }
-    c.set_seen(v.vault_id(), v.modified_at(), v.key_changed_at());
+    v.accept_as_seen(&mut c);
     if let Err(e) = c.save() {
         eprintln!("(Không ghi được file cấu hình: {e})");
     }
@@ -1923,10 +1936,19 @@ mod tests {
             seen_modified_at: 1_700_000_000_000,
             file_modified_at: 0,
             older_password: true,
+            unknown_key: false,
         });
         assert!(w.contains("CŨ HƠN"));
         assert!(w.contains("2023-11-14 22:13:20 UTC"));
         assert!(w.contains("master password CŨ"));
+        // Chỉ khoá lạ (mốc thời gian trong file không cũ hơn): không được nói "file CŨ HƠN".
+        let w = rollback_warning(&Rollback {
+            seen_modified_at: 5,
+            file_modified_at: 9,
+            older_password: false,
+            unknown_key: true,
+        });
+        assert!(!w.contains("CŨ HƠN") && w.contains("KHÔNG nối tiếp"));
     }
 
     #[test]

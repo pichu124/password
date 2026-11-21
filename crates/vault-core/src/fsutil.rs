@@ -11,12 +11,12 @@ use rand::RngCore;
 
 use crate::error::{Error, Result};
 
-/// Luôn giữ ngần này bản sao lưu gần nhất…
+/// Luôn giữ ngần này bản sao lưu mới nhất…
 pub const KEEP_RECENT: usize = 10;
-/// …cộng bản cuối cùng của mỗi ngày trong ngần này ngày…
-pub const KEEP_DAILY_DAYS: i64 = 30;
-/// …cộng bản cuối cùng của mỗi "tháng" (30 ngày) trong ngần này tháng.
-pub const KEEP_MONTHLY: i64 = 12;
+/// …cộng bản cuối cùng của mỗi NGÀY (UTC) trong ngần này ngày gần nhất CÓ bản sao lưu…
+pub const KEEP_DAILY_DAYS: usize = 30;
+/// …cộng bản cuối cùng của mỗi kỳ 30 ngày trong ngần này kỳ gần nhất CÓ bản sao lưu.
+pub const KEEP_MONTHLY: usize = 12;
 /// Số bản xung đột đã gộp / file hỏng đã cất / bản ghi bằng khoá cũ giữ lại (mỗi loại) trong thư
 /// mục sao lưu.
 pub const KEEP_ARCHIVED: usize = 20;
@@ -24,7 +24,6 @@ pub const KEEP_ARCHIVED: usize = 20;
 pub const MAX_VAULT_FILE: u64 = 64 * 1024 * 1024;
 const MAX_SIBLINGS: usize = 32;
 const DAY_MS: i64 = 86_400_000;
-const FUTURE_SLACK_MS: i64 = 10 * 60 * 1000;
 
 /// Thư mục sao lưu: `<file>.backups/` nằm cạnh file kho.
 pub fn backup_dir(path: &Path) -> PathBuf {
@@ -255,52 +254,53 @@ pub fn backup_bytes(path: &Path, now: i64, bytes: &[u8]) -> std::io::Result<Path
 
 /// Chọn những bản sao lưu tự động cần XOÁ (theo thời điểm trong tên file).
 ///
-/// Giữ lại: [`KEEP_RECENT`] bản gần nhất; bản cuối cùng của mỗi ngày trong [`KEEP_DAILY_DAYS`] ngày;
-/// bản cuối cùng của mỗi 30 ngày trong [`KEEP_MONTHLY`] kỳ. Nhờ vậy vài chục lần lưu lặt vặt trong
-/// một buổi tối không thể đẩy hết các trạng thái cũ ra ngoài.
+/// Chỉ phụ thuộc vào chính các thời điểm đó — KHÔNG dùng đồng hồ của máy đang dọn. Thư mục sao lưu
+/// nằm trong thư mục đồng bộ, nên một máy chạy sai giờ (hết pin CMOS, giờ nhảy tới tương lai) mà dọn
+/// theo đồng hồ của nó thì sẽ xoá phần lớn lịch sử sao lưu trên MỌI máy.
 ///
-/// Bản có thời điểm "ở tương lai" (máy kia chạy sai đồng hồ) được xét riêng để chúng không chiếm
-/// chỗ của các bản thật: giữ tối đa [`KEEP_RECENT`] bản như vậy.
-pub fn backups_to_prune(stamps: &[i64], now: i64) -> Vec<i64> {
+/// Giữ lại (sau khi bỏ trùng, xếp mới → cũ):
+/// - [`KEEP_RECENT`] bản mới nhất;
+/// - bản mới nhất của mỗi ngày UTC, trong [`KEEP_DAILY_DAYS`] ngày gần nhất CÓ bản sao lưu;
+/// - bản mới nhất của mỗi kỳ 30 ngày (tính từ 1970), trong [`KEEP_MONTHLY`] kỳ gần nhất CÓ bản
+///   sao lưu.
+///
+/// Nhờ vậy vài chục lần lưu lặt vặt trong một buổi tối không đẩy được các trạng thái cũ ra ngoài, kho
+/// ít dùng vẫn giữ lịch sử dài, và số bản giữ lại luôn ≤ 10 + 30 + 12. Bản mang thời điểm "ở tương
+/// lai" (máy kia sai giờ) chỉ chiếm chỗ của đúng số ngày/kỳ mà chúng mang, không hơn.
+pub fn backups_to_prune(stamps: &[i64]) -> Vec<i64> {
     let mut sorted: Vec<i64> = stamps.to_vec();
     sorted.sort_unstable_by(|a, b| b.cmp(a));
     sorted.dedup();
-    let (future, past): (Vec<i64>, Vec<i64>) =
-        sorted.into_iter().partition(|&t| t > now + FUTURE_SLACK_MS);
 
-    let mut keep: HashSet<i64> = HashSet::new();
-    keep.extend(future.iter().take(KEEP_RECENT));
-    keep.extend(past.iter().take(KEEP_RECENT));
-    let today = now.div_euclid(DAY_MS);
-    let (mut days, mut months) = (HashSet::new(), HashSet::new());
-    for &t in &past {
-        // `past` đã xếp mới → cũ, nên bản gặp đầu tiên của mỗi ô là bản cuối cùng của ngày/kỳ đó.
+    let mut keep: HashSet<i64> = sorted.iter().take(KEEP_RECENT).copied().collect();
+    let (mut days, mut periods): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
+    for &t in &sorted {
+        // `sorted` xếp mới → cũ, nên bản gặp đầu tiên của mỗi ô là bản mới nhất của ngày/kỳ đó.
         let day = t.div_euclid(DAY_MS);
-        if today - day < KEEP_DAILY_DAYS && days.insert(day) {
+        if days.len() < KEEP_DAILY_DAYS && days.last() != Some(&day) {
+            days.push(day);
             keep.insert(t);
         }
-        let month = day.div_euclid(30);
-        if today.div_euclid(30) - month < KEEP_MONTHLY && months.insert(month) {
+        let period = day.div_euclid(30);
+        if periods.len() < KEEP_MONTHLY && periods.last() != Some(&period) {
+            periods.push(period);
             keep.insert(t);
         }
     }
-    future
-        .into_iter()
-        .chain(past)
-        .filter(|t| !keep.contains(t))
-        .collect()
+    sorted.into_iter().filter(|t| !keep.contains(t)).collect()
 }
 
 /// Dọn thư mục sao lưu theo [`backups_to_prune`]. Chỉ xoá file mà `is_ours` xác nhận thuộc về
 /// đúng kho này — file lạ (kho khác trùng tên, file người dùng tự chép vào) không bao giờ bị đụng tới.
-pub fn prune_backups(vault_path: &Path, now: i64, is_ours: impl Fn(&Path) -> bool) {
+/// Các bản đã cất (`merged-…`, `damaged-…`, `oldkey-…`): giữ [`KEEP_ARCHIVED`] bản mới nhất mỗi loại.
+pub fn prune_backups(vault_path: &Path, is_ours: impl Fn(&Path) -> bool) {
     let all = list_backups(vault_path);
     let autos: Vec<i64> = all
         .iter()
         .filter(|b| b.kind == BackupKind::Auto)
         .map(|b| b.timestamp)
         .collect();
-    let doomed: HashSet<i64> = backups_to_prune(&autos, now).into_iter().collect();
+    let doomed: HashSet<i64> = backups_to_prune(&autos).into_iter().collect();
     for b in all
         .iter()
         .filter(|b| b.kind == BackupKind::Auto && doomed.contains(&b.timestamp))
@@ -610,46 +610,146 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn retention_keeps_recent_daily_and_monthly_backups() {
-        let now: i64 = 1_800_000_000_000;
-        let min = 60_000;
-        // 40 lần lưu lặt vặt trong 40 phút gần đây + mỗi ngày một bản trong 100 ngày trước đó.
-        let mut stamps: Vec<i64> = (0..40).map(|i| now - i * min).collect();
-        stamps.extend((1..=100).map(|d| now - d * DAY_MS));
-        let prune: HashSet<i64> = backups_to_prune(&stamps, now).into_iter().collect();
-        let kept: Vec<i64> = stamps
+    fn kept(stamps: &[i64]) -> Vec<i64> {
+        let prune: HashSet<i64> = backups_to_prune(stamps).into_iter().collect();
+        let mut k: Vec<i64> = stamps
             .iter()
             .copied()
             .filter(|t| !prune.contains(t))
             .collect();
+        k.sort_unstable_by(|a, b| b.cmp(a));
+        k.dedup();
+        k
+    }
+
+    #[test]
+    fn retention_keeps_recent_daily_and_monthly_backups() {
+        // Giữa ngày UTC, và là ngày cuối của một kỳ 30 ngày ⇒ ranh giới ngày/kỳ rõ ràng.
+        let day0 = 30 * 700 + 29;
+        let now: i64 = day0 * DAY_MS + DAY_MS / 2;
+        let min = 60_000;
+        // 40 lần lưu lặt vặt trong 40 phút gần đây + mỗi ngày một bản trong 100 ngày trước đó.
+        let mut stamps: Vec<i64> = (0..40).map(|i| now - i * min).collect();
+        stamps.extend((1..=100).map(|d| now - d * DAY_MS));
+        let kept = kept(&stamps);
         // 10 bản gần nhất còn nguyên.
         assert!((0..10).all(|i| kept.contains(&(now - i * min))));
-        // Mỗi ngày trong 29 ngày gần đây đều còn một bản (lỗi 0.1.2: chỉ còn đúng 10 bản mới nhất).
+        // Mỗi ngày trong 29 ngày trước đó đều còn một bản (lỗi 0.1.2: chỉ còn đúng 10 bản mới nhất).
         assert!((1..30).all(|d| kept.contains(&(now - d * DAY_MS))));
-        // Xa hơn: mỗi kỳ 30 ngày còn một bản, không còn bản hằng ngày.
-        let older = kept.iter().filter(|&&t| t < now - 31 * DAY_MS).count();
-        assert!((2..=4).contains(&older), "{older}");
-        assert!(kept.len() <= KEEP_RECENT + KEEP_DAILY_DAYS as usize + KEEP_MONTHLY as usize);
-        // Không bao giờ xoá bản vừa tạo.
-        assert!(!prune.contains(&now));
+        // Xa hơn: bản mới nhất của mỗi kỳ 30 ngày (12 kỳ có bản: kỳ hiện tại + 3 kỳ trước đó).
+        let older: Vec<i64> = kept
+            .iter()
+            .copied()
+            .filter(|&t| t < now - 29 * DAY_MS)
+            .collect();
+        assert_eq!(
+            older,
+            [30, 60, 90].map(|d| now - d * DAY_MS),
+            "bản mới nhất của mỗi kỳ cũ hơn"
+        );
+        assert_eq!(kept.len(), 10 + 29 + 3);
         // Chạy lại trên kết quả: không xoá thêm gì (ổn định).
-        assert!(backups_to_prune(&kept, now).is_empty());
+        assert!(backups_to_prune(&kept).is_empty());
+    }
+
+    /// Rà soát "prune-clock": 180 bản sao lưu thật trong 60 ngày. Trước đây máy dọn có đồng hồ lùi
+    /// 25 năm chỉ giữ 10 bản, đồng hồ nhanh 90 ngày giữ 12. Giờ không còn đồng hồ: luôn giữ đúng
+    /// một tập, tính được trước.
+    #[test]
+    fn retention_does_not_depend_on_the_pruning_devices_clock() {
+        let day0 = 30 * 600 + 29;
+        let real_now: i64 = day0 * DAY_MS + DAY_MS / 2;
+        let at = |d: i64, k: i64| real_now - d * DAY_MS - k * 60_000;
+        let mut stamps: Vec<i64> = Vec::new();
+        for d in 0..60 {
+            for k in 0..3 {
+                stamps.push(at(d, k));
+            }
+        }
+        let mut expected: Vec<i64> = Vec::new();
+        expected.extend(
+            [
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (2, 0),
+                (2, 1),
+                (2, 2),
+            ]
+            .map(|(d, k)| at(d, k)),
+        );
+        expected.extend((3..30).map(|d| at(d, 0))); // bản mới nhất của 30 ngày gần nhất
+        expected.push(at(30, 0)); // kỳ 30 ngày trước đó
+        expected.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(kept(&stamps), expected);
+        assert_eq!(expected.len(), 37);
     }
 
     #[test]
     fn retention_is_not_fooled_by_future_dated_backups() {
-        let now: i64 = 1_800_000_000_000;
-        // Máy kia chạy sai đồng hồ 1 tháng và đã tạo 15 bản "ở tương lai".
-        let future: Vec<i64> = (0..15).map(|i| now + 30 * DAY_MS + i).collect();
-        let real: Vec<i64> = (0..12).map(|i| now - i * 1000).collect();
+        let day0 = 30 * 700 + 29;
+        let now: i64 = day0 * DAY_MS + DAY_MS / 2;
+        // 40 ngày lịch sử thật (mỗi ngày một bản), 400 ngày trước đó mỗi kỳ một bản…
+        let mut real: Vec<i64> = (0..40).map(|d| now - d * DAY_MS).collect();
+        real.extend((2..15).map(|m| now - m * 30 * DAY_MS));
+        // …cộng 3 bản do một máy sai đồng hồ ghi "ở tương lai" (năm 2100).
+        let future: Vec<i64> = (0..3).map(|i| 4_102_444_800_000 + i * DAY_MS).collect();
         let all: Vec<i64> = future.iter().chain(real.iter()).copied().collect();
-        let prune: HashSet<i64> = backups_to_prune(&all, now).into_iter().collect();
-        assert!(real.iter().take(KEEP_RECENT).all(|t| !prune.contains(t)));
-        assert_eq!(
-            future.iter().filter(|t| !prune.contains(t)).count(),
-            KEEP_RECENT
-        );
+        let kept = kept(&all);
+        // Chúng chỉ chiếm đúng 3 ngày và 1 kỳ: 27 ngày thật gần nhất và 11 kỳ thật vẫn còn.
+        assert!((0..27).all(|d| kept.contains(&(now - d * DAY_MS))));
+        let real_periods: Vec<i64> = {
+            let mut v: Vec<i64> = real.iter().map(|t| t.div_euclid(DAY_MS) / 30).collect();
+            v.dedup();
+            v
+        };
+        for p in real_periods.iter().take(KEEP_MONTHLY - 1) {
+            let newest = real
+                .iter()
+                .find(|t| t.div_euclid(DAY_MS) / 30 == *p)
+                .unwrap();
+            assert!(kept.contains(newest), "kỳ {p}");
+        }
+        assert!(kept.len() <= KEEP_RECENT + KEEP_DAILY_DAYS + KEEP_MONTHLY);
+    }
+
+    #[test]
+    fn rarely_used_vault_keeps_bounded_long_history() {
+        // Mỗi tháng (~30,4 ngày) một bản, trong 3 năm.
+        let start: i64 = 1_700_000_000_000;
+        let stamps: Vec<i64> = (0..36).map(|m| start + m * 2_629_746_000).collect();
+        let kept = kept(&stamps);
+        // Mỗi bản rơi vào một ngày riêng ⇒ 30 bản mới nhất còn (≈ 2,5 năm); có giới hạn.
+        assert_eq!(kept.len(), 30);
+        let mut newest: Vec<i64> = stamps.clone();
+        newest.reverse();
+        assert_eq!(kept, newest[..30]);
+    }
+
+    #[test]
+    fn same_day_bursts_keep_the_days_last_backup() {
+        let day = 20_000i64;
+        let mut stamps: Vec<i64> = Vec::new();
+        // 3 ngày, mỗi ngày 25 lần lưu (từ 08:00, cách nhau 1 phút), ngày mới nhất trước.
+        for d in 0..3 {
+            for i in 0..25 {
+                stamps.push((day - d) * DAY_MS + 8 * 3_600_000 + i * 60_000);
+            }
+        }
+        let kept = kept(&stamps);
+        for d in 0..3 {
+            let last = (day - d) * DAY_MS + 8 * 3_600_000 + 24 * 60_000;
+            assert!(kept.contains(&last), "ngày {d}");
+        }
+        // 10 bản mới nhất (đều của ngày mới nhất) + bản cuối của 2 ngày trước.
+        assert_eq!(kept.len(), 12);
+        // Trùng thời điểm (hai máy lưu cùng mili-giây) không làm lệch kết quả.
+        let mut dup = stamps.clone();
+        dup.extend_from_slice(&stamps[..5]);
+        assert_eq!(super::tests::kept(&dup), kept);
     }
 
     #[test]
@@ -661,9 +761,9 @@ mod tests {
         for i in 0..15 {
             backup_current(&p, now - i * 1000).unwrap();
         }
-        prune_backups(&p, now, |_| false);
+        prune_backups(&p, |_| false);
         assert_eq!(list_backups(&p).len(), 15, "file lạ không bị xoá");
-        prune_backups(&p, now, |_| true);
+        prune_backups(&p, |_| true);
         assert_eq!(list_backups(&p).len(), KEEP_RECENT);
     }
 

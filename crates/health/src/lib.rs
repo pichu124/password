@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use pwv_generator::estimate_strength;
-use pwv_vault_core::model::now_ms;
+use pwv_vault_core::model::{now_ms, IMPORTED_AT};
 use pwv_vault_core::Entry;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
@@ -87,10 +87,11 @@ impl Report {
     }
 }
 
-/// Lần cuối mật khẩu được đặt (ms). Với mục nhập từ CSV, đây là thời điểm nhập (file CSV không
+/// Lần cuối mật khẩu được đặt (ms). Với mục nhập từ CSV chưa sửa mật khẩu (thời điểm là
+/// [`IMPORTED_AT`] — một mốc cố định, không phải ngày thật), đây là thời điểm nhập (file CSV không
 /// cho biết tuổi thật của mật khẩu).
 fn password_set_at(e: &Entry) -> i64 {
-    if e.field_times.password > 0 {
+    if e.field_times.password > IMPORTED_AT {
         e.field_times.password
     } else {
         e.created_at
@@ -331,6 +332,29 @@ mod tests {
         assert!(matches!(r.issues["c"][0], Issue::Old { days } if days >= 400));
         assert_eq!(r.count(|i| matches!(i, Issue::Reused { .. })), 2);
         assert_eq!(r.score(), 25);
+    }
+
+    /// Mục nhập từ CSV chưa sửa mật khẩu mang thời điểm cố định IMPORTED_AT (1970): tuổi mật khẩu
+    /// tính từ lúc nhập, không phải "56 năm".
+    #[test]
+    fn imported_password_age_counts_from_the_import() {
+        let mut d = pwv_vault_core::VaultData::default();
+        let now = now_ms();
+        d.add_imported_at(
+            e("i", "Nhập", "Q7#vLp2!mZ9@wX4$kR8-imported"),
+            now - 10 * 86_400_000,
+        );
+        let entry = d.entries[0].clone();
+        assert_eq!(entry.field_times.password, IMPORTED_AT);
+        let r = offline_report(&[entry]);
+        assert!(r
+            .issues
+            .get("i")
+            .is_none_or(|v| v.iter().all(|i| !matches!(i, Issue::Old { .. }))));
+        let mut old = d.entries[0].clone();
+        old.created_at = now - 400 * 86_400_000;
+        let r = offline_report(&[old]);
+        assert!(matches!(r.issues["i"][0], Issue::Old { days } if (399..=401).contains(&days)));
     }
 
     /// Phản hồi giả giống thật: nhiều dòng đệm (count 0) + các dòng cho sẵn.

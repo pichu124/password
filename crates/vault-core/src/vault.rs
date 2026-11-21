@@ -4,16 +4,21 @@
 //!
 //! - **Đọc–gộp–ghi**: trước mỗi lần ghi, file trên đĩa được đọc lại và gộp vào bản trong RAM, nên
 //!   không bao giờ ghi đè mất thay đổi của máy khác.
-//! - **Giao dịch**: [`Vault::transact`] gộp file trên đĩa TRƯỚC khi sửa, và nếu ghi thất bại thì
-//!   hoàn tác thay đổi trong RAM — thứ đang hiển thị luôn là thứ đã nằm trên đĩa.
+//! - **Giao dịch**: [`Vault::transact`] gộp file trên đĩa TRƯỚC khi sửa, và nếu ghi thất bại
+//!   (trước khi file kho bị thay) thì hoàn tác thay đổi trong RAM — thứ đang hiển thị là thứ đã nằm
+//!   trên đĩa. Ngoại lệ duy nhất: file ĐÃ được thay nhưng đọc lại không xác minh được
+//!   ([`SaveReport::unverified`]) — khi đó KHÔNG hoàn tác (đĩa rất có thể đã là bản mới), mà đọc lại
+//!   và ghi lại ở lần đồng bộ sau.
 //! - **Không tự ghi đè file lạ**: file trên đĩa hỏng, thuộc kho khác, do bản app mới hơn ghi, hoặc
 //!   biến mất ⇒ báo lỗi riêng cho từng trường hợp và chờ người dùng quyết định.
-//! - **Đổi master password = đổi luôn khoá kho**: bản sao cũ + mật khẩu cũ không mở được dữ liệu
-//!   ghi SAU lần đổi (trong file kho và thư mục sao lưu do app này quản lý).
+//! - **Đổi master password = đổi luôn khoá kho**: mật khẩu cũ + bản sao cũ không mở được những gì
+//!   máy này ghi SAU lần đổi (file kho, bản sao lưu, bản cất `oldkey-…`). Không với tới được: bản cũ
+//!   trong lịch sử phiên bản / thùng rác của dịch vụ đồng bộ, và những gì một máy CHƯA biết lần đổi
+//!   tiếp tục ghi (file kho, bản sao lưu của chính nó) cho tới khi nó mở khoá bằng mật khẩu mới.
 //! - **Khoá cũ chỉ còn quyền đọc**: một file trong thư mục đồng bộ chỉ mở được bằng khoá của mật
 //!   khẩu chính cũ (ai biết mật khẩu cũ và giữ bản sao cũ cũng làm ra được file như vậy) KHÔNG BAO
 //!   GIỜ được tự gộp vào kho. Nó được mã hoá lại bằng khoá hiện tại và cất vào thư mục sao lưu
-//!   (`oldkey-…`) để chủ kho tự xem lại.
+//!   (`oldkey-…`) để chủ kho tự xem lại và lấy từng mục ra nếu muốn.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +27,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::config::{Config, Rollback};
 use crate::crypto::{self, KdfParams, Key};
 use crate::error::{Error, Result};
 use crate::format::{self, Header, RawFile};
@@ -189,6 +195,20 @@ thread_local! {
 
 fn fingerprint(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+/// Dấu nhận dạng 64 bit của một khoá kho: SHA-256 có tách miền, không dùng được để dò ra khoá
+/// (khoá là 256 bit ngẫu nhiên). Bit thấp luôn bật để không bao giờ bằng 0 (0 = "chưa ghi nhận").
+fn key_tag_of(vault_id: &str, key: &[u8; crypto::KEY_LEN]) -> u64 {
+    let mut h = Sha256::new();
+    h.update(b"pwv/v1/key-tag\0");
+    h.update(vault_id.as_bytes());
+    h.update([0u8]);
+    h.update(key);
+    let d = h.finalize();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&d[..8]);
+    u64::from_le_bytes(first) | 1
 }
 
 /// Đọc header (chưa xác thực) của một file — chỉ để biết nó thuộc kho nào.
@@ -391,7 +411,7 @@ impl Vault {
     /// Mở kho bằng master password.
     ///
     /// Ngoài file kho chính, mật khẩu vừa nhập còn được thử trên tối đa 2 bản cạnh kho của CÙNG kho
-    /// có lần đổi mật khẩu chính MỚI HƠN (xem [`Vault::absorb_forked_copies`] và
+    /// có lần đổi mật khẩu chính MỚI HƠN (xem `absorb_forked_copies` và
     /// `open_via_newer_copy`): đó là cách hai lần đổi mật khẩu trên hai máy chưa kịp đồng bộ được
     /// nối lại, và là cách mở kho khi máy khác vừa đổi mật khẩu.
     pub fn open_with(path: impl AsRef<Path>, password: &[u8], opts: OpenOptions) -> Result<Vault> {
@@ -478,8 +498,11 @@ impl Vault {
     /// - cùng khoá hiện tại ⇒ gộp vào;
     /// - chỉ mở được bằng khoá cũ ⇒ KHÔNG gộp; nó sẽ được cất (mã hoá lại) vào thư mục sao lưu
     ///   trước lần ghi kế tiếp;
-    /// - không giải mã được ⇒ vẫn mở kho từ bản kia (mật khẩu đúng thì không được báo "sai mật
-    ///   khẩu"), nhưng lần đồng bộ kế tiếp sẽ báo đúng tình trạng file chính để chủ kho quyết định.
+    /// - không giải mã được ⇒ KHÔNG mở từ bản này. Lý do: ai biết mật khẩu CŨ và có quyền ghi vào thư
+    ///   mục đồng bộ tự làm được một "bản mới hơn" mở bằng mật khẩu cũ (header chưa được xác thực,
+    ///   khoá do họ chọn). Nếu chủ kho lỡ gõ mật khẩu cũ mà app mở kho từ bản đó, thì lần "ghi đè file
+    ///   hỏng" sau sẽ đưa cả kho về khoá của kẻ đó. Đòi khoá của bản kia mở được file chính là thứ
+    ///   chặn điều này (kẻ đó không có khoá hiện tại).
     ///
     /// Lần đồng bộ kế tiếp ghi kết quả ra file chính và cất bản xung đột đi.
     fn open_via_newer_copy(
@@ -498,6 +521,9 @@ impl Vault {
             let Ok(u) = unlock_bytes(&bytes, password, opts.allow_weak_kdf) else {
                 continue;
             };
+            let Ok((main_data, used)) = decrypt_with_keys(&main, &u.key, &u.data) else {
+                continue;
+            };
             let main_fp = fingerprint(main_bytes);
             let mut v = Vault::assemble(
                 path.to_path_buf(),
@@ -508,12 +534,11 @@ impl Vault {
                 true,
                 opts.allow_weak_kdf,
             );
-            match decrypt_with_keys(&main, &v.vault_key, &v.data) {
-                Ok((main_data, KeyUsed::Current)) => {
+            match used {
+                KeyUsed::Current => {
                     v.data.merge_from(&main_data);
                 }
-                Ok((main_data, KeyUsed::Retired)) => v.queue_old_key_archive(main_fp, main_data),
-                Err(_) => v.disk_fingerprint = None,
+                KeyUsed::Retired => v.queue_old_key_archive(main_fp, main_data),
             }
             return Some(v);
         }
@@ -553,6 +578,7 @@ impl Vault {
     ) -> Result<(Vault, usize, i64)> {
         const MAX_PASSWORD_ATTEMPTS: usize = 5; // mỗi nhóm tốn một lượt Argon2
         const MAX_FILES_MERGED: usize = 40;
+        const MAX_FILES_EXAMINED: usize = 500;
         let path = path.as_ref().to_path_buf();
         let candidates: Vec<(BackupFile, Header)> = fsutil::list_backups(&path)
             .into_iter()
@@ -566,8 +592,16 @@ impl Vault {
                 groups.push(h);
             }
         }
-        groups.sort_by_key(|h| std::cmp::Reverse(h.key_changed_at));
-        let mut last_err = Error::VaultFileMissing(path.display().to_string());
+        // Thứ tự thử: kho mà file chính (nếu còn đọc được header) thuộc về trước, rồi lần đổi mật
+        // khẩu chính mới nhất trước.
+        let main_id = header_of(&path).map(|h| h.vault_id);
+        groups.sort_by_key(|h| {
+            (
+                main_id.as_deref() != Some(h.vault_id.as_str()),
+                std::cmp::Reverse(h.key_changed_at),
+            )
+        });
+        let mut last_err = Error::NoUsableBackup;
         let mut base: Option<(Header, Key)> = None;
         for h in groups.into_iter().take(MAX_PASSWORD_ATTEMPTS) {
             match h.unwrap_key(password, opts.allow_weak_kdf) {
@@ -592,11 +626,16 @@ impl Vault {
         }
         let mut data: Option<VaultData> = None;
         let (mut used, mut newest) = (0usize, 0i64);
+        // Giới hạn tính trên số file GỘP ĐƯỢC (không phải số file đã xét): vài chục file rác mang
+        // tên bản sao lưu "mới nhất" không được phép đẩy các bản thật ra ngoài.
         for (b, _) in candidates
             .iter()
             .filter(|(_, h)| h.vault_id == header.vault_id)
-            .take(MAX_FILES_MERGED)
+            .take(MAX_FILES_EXAMINED)
         {
+            if used >= MAX_FILES_MERGED {
+                break;
+            }
             // Chỉ nhận đúng khoá gốc: bản ghi bằng khoá cũ / khoá lạ trong thư mục đồng bộ không
             // được tự gộp (xem quy tắc ở đầu file).
             let Ok(bytes) = fsutil::read_retry(&b.path) else {
@@ -615,7 +654,7 @@ impl Vault {
             newest = newest.max(b.timestamp);
         }
         let Some(data) = data else {
-            return Err(Error::VaultFileDamaged);
+            return Err(Error::NoUsableBackup);
         };
         let v = Vault::assemble(path, header, key, data, None, true, opts.allow_weak_kdf);
         Ok((v, used, newest))
@@ -706,6 +745,62 @@ impl Vault {
         self.header.kdf
     }
 
+    /// Dấu nhận dạng của khoá kho hiện tại (không bí mật, không suy ngược ra khoá được; khác 0).
+    /// Máy ghi nhớ dấu này để lần mở sau biết kho có còn "nối tiếp" kho nó từng dùng hay không.
+    pub fn key_tag(&self) -> u64 {
+        key_tag_of(&self.header.vault_id, &self.vault_key)
+    }
+
+    /// Kho này có biết khoá mang dấu `tag` không: đó là khoá hiện tại, hoặc một khoá cũ nằm trong
+    /// phần đã mã hoá. Người chỉ biết một mật khẩu chính CŨ không thể làm ra một kho "biết" khoá mà
+    /// máy này dùng lần trước (họ không có khoá đó).
+    pub fn knows_key_tag(&self, tag: u64) -> bool {
+        tag == self.key_tag()
+            || self
+                .data
+                .old_keys
+                .iter()
+                .any(|k| key_tag_of(&self.header.vault_id, &k.key) == tag)
+    }
+
+    /// So kho đang mở với mốc mà máy này đã ghi nhận trong `config`: file cũ hơn bản từng thấy,
+    /// dùng mật khẩu chính cũ hơn, hoặc dùng một khoá KHÔNG nối tiếp từ khoá máy này dùng lần trước.
+    pub fn rollback_against(&self, config: &Config) -> Option<Rollback> {
+        let seen = config.seen_key_tag(self.vault_id());
+        let key_known = seen == 0 || self.knows_key_tag(seen);
+        config.rollback_of(
+            self.vault_id(),
+            self.modified_at(),
+            self.key_changed_at(),
+            key_known,
+        )
+    }
+
+    /// Ghi nhận trạng thái hiện tại vào mốc "đã thấy" (các mốc chỉ tăng). Dấu khoá chỉ được cập
+    /// nhật khi khoá hiện tại nối tiếp khoá đã ghi nhận — nếu không, cảnh báo phải còn nguyên cho
+    /// tới khi chủ kho chấp nhận ([`Vault::accept_as_seen`]). Trả về true nếu `config` thay đổi.
+    pub fn note_seen_in(&self, config: &mut Config) -> bool {
+        let seen = config.seen_key_tag(self.vault_id());
+        let key_known = seen == 0 || self.knows_key_tag(seen);
+        config.note_seen(
+            self.vault_id(),
+            self.modified_at(),
+            self.key_changed_at(),
+            if key_known { self.key_tag() } else { 0 },
+        )
+    }
+
+    /// Chủ kho đã biết và chấp nhận trạng thái hiện tại (vừa khôi phục từ sao lưu, hoặc đã đọc
+    /// cảnh báo): lấy nó làm mốc mới.
+    pub fn accept_as_seen(&self, config: &mut Config) {
+        config.set_seen(
+            self.vault_id(),
+            self.modified_at(),
+            self.key_changed_at(),
+            self.key_tag(),
+        );
+    }
+
     /// Bản trong RAM có thay đổi chưa nằm trên đĩa (ví dụ lần ghi gần nhất thất bại).
     pub fn has_unsaved_changes(&self) -> bool {
         self.dirty
@@ -765,6 +860,14 @@ impl Vault {
         self.data.add_at(entry, now_ms())
     }
 
+    /// Thêm một mục vừa nhập từ file CSV, trả về id. Khác [`Vault::add`]: các trường mang thời điểm
+    /// [`crate::model::IMPORTED_AT`] nên thua mọi lần sửa thật — nhập lại cùng file CSV trên một máy
+    /// chưa đồng bộ không đè lên các thay đổi đã làm ở máy khác.
+    pub fn add_imported(&mut self, entry: Entry) -> String {
+        self.dirty = true;
+        self.data.add_imported_at(entry, now_ms())
+    }
+
     /// Sửa một mục. Chỉ các trường thực sự thay đổi mới được ghi nhận; nếu mật khẩu thay đổi,
     /// mật khẩu cũ được đưa vào lịch sử.
     pub fn update(&mut self, id: &str, edit: impl FnOnce(&mut Entry)) -> Result<()> {
@@ -806,6 +909,23 @@ impl Vault {
             self.dirty = true;
         }
         ids.len()
+    }
+
+    /// Xoá vĩnh viễn ĐÚNG các mục có id trong `ids` và đang nằm trong thùng rác. Mục khác trong thùng
+    /// rác — ví dụ vừa được máy khác chuyển vào sau khi chủ kho xem danh sách và bấm xác nhận — không
+    /// bị đụng tới. Trả về số mục đã xoá.
+    pub fn purge_trashed(&mut self, ids: &[String]) -> usize {
+        let now = now_ms();
+        let mut n = 0;
+        for id in ids {
+            if self.data.get_trashed(id).is_some() && self.data.purge_at(id, now).is_ok() {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.dirty = true;
+        }
+        n
     }
 
     /// Đưa phiên bản `old` của một mục (lấy từ bản sao lưu) trở lại làm phiên bản hiện hành.
@@ -1071,7 +1191,7 @@ impl Vault {
     }
 
     fn prune_backups(&self) {
-        fsutil::prune_backups(&self.path, now_ms(), |p| self.is_same_vault_file(p));
+        fsutil::prune_backups(&self.path, |p| self.is_same_vault_file(p));
     }
 
     fn save_report(refreshed: Refreshed, w: WriteOutcome) -> SaveReport {
@@ -1153,10 +1273,21 @@ impl Vault {
             Err(Error::VaultFileMissing(_)) => {
                 self.archive_pending_old_keys()?;
                 let bytes = format::serialize(&self.header, &self.data, &self.vault_key)?;
+                let fp = fingerprint(&bytes);
+                // Bản trong RAM là bản tốt DUY NHẤT: chép nó vào thư mục sao lưu TRƯỚC khi ghi
+                // (`write_new` ghi thẳng vào tên cuối — mất điện giữa chừng thì file kho dở dang).
+                if fsutil::backup_bytes(&self.path, now_ms(), &bytes).is_ok() {
+                    self.backed_up = Some(fp);
+                }
                 fsutil::write_new(&self.path, &bytes)?;
                 self.pending_old_keys.clear();
                 self.archived_old_keys.clear();
-                self.disk_fingerprint = Some(fingerprint(&bytes));
+                if !self.read_back().is_ok_and(|b| b == bytes) {
+                    self.disk_fingerprint = None;
+                    self.dirty = true;
+                    return Err(Error::WriteVerifyFailed);
+                }
+                self.disk_fingerprint = Some(fp);
                 self.dirty = false;
                 Ok(None)
             }
@@ -1198,6 +1329,9 @@ impl Vault {
     ) -> Result<PasswordChangeReport> {
         kdf.validate(self.allow_weak_kdf)?;
         self.sync()?;
+        // Khoá sắp bị thay. Bản sao lưu nào mở được bằng ĐÚNG khoá này thì chắc chắn do người có
+        // khoá hiện tại ghi ra ⇒ được mã hoá lại tại chỗ (xem `reencrypt_backups`).
+        let retiring: Key = Zeroizing::new(**self.vault_key);
         let ((), save) = self.transact(|v| {
             let new_key = crypto::random_key();
             let changed = now_ms().max(v.header.key_changed_at.saturating_add(1));
@@ -1215,13 +1349,23 @@ impl Vault {
             v.dirty = true;
             Ok(())
         })?;
-        let mut report = self.reencrypt_backups();
+        let mut report = self.reencrypt_backups(&retiring);
         report.save = save;
         Ok(report)
     }
 
-    /// Mã hoá lại các file trong thư mục sao lưu bằng khoá + mật khẩu hiện tại.
-    fn reencrypt_backups(&self) -> PasswordChangeReport {
+    /// Ngay sau khi đổi master password: mã hoá lại các file trong thư mục sao lưu bằng khoá + mật
+    /// khẩu hiện tại — CHỈ những file mở được bằng `retiring` (khoá vừa bị thay ở chính lần đổi này)
+    /// hoặc bằng khoá hiện tại.
+    ///
+    /// File chỉ mở được bằng một khoá cũ HƠN nữa thì để nguyên (tính vào `backups_skipped`). Thư mục
+    /// sao lưu nằm trong thư mục đồng bộ, nên người biết một mật khẩu chính CŨ có thể đặt vào đó
+    /// một file do họ tự mã hoá bằng khoá cũ; nếu file ấy được mã hoá lại bằng khoá hiện tại thì nó
+    /// trở thành "bản sao lưu đáng tin" và lần khôi phục sau sẽ gộp nó vào kho. Vì vậy không có chỗ
+    /// nào khác mã hoá lại bản sao lưu: file ghi bằng khoá cũ mãi là "bản ghi bằng khoá cũ" — chủ kho
+    /// vẫn xem và khôi phục từng mục từ nó được ([`Vault::read_backup`]), nhưng nó không bao giờ được
+    /// tự gộp.
+    fn reencrypt_backups(&self, retiring: &Key) -> PasswordChangeReport {
         let mut report = PasswordChangeReport::default();
         for b in fsutil::list_backups(&self.path) {
             // File hỏng đã cất (`damaged-…`) vốn không giải mã được bằng bất kỳ mật khẩu nào: bỏ qua,
@@ -1238,8 +1382,10 @@ impl Vault {
             if raw.header.vault_id != self.header.vault_id || raw.header == self.header {
                 continue; // file của kho khác, hoặc đã dùng khoá hiện tại
             }
-            let done = decrypt_with_keys(&raw, &self.vault_key, &self.data)
-                .and_then(|(data, _)| format::serialize(&self.header, &data, &self.vault_key))
+            let done = raw
+                .decrypt_body(&self.vault_key)
+                .or_else(|_| raw.decrypt_body(retiring))
+                .and_then(|data| format::serialize(&self.header, &data, &self.vault_key))
                 .and_then(|out| fsutil::atomic_write(&b.path, &out));
             match done {
                 Ok(()) => report.backups_reencrypted += 1,
@@ -1247,17 +1393,6 @@ impl Vault {
             }
         }
         report
-    }
-
-    /// Mã hoá lại bằng khoá + mật khẩu hiện tại những bản sao lưu còn dùng header cũ (ví dụ lần
-    /// đổi mật khẩu trước bị ngắt giữa chừng, trước khi kịp mã hoá lại thư mục sao lưu). Trả về số
-    /// file đã mã hoá lại. Đọc mọi file trong thư mục sao lưu ⇒ chỉ nên gọi một lần mỗi khi mở khoá,
-    /// không gọi trong đồng bộ nền.
-    pub fn reencrypt_stale_backups(&self) -> usize {
-        if self.read_only {
-            return 0;
-        }
-        self.reencrypt_backups().backups_reencrypted
     }
 
     // ------------------------------------------------------------------ đồng bộ
@@ -1436,6 +1571,14 @@ impl Vault {
     /// Đọc nội dung một bản sao lưu (phải nằm trong thư mục sao lưu của kho này). Nhận cả bản chỉ
     /// mở được bằng khoá cũ: đây là việc chủ kho tự chọn xem / khôi phục từng mục.
     pub fn read_backup(&self, path: &Path) -> Result<VaultData> {
+        self.read_backup_checked(path).map(|(d, _)| d)
+    }
+
+    /// Như [`Vault::read_backup`], kèm cờ `true` nếu bản này CHỈ mở được bằng khoá của một mật khẩu
+    /// chính cũ. Bản như vậy có thể là bản sao lưu thật từ trước lần đổi mật khẩu, nhưng cũng có thể
+    /// do người biết mật khẩu cũ đặt vào thư mục sao lưu — giao diện phải nói rõ điều đó trước khi
+    /// chủ kho khôi phục mục nào từ nó.
+    pub fn read_backup_checked(&self, path: &Path) -> Result<(VaultData, bool)> {
         if !fsutil::is_within(path, &fsutil::backup_dir(&self.path)) {
             return Err(Error::BadFormat);
         }
@@ -1444,7 +1587,8 @@ impl Vault {
         if raw.header.vault_id != self.header.vault_id {
             return Err(Error::DifferentVault);
         }
-        decrypt_with_keys(&raw, &self.vault_key, &self.data).map(|(d, _)| d)
+        decrypt_with_keys(&raw, &self.vault_key, &self.data)
+            .map(|(d, used)| (d, used == KeyUsed::Retired))
     }
 
     // ------------------------------------------------------------------ chuyển kho
@@ -1495,10 +1639,18 @@ impl Vault {
             Ok(s) => {
                 report.conflicts_merged = s.conflicts.iter().filter(|c| c.result.is_ok()).count();
             }
-            // Máy khác đã đổi mật khẩu: bản trong RAM đã cũ, không được nhân nó ra chỗ khác.
-            Err(e @ Error::PasswordChangedElsewhere) => return Err(e),
-            Err(_) => report.rescued = true,
+            // File ở chỗ cũ thật sự không dùng được nữa ⇒ "cứu" bản đang mở sang chỗ mới.
+            Err(
+                Error::VaultFileMissing(_)
+                | Error::VaultFileDamaged
+                | Error::DifferentVault
+                | Error::UnsupportedVersion(_),
+            ) => report.rescued = true,
+            // Mọi lỗi khác (đọc/ghi tạm thời, đĩa đầy, máy khác đã đổi mật khẩu…): HUỶ chuyển. Nếu
+            // cứ "cứu" thì sẽ có hai file kho cùng sống ở hai thư mục, lặng lẽ tách nhau ra.
+            Err(e) => return Err(e),
         }
+        let left_behind = self.disk_fingerprint;
 
         // 2. Ghi ở chỗ mới rồi xác minh.
         let bytes = format::serialize(&self.header, &self.data, &self.vault_key)?;
@@ -1521,11 +1673,37 @@ impl Vault {
         if old_backups.is_dir() {
             report.backups_moved = fsutil::move_flat_dir(&old_backups, &new_backups).is_ok();
         }
-        // Kiểm tra bản mới thêm một lần nữa ngay trước khi xoá bản cũ.
-        if self.file_matches_memory(&new_path) {
-            report.old_removed = fsutil::retry(|| fs::remove_file(&old_path)).is_ok();
-        }
+        test_hook("move:before-delete");
+        report.old_removed = self.remove_old_location(&old_path, left_behind);
         Ok(report)
+    }
+
+    /// Bước cuối của [`Vault::move_to`]: xoá file ở chỗ cũ — chỉ khi nó vẫn đúng là thứ bước 1 để lại
+    /// (`left_behind`). Máy khác có thể đã ghi vào đó trong lúc chuyển (chép thư mục sao lưu sang ổ
+    /// khác mất vài giây): khi đó gộp nó (chỉ nhận khoá hiện tại) vào kho ở chỗ mới và lưu, rồi mới
+    /// xoá. Bất kỳ bước nào không chắc chắn ⇒ để nguyên file cũ (trả về false).
+    fn remove_old_location(&mut self, old: &Path, left_behind: Option<[u8; 32]>) -> bool {
+        let Ok(bytes) = fsutil::read_retry(old) else {
+            return false;
+        };
+        let fp = fingerprint(&bytes);
+        if Some(fp) != left_behind {
+            let Ok(Decrypted::Current { data, adopt_header }) = self.decrypt_same_vault(&bytes)
+            else {
+                return false;
+            };
+            self.merge_remote(&data, adopt_header);
+            if self.dirty && self.save().is_err() {
+                return false;
+            }
+            // Lại vừa bị ghi nữa: để lần sau.
+            if fsutil::read_retry(old).ok().map(|b| fingerprint(&b)) != Some(fp) {
+                return false;
+            }
+        }
+        // Kiểm tra bản mới thêm một lần nữa ngay trước khi xoá bản cũ.
+        let new_path = self.path.clone();
+        self.file_matches_memory(&new_path) && fsutil::retry(|| fs::remove_file(old)).is_ok()
     }
 }
 
@@ -1565,6 +1743,171 @@ mod tests {
 
     fn clear_hook() {
         TEST_HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    fn fail_readbacks(faults: Vec<std::io::Result<Vec<u8>>>) {
+        READBACK_FAULTS.with(|q| *q.borrow_mut() = faults.into());
+    }
+
+    fn readback_faults_left() -> usize {
+        READBACK_FAULTS.with(|q| q.borrow().len())
+    }
+
+    fn garbage() -> std::io::Result<Vec<u8>> {
+        Ok(b"doc lai ra rac".to_vec())
+    }
+
+    /// Rà soát "verify-rollback": đọc lại sau khi ghi thất bại (file đã bị thay) mà vẫn hoàn tác RAM
+    /// ⇒ RAM và đĩa lệch nhau. Giờ: giữ trạng thái mới, báo `unverified`, đọc/ghi lại ở lần sau.
+    #[test]
+    fn unverifiable_write_keeps_the_new_state_instead_of_rolling_back() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        let mut v = Vault::create(&p, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+
+        // Đọc lại sai cả 3 lần (lần đầu, lần đọc lại, sau khi ghi lại).
+        fail_readbacks(vec![
+            garbage(),
+            Err(std::io::Error::other("bị khoá")),
+            garbage(),
+        ]);
+        let (_, r) = v.transact(|v| Ok(v.add(Entry::new("B")))).unwrap();
+        assert_eq!(readback_faults_left(), 0);
+        assert!(r.unverified);
+        assert_eq!(titles(&v), ["A", "B"], "không hoàn tác");
+        assert!(v.has_unsaved_changes());
+        assert_eq!(titles(&open(&p)), titles(&v));
+        // Lần đồng bộ sau đọc lại file thật: đúng rồi thì không cần ghi gì.
+        let r = v.sync().unwrap();
+        assert!(!r.wrote && !r.unverified && !v.has_unsaved_changes());
+        // Bản sao lưu mới nhất vẫn được tạo từ bản tốt.
+        let newest = &fsutil::list_backups(&p)[0];
+        assert_eq!(fs::read(&newest.path).unwrap(), fs::read(&p).unwrap());
+
+        // Đọc lại sai đúng một lần (file bị giữ trong chốc lát): lần đọc lại xác minh được.
+        fail_readbacks(vec![garbage()]);
+        let (_, r) = v.transact(|v| Ok(v.add(Entry::new("C")))).unwrap();
+        assert!(!r.unverified && !v.has_unsaved_changes());
+
+        // Thứ đọc được là một file hợp lệ do máy khác vừa ghi: KHÔNG ghi đè lên nó.
+        let other = fs::read(&p).unwrap();
+        fail_readbacks(vec![Ok(other.clone()), Ok(other), garbage()]);
+        let (_, r) = v.transact(|v| Ok(v.add(Entry::new("D")))).unwrap();
+        assert!(r.unverified);
+        assert_eq!(readback_faults_left(), 1, "không có lần ghi lại thứ hai");
+        fail_readbacks(vec![]);
+        assert_eq!(titles(&open(&p)), ["A", "B", "C", "D"]);
+    }
+
+    /// Đổi mật khẩu mà lần ghi không xác minh được: trước đây RAM quay về khoá cũ trong khi file đã
+    /// dùng khoá mới ⇒ chủ kho bị báo "thất bại", rồi bị khoá ngoài kho.
+    #[test]
+    fn password_change_with_unverifiable_write_does_not_roll_back_the_key() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        let mut v = Vault::create(&p, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+        fail_readbacks(vec![garbage(), garbage(), garbage()]);
+        let r = v
+            .change_password(b"mat khau moi", KdfParams::INSECURE_TEST)
+            .unwrap();
+        assert_eq!(readback_faults_left(), 0);
+        assert!(r.save.unverified);
+        assert!(v.verify_password(b"mat khau moi") && !v.verify_password(PW));
+        let o = OpenOptions {
+            allow_weak_kdf: true,
+        };
+        let fresh = Vault::open_with(&p, b"mat khau moi", o).unwrap();
+        assert_eq!(fresh.entries(), v.entries());
+        assert!(Vault::open_with(&p, PW, o).is_err());
+        // Dùng tiếp bình thường, không có "mật khẩu đã đổi ở máy khác".
+        let r = v.sync().unwrap();
+        assert!(!r.wrote);
+        v.transact(|v| Ok(v.add(Entry::new("B")))).unwrap();
+        assert_eq!(
+            Vault::open_with(&p, b"mat khau moi", o)
+                .unwrap()
+                .entries()
+                .len(),
+            2
+        );
+    }
+
+    /// Rà soát "move-delete-unchecked": máy khác ghi vào file ở chỗ cũ trong lúc đang chuyển kho
+    /// (ví dụ đang chép thư mục sao lưu sang ổ khác). Trước đây file cũ bị xoá luôn, mất lần ghi đó.
+    #[test]
+    fn a_write_landing_on_the_old_file_during_a_move_is_merged_not_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join("Documents").join("vault.pwv");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let mut v = Vault::create(&old, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+        let mut laptop = open(&old);
+        let old2 = old.clone();
+        set_hook("move:before-delete", move || {
+            laptop
+                .transact(|v| Ok(v.add(Entry::new("Từ laptop, giữa lúc chuyển"))))
+                .unwrap();
+            assert!(old2.exists());
+        });
+        let new = d.path().join("Dropbox").join("vault.pwv");
+        let r = v.move_to(&new);
+        clear_hook();
+        let r = r.unwrap();
+        assert!(r.old_removed && !r.rescued);
+        assert!(!old.exists());
+        assert_eq!(titles(&v), ["A", "Từ laptop, giữa lúc chuyển"]);
+        assert_eq!(titles(&open(&new)), ["A", "Từ laptop, giữa lúc chuyển"]);
+    }
+
+    #[test]
+    fn an_unmergeable_old_file_is_left_in_place_after_a_move() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join("a").join("vault.pwv");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let mut v = Vault::create(&old, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+        let old2 = old.clone();
+        set_hook("move:before-delete", move || {
+            fs::write(&old2, b"dong bo do dang").unwrap();
+        });
+        let new = d.path().join("b").join("vault.pwv");
+        let r = v.move_to(&new);
+        clear_hook();
+        let r = r.unwrap();
+        assert!(!r.old_removed);
+        assert_eq!(fs::read(&old).unwrap(), b"dong bo do dang");
+        assert_eq!(titles(&open(&new)), ["A"]);
+    }
+
+    /// Rà soát "force-missing-nobackup": tạo lại file kho đã biến mất ghi thẳng vào tên cuối và không
+    /// sao lưu ⇒ mất điện giữa chừng là mất bản tốt duy nhất (trong RAM). Giờ: sao lưu TRƯỚC, đọc
+    /// lại kiểm tra SAU.
+    #[test]
+    fn recreating_a_missing_vault_backs_up_first_and_verifies() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("vault.pwv");
+        let mut v = Vault::create(&p, PW, opts()).unwrap();
+        v.transact(|v| Ok(v.add(Entry::new("A")))).unwrap();
+        fs::remove_file(&p).unwrap();
+        let n = fsutil::list_backups(&p).len();
+        assert!(v.force_write().unwrap().is_none());
+        let backups = fsutil::list_backups(&p);
+        assert_eq!(backups.len(), n + 1);
+        assert_eq!(fs::read(&backups[0].path).unwrap(), fs::read(&p).unwrap());
+        assert!(!v.has_unsaved_changes());
+
+        // Đọc lại không khớp: báo lỗi, vẫn coi là chưa lưu.
+        fs::remove_file(&p).unwrap();
+        fail_readbacks(vec![garbage()]);
+        assert!(matches!(v.force_write(), Err(Error::WriteVerifyFailed)));
+        fail_readbacks(vec![]);
+        assert!(v.has_unsaved_changes());
+        assert_eq!(titles(&open(&p)), ["A"]);
+        // Lần lưu sau đọc lại file thật và mọi thứ trở lại bình thường.
+        v.save().unwrap();
+        assert!(!v.has_unsaved_changes());
     }
 
     /// Rà soát "archive race": bản xung đột được gộp lúc đọc, nhưng chỉ được cất SAU khi ghi kho.

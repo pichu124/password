@@ -58,6 +58,12 @@ pub enum Error {
          mật khẩu chính HIỆN TẠI (mật khẩu bạn đặt gần đây nhất)"
     )]
     OlderPasswordBackups,
+    /// Khôi phục từ sao lưu: thư mục sao lưu không có bản nào dùng được.
+    #[error(
+        "không có bản sao lưu nào dùng được trong thư mục sao lưu của kho — hãy thử lịch sử phiên bản \
+         / thùng rác của Google Drive, Dropbox, OneDrive, hoặc một thiết bị khác còn giữ file kho"
+    )]
+    NoUsableBackup,
     #[error("lỗi đọc/ghi file: {0}")]
     Io(#[from] std::io::Error),
     /// Lưu ý: không kèm thông báo gốc của serde_json vì nó có thể trích lại dữ liệu trong kho.

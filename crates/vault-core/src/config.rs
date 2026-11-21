@@ -21,6 +21,9 @@ pub struct SeenMark {
     pub modified_at: i64,
     /// Lần đổi master password mới nhất đã thấy.
     pub key_changed_at: i64,
+    /// Dấu nhận dạng của khoá kho mà máy này dùng gần đây nhất (`Vault::key_tag`; 0 = chưa ghi
+    /// nhận). Không phải bí mật.
+    pub key_tag: u64,
 }
 
 /// File kho vừa mở CŨ HƠN bản mà máy này đã từng thấy.
@@ -31,6 +34,10 @@ pub struct Rollback {
     pub file_modified_at: i64,
     /// File được mã hoá bằng master password cũ hơn lần đổi mật khẩu đã biết.
     pub older_password: bool,
+    /// Khoá của kho vừa mở KHÔNG nối tiếp từ khoá mà máy này dùng lần trước: kho được mở bằng một
+    /// mật khẩu chính cũ, hoặc file đã bị thay bằng file do người biết mật khẩu cũ làm ra. (Mốc thời
+    /// gian trong file không phát hiện được trường hợp sau, vì người đó tự ghi được con số bất kỳ.)
+    pub unknown_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,41 +118,66 @@ impl Config {
         }
     }
 
-    /// So file kho vừa mở với mốc đã thấy. Trả về `Some` nếu file cũ hơn.
+    /// Dấu khoá đã ghi nhận của một kho (0 = chưa có).
+    pub fn seen_key_tag(&self, vault_id: &str) -> u64 {
+        self.seen.get(vault_id).map_or(0, |m| m.key_tag)
+    }
+
+    /// So file kho vừa mở với mốc đã thấy. Trả về `Some` nếu file cũ hơn, hoặc nếu khoá của nó
+    /// không nối tiếp khoá đã ghi nhận (`key_known == false`, xem `Vault::rollback_against`).
     pub fn rollback_of(
         &self,
         vault_id: &str,
         modified_at: i64,
         key_changed_at: i64,
+        key_known: bool,
     ) -> Option<Rollback> {
         let seen = self.seen.get(vault_id)?;
         let older_password = key_changed_at < seen.key_changed_at;
-        (modified_at < seen.modified_at || older_password).then_some(Rollback {
+        let unknown_key = seen.key_tag != 0 && !key_known;
+        (modified_at < seen.modified_at || older_password || unknown_key).then_some(Rollback {
             seen_modified_at: seen.modified_at,
             file_modified_at: modified_at,
             older_password,
+            unknown_key,
         })
     }
 
     /// Người dùng đã biết và chấp nhận trạng thái hiện tại của kho (ví dụ vừa khôi phục từ bản
     /// sao lưu): đặt lại mốc để không cảnh báo "file cũ hơn" mãi.
-    pub fn set_seen(&mut self, vault_id: &str, modified_at: i64, key_changed_at: i64) {
+    pub fn set_seen(
+        &mut self,
+        vault_id: &str,
+        modified_at: i64,
+        key_changed_at: i64,
+        key_tag: u64,
+    ) {
         self.seen.insert(
             vault_id.to_string(),
             SeenMark {
                 modified_at,
                 key_changed_at,
+                key_tag,
             },
         );
         self.sanitize();
     }
 
-    /// Ghi nhận mốc mới (chỉ tăng). Trả về true nếu có thay đổi cần lưu.
-    pub fn note_seen(&mut self, vault_id: &str, modified_at: i64, key_changed_at: i64) -> bool {
+    /// Ghi nhận mốc mới (các mốc thời gian chỉ tăng). `key_tag` khác 0 thì thay dấu khoá đã ghi
+    /// nhận — người gọi chỉ truyền dấu khi khoá hiện tại nối tiếp khoá cũ (xem
+    /// `Vault::note_seen_in`); truyền 0 để giữ nguyên. Trả về true nếu có thay đổi cần lưu.
+    pub fn note_seen(
+        &mut self,
+        vault_id: &str,
+        modified_at: i64,
+        key_changed_at: i64,
+        key_tag: u64,
+    ) -> bool {
         let m = self.seen.entry(vault_id.to_string()).or_default();
         let new = SeenMark {
             modified_at: m.modified_at.max(modified_at),
             key_changed_at: m.key_changed_at.max(key_changed_at),
+            key_tag: if key_tag != 0 { key_tag } else { m.key_tag },
         };
         let changed = *m != new;
         *m = new;
@@ -244,23 +276,57 @@ mod tests {
     #[test]
     fn rollback_detection() {
         let mut c = Config::default();
-        assert!(c.rollback_of("v", 10, 1).is_none(), "kho chưa từng thấy");
-        assert!(c.note_seen("v", 100, 5));
-        assert!(!c.note_seen("v", 90, 5), "mốc chỉ tăng");
-        assert!(c.rollback_of("v", 100, 5).is_none());
-        assert!(c.rollback_of("v", 150, 6).is_none());
-        let r = c.rollback_of("v", 90, 5).unwrap();
+        assert!(
+            c.rollback_of("v", 10, 1, true).is_none(),
+            "kho chưa từng thấy"
+        );
+        assert!(c.note_seen("v", 100, 5, 0));
+        assert!(!c.note_seen("v", 90, 5, 0), "mốc chỉ tăng");
+        assert!(c.rollback_of("v", 100, 5, true).is_none());
+        assert!(c.rollback_of("v", 150, 6, true).is_none());
+        let r = c.rollback_of("v", 90, 5, true).unwrap();
         assert_eq!((r.seen_modified_at, r.file_modified_at), (100, 90));
-        assert!(!r.older_password);
-        assert!(c.rollback_of("v", 200, 4).unwrap().older_password);
-        assert!(c.rollback_of("other", 1, 1).is_none());
+        assert!(!r.older_password && !r.unknown_key);
+        assert!(c.rollback_of("v", 200, 4, true).unwrap().older_password);
+        assert!(c.rollback_of("other", 1, 1, true).is_none());
         // Người dùng chấp nhận bản cũ (vừa khôi phục từ sao lưu): hết cảnh báo.
-        c.set_seen("v", 90, 5);
-        assert!(c.rollback_of("v", 90, 5).is_none());
-        c.note_seen("v", 100, 5);
+        c.set_seen("v", 90, 5, 0);
+        assert!(c.rollback_of("v", 90, 5, true).is_none());
+        c.note_seen("v", 100, 5, 0);
         for i in 0..20 {
-            c.note_seen(&format!("x{i}"), i, 0);
+            c.note_seen(&format!("x{i}"), i, 0, 0);
         }
         assert!(c.seen.len() <= 8);
+    }
+
+    #[test]
+    fn unknown_key_is_reported_until_accepted() {
+        let mut c = Config::default();
+        // Chưa ghi nhận dấu khoá nào (config của bản cũ): không cảnh báo.
+        c.note_seen("v", 100, 5, 0);
+        assert!(c.rollback_of("v", 100, 5, false).is_none());
+        // Đã ghi nhận dấu khoá: kho mở bằng khoá không nối tiếp ⇒ cảnh báo, kể cả khi các mốc thời
+        // gian trong file đều "mới" (người biết mật khẩu cũ tự ghi được con số bất kỳ).
+        assert!(c.note_seen("v", 100, 5, 0xABC1));
+        assert_eq!(c.seen_key_tag("v"), 0xABC1);
+        let r = c.rollback_of("v", 9_999, 9_999, false).unwrap();
+        assert!(r.unknown_key && !r.older_password);
+        assert!(c.rollback_of("v", 9_999, 9_999, true).is_none());
+        // Ghi nhận mốc với dấu 0 (khoá lạ, chưa được chấp nhận) không xoá dấu cũ ⇒ cảnh báo còn nguyên.
+        c.note_seen("v", 9_999, 9_999, 0);
+        assert_eq!(c.seen_key_tag("v"), 0xABC1);
+        assert!(c.rollback_of("v", 9_999, 9_999, false).unwrap().unknown_key);
+        // Chủ kho chấp nhận ⇒ dấu mới thay dấu cũ.
+        c.set_seen("v", 9_999, 9_999, 0xDEF1);
+        assert_eq!(c.seen_key_tag("v"), 0xDEF1);
+        assert!(c.rollback_of("v", 9_999, 9_999, true).is_none());
+    }
+
+    #[test]
+    fn old_seen_marks_without_key_tag_still_load() {
+        let c: Config =
+            serde_json::from_str(r#"{"seen":{"v":{"modified_at":7,"key_changed_at":3}}}"#).unwrap();
+        assert_eq!(c.seen["v"].modified_at, 7);
+        assert_eq!(c.seen_key_tag("v"), 0);
     }
 }

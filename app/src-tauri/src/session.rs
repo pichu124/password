@@ -301,6 +301,9 @@ pub struct RollbackView {
     pub seen_modified_at: i64,
     pub file_modified_at: i64,
     pub older_password: bool,
+    /// Khoá của kho vừa mở không nối tiếp từ khoá máy này dùng lần trước (mở bằng mật khẩu chính
+    /// cũ, hoặc file đã bị thay bằng file do người biết mật khẩu cũ làm ra).
+    pub unknown_key: bool,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -554,18 +557,11 @@ impl Session {
     /// hiện file bị thay bằng bản cũ hơn).
     fn after_success(&mut self) {
         self.disk_problem = None;
-        let Some(v) = self.vault.as_ref() else {
-            return;
+        let changed = match self.vault.as_ref() {
+            Some(v) if !v.is_read_only() => v.note_seen_in(&mut self.config),
+            _ => return,
         };
-        if v.is_read_only() {
-            return;
-        }
-        let (id, m, k) = (
-            v.vault_id().to_string(),
-            v.modified_at(),
-            v.key_changed_at(),
-        );
-        if self.config.note_seen(&id, m, k) {
+        if changed {
             let _ = self.save_config();
         }
     }
@@ -638,14 +634,12 @@ impl Session {
             self.config.set_vault_path(v.path());
             self.save_config()?;
         }
-        let rollback = self
-            .config
-            .rollback_of(v.vault_id(), v.modified_at(), v.key_changed_at())
-            .map(|r| RollbackView {
-                seen_modified_at: r.seen_modified_at,
-                file_modified_at: r.file_modified_at,
-                older_password: r.older_password,
-            });
+        let rollback = v.rollback_against(&self.config).map(|r| RollbackView {
+            seen_modified_at: r.seen_modified_at,
+            file_modified_at: r.file_modified_at,
+            older_password: r.older_password,
+            unknown_key: r.unknown_key,
+        });
         self.vault = Some(v);
         self.lock_note = None;
         self.disk_problem = None;
@@ -706,12 +700,12 @@ impl Session {
             }
         };
         self.delete_rescue_copies();
-        let v = self.vault()?;
-        let (path, id) = (v.path().to_path_buf(), v.vault_id().to_string());
-        let (modified, key_changed) = (v.modified_at(), v.key_changed_at());
+        let path = self.vault()?.path().to_path_buf();
         self.config.set_vault_path(&path);
         // Người dùng chủ động dựng lại kho ⇒ lấy trạng thái này làm mốc "đã thấy" mới.
-        self.config.set_seen(&id, modified, key_changed);
+        if let Some(v) = self.vault.as_ref() {
+            v.accept_as_seen(&mut self.config);
+        }
         self.save_config()?;
         self.after_success();
         self.touch();
@@ -829,13 +823,10 @@ impl Session {
 
     /// Người dùng đã đọc cảnh báo "file kho cũ hơn bản từng thấy" và chấp nhận dùng bản hiện tại.
     pub fn accept_rollback(&mut self) -> AppResult<()> {
-        let v = self.vault()?;
-        let (id, m, k) = (
-            v.vault_id().to_string(),
-            v.modified_at(),
-            v.key_changed_at(),
-        );
-        self.config.set_seen(&id, m, k);
+        match self.vault.as_ref() {
+            Some(v) => v.accept_as_seen(&mut self.config),
+            None => return Err(AppError::locked()),
+        }
         self.save_config()
     }
 
@@ -1285,7 +1276,7 @@ impl Session {
                 detected: res.detected.to_string(),
             };
             for e in res.entries {
-                v.add(e);
+                v.add_imported(e);
             }
             Ok(view)
         })?;
