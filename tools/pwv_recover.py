@@ -101,7 +101,18 @@ def decrypt_vault(data: bytes, password) -> dict:
     return json.loads(plain[4:4 + n])
 
 
+def utf8_output() -> None:
+    """Windows: khi không in ra màn hình (bị chuyển hướng, chạy trong công cụ khác), Python dùng bảng
+    mã cũ (cp1252/cp1258…) và DỪNG giữa chừng khi gặp chữ có dấu. Ép UTF-8 cho mọi thứ in ra."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    utf8_output()
     ap = argparse.ArgumentParser(
         description="Giải mã file kho .pwv thành JSON (công cụ cứu hộ độc lập với app).")
     ap.add_argument("vault", help="đường dẫn file kho .pwv (hoặc một file trong thư mục sao lưu)")
@@ -137,11 +148,7 @@ def main() -> None:
         print(f"Đã ghi {n} mục ra {args.output}. File này chứa mật khẩu ở dạng rõ — xoá ngay sau khi dùng.",
               file=sys.stderr)
         return
-    # Không có -o: in ra màn hình. Ép UTF-8 để tên/mật khẩu có dấu không làm công cụ dừng giữa chừng.
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except (AttributeError, ValueError):
-        pass
+    # Không có -o: in ra màn hình (đã ép UTF-8 ở đầu hàm).
     print(text)
 
 

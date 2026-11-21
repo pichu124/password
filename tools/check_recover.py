@@ -81,6 +81,10 @@ def check_command_line(path: str, password: str, expected: dict) -> None:
             [sys.executable, "-I", str(tool), path, "-o", str(out2), "--password-stdin"],
             input="sai mật khẩu\n".encode("utf-8"), capture_output=True)
         assert r.returncode == 1 and not out2.exists()
+        # Trợ giúp (-h) có chữ tiếng Việt: không được dừng vì lỗi bảng mã khi stdout bị chuyển hướng.
+        r = subprocess.run([sys.executable, "-I", str(tool), "-h"], capture_output=True)
+        assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+        assert "FILE" in r.stdout.decode("utf-8")
     print("lệnh cứu hộ (-o) OK")
 
 
@@ -106,6 +110,12 @@ def check_v1() -> None:
 
 
 if __name__ == "__main__":
+    # Máy chạy CI trên Windows dùng bảng mã cũ cho stdout: ép UTF-8 để các dòng tiếng Việt in ra được.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     if len(sys.argv) != 2:
         print(__doc__)
         sys.exit(2)
