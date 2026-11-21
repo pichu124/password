@@ -360,15 +360,44 @@ pub struct PersonalScan {
     pub short_name_letters: usize,
     /// Chữ cái còn lại (không giải thích được).
     pub free_letters: usize,
+    /// Tổng số chữ cái của các dãy chữ cái tách TRỌN VẸN được thành các từ trong danh sách (tên
+    /// người kể cả tên 2 chữ cái, ngân hàng / dịch vụ, địa danh) — xem [`personal_pattern_scan`].
+    pub explained_run_letters: usize,
+    /// Số dãy chữ cái KHÔNG tách trọn vẹn được như vậy (kể cả dãy gồm toàn từ EFF, dãy dài quá
+    /// [`MAX_SEGMENTED_RUN`] chữ cái, và mỗi chữ cái ngoài bảng a–z).
+    pub unexplained_runs: usize,
 }
+
+/// Luật thứ hai: mọi dãy chữ cái đều ghép trọn vẹn từ tên / ngân hàng / địa danh, và chúng có tổng
+/// cộng ít nhất chừng này chữ cái (`Le.Thi.Mai.1990`, `Vu.An.Ha@0912345678`). Ít chữ cái hơn ⇒ để
+/// zxcvbn chấm.
+pub const MASTER_MIN_EXPLAINED_RUN_LETTERS: usize = 5;
+
+/// Dãy chữ cái dài hơn chừng này không được tách thử (coi là không giải thích được): chặn thời gian
+/// chạy với đầu vào rất dài.
+pub const MAX_SEGMENTED_RUN: usize = 64;
 
 impl PersonalScan {
     /// Mật khẩu chủ yếu ghép từ thông tin cá nhân: các tên dài từ 3 chữ cái phủ ít nhất
     /// [`MASTER_MIN_PERSONAL_LETTERS`] chữ cái và còn lại ít hơn [`MASTER_MIN_FREE_LETTERS`] chữ
     /// cái tự do.
+    ///
+    /// Hoặc (luật thứ hai, theo cấu trúc): KHÔNG có dãy chữ cái nào ngoài các dãy tách trọn vẹn được
+    /// thành tên / ngân hàng / dịch vụ / địa danh, và các dãy đó có ít nhất
+    /// [`MASTER_MIN_EXPLAINED_RUN_LETTERS`] chữ cái.
     pub fn is_personal(&self) -> bool {
+        self.mostly_personal() || self.only_personal_words()
+    }
+
+    /// Luật thứ nhất (tỉ lệ chữ cái).
+    pub fn mostly_personal(&self) -> bool {
         self.personal_letters >= MASTER_MIN_PERSONAL_LETTERS
             && self.free_letters < MASTER_MIN_FREE_LETTERS
+    }
+
+    /// Luật thứ hai (mọi dãy chữ cái đều là tên / ngân hàng / địa danh).
+    pub fn only_personal_words(&self) -> bool {
+        self.unexplained_runs == 0 && self.explained_run_letters >= MASTER_MIN_EXPLAINED_RUN_LETTERS
     }
 }
 
@@ -383,15 +412,29 @@ impl PersonalScan {
 /// cá nhân, kể cả khi trong từ có một âm tiết trùng tên người (`manhandle`, `chosen`). Nhờ vậy luật
 /// này không bao giờ từ chối một passphrase do pwv tạo ra (zxcvbn vẫn chấm những từ quen như
 /// `password`, `google`).
+///
+/// Song song, mỗi dãy chữ cái được thử tách TRỌN VẸN (quy hoạch động, không chỉ tham lam) thành
+/// các từ trong danh sách, kể cả tên 2 chữ cái: `lethimai` = le+thi+mai. Dãy tách được (và không
+/// phải toàn từ EFF) cộng vào `explained_run_letters`; dãy không tách được, dãy toàn từ EFF, dãy dài
+/// quá [`MAX_SEGMENTED_RUN`] chữ cái và mỗi chữ cái ngoài bảng a–z cộng vào `unexplained_runs`.
 pub fn personal_pattern_scan(password: &str) -> PersonalScan {
     let dict = personal_dictionary();
     let mut scan = PersonalScan::default();
     let mut run: Vec<u8> = Vec::new();
     let flush = |run: &mut Vec<u8>, scan: &mut PersonalScan| {
+        if run.is_empty() {
+            return;
+        }
         if dict.splits_into_eff_words(run) {
             scan.free_letters += run.len();
+            scan.unexplained_runs += 1;
             run.clear();
             return;
+        }
+        if dict.splits_into_personal_words(run) {
+            scan.explained_run_letters += run.len();
+        } else {
+            scan.unexplained_runs += 1;
         }
         let mut i = 0;
         while i < run.len() {
@@ -424,11 +467,38 @@ pub fn personal_pattern_scan(password: &str) -> PersonalScan {
             if c.is_alphabetic() {
                 // Chữ cái ngoài bảng a–z (chữ Hy Lạp, Cyrillic, chữ Hán...): không có trong từ điển.
                 scan.free_letters += 1;
+                scan.unexplained_runs += 1;
             }
         }
     }
     flush(&mut run, &mut scan);
     scan
+}
+
+/// Quy hoạch động: `run` có tách trọn vẹn được thành các từ trong `words` (từ dài tối đa `max_len`)
+/// không. Thời gian O(độ dài × max_len).
+fn splits_into(
+    run: &[u8],
+    words: &std::collections::HashSet<&'static [u8]>,
+    max_len: usize,
+) -> bool {
+    if run.is_empty() {
+        return false;
+    }
+    // reach[i]: run[..i] tách được.
+    let mut reach = vec![false; run.len() + 1];
+    reach[0] = true;
+    for i in 0..run.len() {
+        if !reach[i] {
+            continue;
+        }
+        for n in 1..=max_len.min(run.len() - i) {
+            if words.contains(&run[i..i + n]) {
+                reach[i + n] = true;
+            }
+        }
+    }
+    reach[run.len()]
 }
 
 struct PersonalDictionary {
@@ -441,23 +511,13 @@ struct PersonalDictionary {
 impl PersonalDictionary {
     /// `run` (chữ thường a–z) ghép trọn vẹn từ một hay nhiều từ EFF.
     fn splits_into_eff_words(&self, run: &[u8]) -> bool {
-        if run.is_empty() {
-            return false;
-        }
-        // reach[i]: run[..i] tách được.
-        let mut reach = vec![false; run.len() + 1];
-        reach[0] = true;
-        for i in 0..run.len() {
-            if !reach[i] {
-                continue;
-            }
-            for n in 1..=self.eff_max_len.min(run.len() - i) {
-                if self.eff.contains(&run[i..i + n]) {
-                    reach[i + n] = true;
-                }
-            }
-        }
-        reach[run.len()]
+        splits_into(run, &self.eff, self.eff_max_len)
+    }
+
+    /// `run` (chữ thường a–z, tối đa [`MAX_SEGMENTED_RUN`] chữ cái) ghép trọn vẹn từ các tên người
+    /// (kể cả tên 2 chữ cái), tên ngân hàng / dịch vụ, địa danh.
+    fn splits_into_personal_words(&self, run: &[u8]) -> bool {
+        run.len() <= MAX_SEGMENTED_RUN && splits_into(run, &self.words, self.max_len)
     }
 }
 
@@ -874,6 +934,13 @@ mod tests {
             "Trần Văn Bình 12/03/1985",
             "Đặng Thị Hồng Nhung 1990",
             "MOMO-hoangthuy-0987654321",
+            // Tên ngắn (luật thứ hai: mọi dãy chữ cái đều là tên / ngân hàng).
+            "Le.Thi.Mai.1990.12.03",
+            "lethimai19901203",
+            "Vu.An.Ha@0912345678",
+            "Do Thi Ha 12/03/1985",
+            "Mai@Vietcombank2024",
+            "nguyenvanan1990",
         ] {
             let c = check_master_password(weak);
             assert!(!c.ok, "{weak} lẽ ra phải bị từ chối");
@@ -893,6 +960,52 @@ mod tests {
             check_master_password("Vietcombank@Nguyenvanan").guesses_log10
                 < old.guesses_log10 - 3.0
         );
+    }
+
+    /// Luật thứ hai (theo cấu trúc) tách trọn vẹn bằng quy hoạch động, không chỉ tham lam.
+    #[test]
+    fn short_name_rule_segments_whole_runs_only() {
+        for (pw, rule2) in [
+            ("Le.Thi.Mai.1990.12.03", true),
+            ("lethimai19901203", true),
+            ("Vu.An.Ha@0912345678", true),
+            ("Đỗ Thị Hà 12/03/1985", true),
+            // Có từ không nằm trong danh sách.
+            ("mai anh di hoc ve nha", false),
+            // Quá ít chữ cái: để zxcvbn chấm.
+            ("an#8391$2047!6", false),
+            ("k9$Tq2mLx7Rw4pZb", false),
+            // Dãy toàn từ EFF không tính là "tên".
+            ("Google.Facebook.Grab", false),
+            // Chữ cái ngoài a–z là một dãy không giải thích được.
+            ("Nguyen Ωμέγα", false),
+        ] {
+            let s = personal_pattern_scan(pw);
+            assert_eq!(s.only_personal_words(), rule2, "{pw}: {s:?}");
+        }
+        for pw in [
+            "mai anh di hoc ve nha",
+            "an#8391$2047!6",
+            "k9$Tq2mLx7Rw4pZb",
+        ] {
+            assert!(!personal_pattern_scan(pw).is_personal(), "{pw}");
+        }
+        // Đầu vào rất dài / Unicode lạ: không chậm bất thường, không panic.
+        let long = "nguyen".repeat(20_000);
+        let s = personal_pattern_scan(&long);
+        assert!(
+            !s.only_personal_words(),
+            "dãy dài quá {MAX_SEGMENTED_RUN} chữ cái không được tách"
+        );
+        let short = "nguyen".repeat(10);
+        assert!(personal_pattern_scan(&short).only_personal_words());
+        for odd in [
+            "İ\u{0301}ﬃ𝔄🙂\u{200d}ǅß\u{0}Ωé",
+            "\u{FEFF}\u{202E}an\u{0}le",
+            "",
+        ] {
+            let _ = check_master_password(odd);
+        }
     }
 
     #[test]
