@@ -60,12 +60,12 @@ vault_key  = XChaCha20-Poly1305-Decrypt(key = KEK, nonce = key_nonce,
   toàn bộ thân kho được mã hoá lại; khoá cũ ("khoá đã nghỉ") được giữ trong `old_keys` *bên trong*
   phần đã mã hoá (mục 4) để chủ kho còn ĐỌC được các bản sao lưu cũ. (Bản ≤ 0.1.2 chỉ gói lại cùng
   một khoá.) Chính xác thì người biết mật khẩu CŨ và giữ một bản sao CŨ của file:
-  - **không đọc được** những gì một máy đã biết lần đổi ghi ra sau đó: file kho, bản sao lưu, bản cất
-    `oldkey-…` (mục 6); các bản sao lưu có từ trước, ghi bằng khoá vừa bị thay, được mã hoá lại khi đổi;
+  - **không đọc được** những gì một máy đã biết lần đổi ghi ra sau đó (file kho, bản sao lưu); các bản
+    sao lưu có từ trước, ghi bằng khoá vừa bị thay, được mã hoá lại khi đổi;
   - **vẫn đọc được**: bản sao đó và mọi bản cũ khác nằm ngoài tầm với của app (lịch sử phiên bản /
     thùng rác của dịch vụ đồng bộ, điện thoại hay máy chưa đồng bộ), và những gì một máy CHƯA biết
     lần đổi tiếp tục ghi bằng khoá cũ (file kho, bản sao lưu của chính nó) cho tới khi nó mở khoá
-    bằng mật khẩu mới;
+    bằng mật khẩu mới — kể cả khi app đã cất chúng thành `oldkey-…` (bản cất giữ nguyên văn, mục 6.3);
   - **không ghi được vào kho**: file chỉ mở được bằng khoá đã nghỉ không bao giờ được tự gộp (mục 6.3).
 - Giới hạn được kiểm tra TRƯỚC khi chạy Argon2, cả khi tạo lẫn khi mở: `64 MiB ≤ m_kib ≤ 1 GiB`,
   `2 ≤ t ≤ 16`, `1 ≤ p ≤ 16` (chống file bị sửa để làm treo máy hoặc hạ độ khó). Mặc định 256 MiB / 3 / 4.
@@ -186,11 +186,15 @@ khẩu thua vẫn nằm trong lịch sử.
      header nằm trong AAD của phần thân).
    - **Chỉ một khoá đã nghỉ mở được** ("bản khoá cũ") ⇒ **KHÔNG BAO GIỜ tự gộp** — một máy chưa biết lần
      đổi mật khẩu ghi ra được file như vậy, nhưng người biết mật khẩu cũ và giữ một bản sao cũ cũng làm
-     được. Nội dung được mã hoá lại bằng header + khoá HIỆN TẠI và cất vào thư mục sao lưu dưới tên
-     `oldkey-<ms>-<tên gốc>` (ghi nguyên tử); chủ kho xem lại và lấy từng mục ra bằng chức năng khôi
-     phục từ bản sao lưu. Nếu đó là file kho chính: nó được cất TRƯỚC khi file kho bị ghi đè (không cất
-     được ⇒ không ghi, báo lỗi đọc/ghi), rồi file kho được ghi lại từ RAM; cùng những byte đó không bị xét
-     lại ở lần đọc sau. Trên điện thoại (chỉ đọc) bản khoá cũ bị bỏ qua.
+     được. File được cất **nguyên văn** (đúng từng byte) vào thư mục sao lưu dưới tên
+     `oldkey-<ms>-<tên gốc>`; chủ kho xem lại và lấy từng mục ra bằng chức năng khôi phục từ bản sao
+     lưu. KHÔNG được mã hoá lại nó bằng khoá hiện tại: khi đó chỉ còn TÊN FILE phân biệt nó với một bản
+     đáng tin, mà ai có quyền ghi vào thư mục cũng đổi tên / chuyển chỗ file được (chuyển ra cạnh file
+     kho ⇒ bị gộp như bản xung đột; đổi tên thành bản tự động ⇒ bị gộp khi khôi phục). Giữ nguyên văn
+     thì ở đâu, mang tên gì nó cũng chỉ mở được bằng khoá đã nghỉ. Nếu đó là file kho chính: nó được cất
+     TRƯỚC khi file kho bị ghi đè (không cất được ⇒ không ghi, báo lỗi đọc/ghi), rồi file kho được ghi
+     lại từ RAM; cùng những byte đó không bị xét lại ở lần đọc sau. Trên điện thoại (chỉ đọc) bản khoá
+     cũ bị bỏ qua.
    - **Không khoá nào mở được**: nếu `key_changed_at` của file MỚI HƠN ⇒ với **file kho chính**: máy
      khác đã đổi master password ⇒ dừng, yêu cầu nhập mật khẩu mới (không ghi gì). Với **bản cạnh kho**
      (header chưa được xác thực — ai có quyền ghi vào thư mục cũng ghi được một con số lớn): chỉ báo
@@ -202,8 +206,8 @@ khẩu thua vẫn nằm trong lịch sử.
    được tạo lại sau khi đã chép bản trong RAM vào thư mục sao lưu, rồi đọc lại kiểm tra).
 5. Ghi nguyên tử: file tạm cùng thư mục → `fsync` → `rename` đè → đọc lại và so từng byte; thử lại khi
    Windows báo file đang bị tiến trình khác giữ. Đọc lại sai/lỗi ⇒ chờ ~0,2 giây đọc lại; vẫn sai ⇒ ghi
-   lại một lần nữa rồi kiểm tra (trừ khi thứ đọc được là một file hợp lệ của kho này do máy khác vừa
-   ghi — không đè lên nó). Vẫn không xác minh được ⇒ coi là **đã ghi nhưng chưa xác minh**: KHÔNG hoàn
+   lại một lần nữa rồi kiểm tra (trừ khi ở BẤT KỲ lần đọc lại nào thứ đọc được là một file hợp lệ của
+   kho này do máy khác vừa ghi — không đè lên nó). Vẫn không xác minh được ⇒ coi là **đã ghi nhưng chưa xác minh**: KHÔNG hoàn
    tác RAM (với đổi mật khẩu, hoàn tác sẽ để RAM ở khoá cũ trong khi đĩa dùng khoá mới), báo cho người
    dùng, quên SHA-256 của đĩa để lần đọc sau đọc lại thật, và đánh dấu cần ghi lại.
 6. Đồng bộ nền: nạp và gộp file trên đĩa; nếu bản trong RAM có thứ file không có (dịch vụ đồng bộ đã
@@ -214,8 +218,8 @@ khẩu thua vẫn nằm trong lịch sử.
    không phải file ẩn (tên bắt đầu bằng `.`), ≤ 64 MiB, tối đa 32 file đầu tiên theo thứ tự tên, và có
    cùng `vault_id`. Xử lý theo mục 6.3: bản khoá hiện tại được gộp, rồi chỉ SAU KHI kho đã được ghi
    thành công, và chỉ nếu file vẫn giống từng byte với bản đã gộp, mới được chuyển vào thư mục sao lưu
-   (`merged-<ms>-<tên gốc>`; nếu đã đổi thì để lần đồng bộ sau). Bản khoá cũ được cất (`oldkey-…`, mã
-   hoá lại) rồi xoá — chỉ nếu nó không đổi từ lúc đọc.
+   (`merged-<ms>-<tên gốc>`; nếu đã đổi thì để lần đồng bộ sau). Bản khoá cũ được chuyển nguyên văn
+   vào thư mục sao lưu (`oldkey-…`) — chỉ nếu nó không đổi từ lúc đọc.
 8. **Mở khoá** bằng mật khẩu `pw`:
    - `pw` mở được file chính ⇒ thử thêm `pw` trên tối đa 2 bản cạnh kho (mới nhất trước) có header khác
      file chính, `key_changed_at` mới hơn, và tham số Argon2 không vượt file chính ở chiều nào (`m`, `t`,
@@ -223,12 +227,16 @@ khẩu thua vẫn nằm trong lịch sử.
      mới khi chưa đồng bộ): hai khoá đều được `pw` xác thực ⇒ gộp hai bên, nhận header + khoá của bản
      mới hơn làm hiện tại, khoá cũ vào `old_keys`; lần đồng bộ sau ghi lại file chính và cất bản kia
      (`merged-…`).
-   - `pw` không mở được file chính ⇒ thử `pw` trên tối đa 2 bản cạnh kho có `key_changed_at` mới hơn và
-     tham số Argon2 không vượt max(tham số của file chính, mặc định 256 MiB / 3 / 4). Mở được ⇒ xét file
-     chính bằng khoá của bản đó (mục 6.3): cùng khoá ⇒ gộp; khoá cũ ⇒ cất `oldkey-…` ở lần ghi sau; không
-     giải mã được ⇒ KHÔNG mở từ bản đó (báo sai mật khẩu). Ai biết mật khẩu cũ và có quyền ghi tự làm
-     được một "bản mới hơn" mở bằng mật khẩu cũ với khoá do họ chọn; đòi khoá đó mở được file chính
-     (họ không có khoá hiện tại) là thứ ngăn chủ kho lỡ gõ mật khẩu cũ rồi bị đưa sang kho của họ.
+   - `pw` không mở được file chính ⇒ thử `pw` trên các bản khác của cùng kho có `key_changed_at` mới
+     hơn và tham số Argon2 không vượt max(tham số của file chính, mặc định 256 MiB / 3 / 4): tối đa 2
+     bản cạnh kho (mới nhất trước), rồi các bản sao lưu tự động / bản xung đột đã gộp (mới nhất trước) —
+     tổng cộng tối đa 2 lượt Argon2, mỗi "gói khoá" (cùng muối + khoá đã gói) một lượt. Bản nào có phần
+     thân giải mã được ⇒ xét file chính bằng khoá của bản đó (mục 6.3): cùng khoá ⇒ gộp; khoá cũ ⇒ cất
+     `oldkey-…` ở lần ghi sau (đây là trường hợp một máy chưa biết mật khẩu mới đã ghi đè file kho: mật
+     khẩu hiện tại vẫn mở ra kho thật từ bản sao lưu mới nhất); không giải mã được ⇒ KHÔNG mở từ bản đó
+     (báo sai mật khẩu). Ai biết mật khẩu cũ và có quyền ghi tự làm được một "bản mới hơn" mở bằng mật
+     khẩu cũ với khoá do họ chọn; đòi khoá đó mở được file chính (họ không có khoá hiện tại) là thứ
+     ngăn chủ kho lỡ gõ mật khẩu cũ rồi bị đưa sang kho của họ.
 9. **Đổi master password**: trước hết đồng bộ đầy đủ (gộp các bản xung đột còn dùng khoá hiện tại, vì
    sau đó chúng chỉ còn là bản khoá cũ); lỗi ⇒ không đổi.
 10. **Chuyển kho sang thư mục khác**: đồng bộ ở chỗ cũ → ghi chỗ mới → đọc lại, giải mã thử → chuyển
@@ -240,15 +248,15 @@ khẩu thua vẫn nằm trong lịch sử.
 ### Thư mục sao lưu `<tên file kho>.backups/`
 
 - Trước khi ghi đè: chép bản đang nằm trên đĩa nếu nó chưa chắc đã có trong thư mục sao lưu (bản do
-  máy khác hoặc bản app cũ ghi; lần ghi đầu của phiên) — trừ bản khoá cũ (được cất dạng mã hoá lại,
-  mục 6.3).
+  máy khác hoặc bản app cũ ghi; lần ghi đầu của phiên) — trừ bản khoá cũ (đã được cất nguyên văn dưới
+  tên `oldkey-…`, mục 6.3).
 - Sau khi ghi: chép luôn bản vừa ghi ⇒ sau mỗi lần ghi bình thường (lưu, đồng bộ, đổi mật khẩu, ghi
   đè file hỏng, tạo lại file biến mất), nếu chép được, **bản sao lưu mới nhất giống hệt file kho**.
   KHÔNG đúng: ngay sau khi tạo kho (chưa có bản sao lưu nào), sau khi chuyển kho (file ở chỗ mới được
   ghi riêng; bản sao lưu mới nhất có cùng nội dung nhưng khác byte), và khi lần ghi "chưa xác minh"
   (mục 6.5) — bản sao lưu được lấy từ bản trong RAM, còn đĩa thì chưa chắc.
 - Tên: `<tên>-<ms>.pwv` (tự động), `merged-<ms>-<tên>` (bản xung đột đã gộp), `damaged-<ms>-<tên>`
-  (file hỏng đã thay), `oldkey-<ms>-<tên>` (bản khoá cũ, chưa gộp, đã mã hoá lại).
+  (file hỏng đã thay), `oldkey-<ms>-<tên>` (bản khoá cũ, chưa gộp, nguyên văn).
 - **Giữ lại** bản tự động theo một quy tắc chỉ phụ thuộc vào thời điểm trong tên file — KHÔNG phụ thuộc
   đồng hồ của máy đang dọn (một máy sai giờ dọn theo đồng hồ của nó sẽ xoá lịch sử trên mọi máy): bỏ
   trùng, xếp mới → cũ; giữ 10 bản mới nhất; bản mới nhất của mỗi ngày UTC trong 30 ngày gần nhất CÓ
@@ -265,14 +273,20 @@ khẩu thua vẫn nằm trong lịch sử.
 - Bản sao lưu chỉ mở được bằng khoá đã nghỉ (dù tên thuộc loại nào) được app đánh dấu "ghi bằng mật khẩu
   cũ" trong danh sách khôi phục (`Vault::read_backup_checked`), vì nó có thể không phải do chủ kho ghi.
 - **Khôi phục khi file kho chính hỏng/mất**: các bản sao lưu (trừ `damaged-` và `oldkey-`) được nhóm
-  theo header; thử mật khẩu trên từng nhóm (mỗi nhóm một lượt Argon2) — nhóm cùng `vault_id` với file
-  kho chính (nếu header của nó còn đọc được) trước, rồi `key_changed_at` mới nhất trước — tối đa 5
-  nhóm. Nhóm đầu tiên mở được là gốc; chỉ gộp các bản giải mã được bằng ĐÚNG khoá của gốc (tối đa 40
-  bản gộp được, xét tối đa 500 file — file rác không giải mã được không chiếm chỗ của bản thật). Bản
-  chỉ mở được bằng khoá khác (khoá đã nghỉ) không bao giờ được gộp. Nếu gốc cũ hơn `key_changed_at`
-  lớn nhất mà thư mục ghi nhận (mật khẩu vừa nhập là mật khẩu CŨ) ⇒ từ chối, trừ khi chủ kho chọn rõ
-  "khôi phục từ các bản cũ" (khi đó kho quay về mật khẩu cũ và chỉ có dữ liệu của các bản cũ đó).
-  Không có bản nào dùng được ⇒ lỗi riêng ("không có bản sao lưu nào dùng được").
+  theo **gói khoá** (`vault_id` + tham số KDF + muối + khoá đã gói; `key_changed_at` KHÔNG thuộc gói
+  khoá và chưa được xác thực — ai cũng chép được một header thật rồi sửa con số đó). Thử mật khẩu trên
+  từng gói (mỗi gói một lượt Argon2) — gói cùng `vault_id` với file kho chính (nếu header của nó còn
+  đọc được) trước, rồi `key_changed_at` tự khai mới nhất trước — tối đa 5 gói. **Gốc** là bản mới nhất
+  của gói đầu tiên mở được mà PHẦN THÂN giải mã được bằng khoá vừa mở: phần thân nhận header làm dữ
+  liệu xác thực, nên header của kho dựng lại (kể cả `key_changed_at`) là header thật. Sau đó chỉ gộp
+  các bản giải mã được bằng ĐÚNG khoá của gốc (tối đa 40 bản gộp được, xét tối đa 500 file — file rác
+  không giải mã được không chiếm chỗ của bản thật). Bản chỉ mở được bằng khoá khác (khoá đã nghỉ)
+  không bao giờ được gộp. Nếu có bản của cùng kho, dùng gói khoá KHÁC, tự khai `key_changed_at` mới hơn
+  gốc (rất có thể mật khẩu vừa nhập là mật khẩu CŨ; con số này không xác thực được nên đây chỉ là lý
+  do để dừng và hỏi lại) ⇒ từ chối, trừ khi chủ kho chọn rõ "khôi phục từ các bản cũ" (khi đó kho
+  quay về mật khẩu đó và chỉ có dữ liệu của các bản đó). App còn so kho vừa dựng với mốc "đã thấy" của
+  chính máy đó (mục dưới) trước khi ghi. Không có bản nào dùng được ⇒ lỗi riêng ("không có bản sao lưu
+  nào dùng được").
 
 ### Mốc "đã thấy" của từng máy (`config.json`, ngoài thư mục đồng bộ)
 

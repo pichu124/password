@@ -52,6 +52,17 @@ pub struct Header {
 }
 
 impl Header {
+    /// Hai header dùng chung một "gói khoá": cùng kho, cùng tham số KDF, cùng muối và cùng khoá đã
+    /// gói ⇒ cùng một master password mở ra cùng một khoá kho, bất kể `key_changed_at` (trường này
+    /// không tham gia việc mở gói và chỉ được xác thực khi phần thân của file giải mã được).
+    pub fn same_wrap(&self, other: &Header) -> bool {
+        self.vault_id == other.vault_id
+            && self.kdf == other.kdf
+            && self.salt == other.salt
+            && self.key_nonce == other.key_nonce
+            && self.wrapped_key == other.wrapped_key
+    }
+
     fn wrap_aad(vault_id: &str) -> Vec<u8> {
         let mut aad = b"pwv/v1/wrap:".to_vec();
         aad.extend_from_slice(vault_id.as_bytes());

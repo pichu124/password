@@ -306,14 +306,20 @@ fn kdf_max(a: &KdfParams, b: &KdfParams) -> KdfParams {
     }
 }
 
-/// Bản chỉ mở được bằng khoá cũ, đang chờ được cất (đã mã hoá lại) vào thư mục sao lưu.
+/// Bản chỉ mở được bằng khoá cũ, đang chờ được cất NGUYÊN VĂN vào thư mục sao lưu.
+///
+/// Không bao giờ mã hoá lại nó bằng khoá hiện tại: khi đó thứ duy nhất còn phân biệt nó với một bản
+/// đáng tin là TÊN FILE, mà tên file thì ai có quyền ghi vào thư mục đồng bộ cũng đổi được — chỉ cần
+/// chuyển bản đã cất ra cạnh file kho là lần đồng bộ sau gộp nó như một bản xung đột bình thường.
+/// Giữ nguyên văn thì dù nằm ở đâu, mang tên gì, nó vẫn chỉ mở được bằng khoá cũ ⇒ không bao giờ được gộp.
 #[derive(Clone)]
 struct PendingOldKey {
     /// SHA-256 của file đã đọc.
     fp: [u8; 32],
     /// Đường dẫn file gốc (để đặt tên bản cất: `oldkey-<ms>-<tên gốc>`).
     origin: PathBuf,
-    data: VaultData,
+    /// Đúng những byte đã đọc.
+    bytes: Vec<u8>,
 }
 
 struct Snapshot {
@@ -491,19 +497,22 @@ impl Vault {
         }
     }
 
-    /// Mật khẩu không mở được file chính. Nếu cạnh đó có bản của CÙNG kho với lần đổi master
-    /// password MỚI HƠN (máy kia đổi mật khẩu đúng lúc máy này đang ghi, nên dịch vụ đồng bộ giữ cả
-    /// hai file), thử mở bằng bản đó. Sau đó xét file chính bằng khoá của bản vừa mở:
+    /// Mật khẩu không mở được file chính. Nếu có một bản khác của CÙNG kho với lần đổi master
+    /// password MỚI HƠN — bản cạnh kho (máy kia đổi mật khẩu đúng lúc máy này đang ghi, nên dịch vụ
+    /// đồng bộ giữ cả hai file), hoặc bản sao lưu (máy chưa biết mật khẩu mới đã ghi đè file kho mà
+    /// dịch vụ đồng bộ không giữ lại bản kia) — thì thử mở bằng bản đó. Sau đó xét file chính bằng
+    /// khoá của bản vừa mở:
     ///
     /// - cùng khoá hiện tại ⇒ gộp vào;
-    /// - chỉ mở được bằng khoá cũ ⇒ KHÔNG gộp; nó sẽ được cất (mã hoá lại) vào thư mục sao lưu
-    ///   trước lần ghi kế tiếp;
+    /// - chỉ mở được bằng khoá cũ ⇒ KHÔNG gộp; nó sẽ được cất nguyên văn vào thư mục sao lưu trước
+    ///   lần ghi kế tiếp;
     /// - không giải mã được ⇒ KHÔNG mở từ bản này. Lý do: ai biết mật khẩu CŨ và có quyền ghi vào thư
     ///   mục đồng bộ tự làm được một "bản mới hơn" mở bằng mật khẩu cũ (header chưa được xác thực,
     ///   khoá do họ chọn). Nếu chủ kho lỡ gõ mật khẩu cũ mà app mở kho từ bản đó, thì lần "ghi đè file
     ///   hỏng" sau sẽ đưa cả kho về khoá của kẻ đó. Đòi khoá của bản kia mở được file chính là thứ
     ///   chặn điều này (kẻ đó không có khoá hiện tại).
     ///
+    /// Tối đa 2 lượt Argon2 (mỗi "gói khoá" một lượt), tham số bị chặn như `newer_epoch_siblings`.
     /// Lần đồng bộ kế tiếp ghi kết quả ra file chính và cất bản xung đột đi.
     fn open_via_newer_copy(
         path: &Path,
@@ -511,25 +520,64 @@ impl Vault {
         password: &[u8],
         opts: OpenOptions,
     ) -> Option<Vault> {
+        const MAX_ATTEMPTS: usize = 2; // mỗi lượt thử tốn một lượt Argon2
         let main = format::parse(main_bytes).ok()?;
         // Mật khẩu chưa mở được gì nên chưa biết tham số "thật"; cho phép tới mức mặc định.
         let cap = kdf_max(&main.header.kdf, &KdfParams::DEFAULT);
-        for p in Self::newer_epoch_siblings(path, &main.header, &cap) {
+        let mut candidates = Self::newer_epoch_siblings(path, &main.header, &cap);
+        // Bản sao lưu (tự động / bản xung đột đã gộp) có lần đổi mật khẩu mới hơn: mới nhất trước.
+        let mut backups: Vec<(i64, i64, PathBuf)> = fsutil::list_backups(path)
+            .into_iter()
+            .filter(|b| matches!(b.kind, BackupKind::Auto | BackupKind::Merged))
+            .filter_map(|b| {
+                let h = header_of(&b.path)?;
+                (h.vault_id == main.header.vault_id
+                    && h.key_changed_at > main.header.key_changed_at
+                    && kdf_not_costlier(&h.kdf, &cap))
+                .then_some((h.key_changed_at, b.timestamp, b.path))
+            })
+            .collect();
+        backups.sort_by(|a, b| b.cmp(a));
+        candidates.extend(backups.into_iter().map(|(_, _, p)| p));
+
+        // Các file dùng chung một "gói khoá" (kể cả header bị sửa số `key_changed_at`) chỉ tốn một
+        // lượt Argon2; gói đã thử mà sai mật khẩu thì không thử lại.
+        let mut tried: Vec<(Header, Option<Key>)> = Vec::new();
+        for p in candidates {
             let Ok(bytes) = fsutil::read_retry(&p) else {
                 continue;
             };
-            let Ok(u) = unlock_bytes(&bytes, password, opts.allow_weak_kdf) else {
+            let Ok(raw) = format::parse(&bytes) else {
                 continue;
             };
-            let Ok((main_data, used)) = decrypt_with_keys(&main, &u.key, &u.data) else {
+            let known = tried.iter().position(|(h, _)| h.same_wrap(&raw.header));
+            let key = match known {
+                Some(i) => tried[i].1.clone(),
+                None => {
+                    if tried.len() >= MAX_ATTEMPTS {
+                        continue;
+                    }
+                    let k = raw.header.unwrap_key(password, opts.allow_weak_kdf).ok();
+                    tried.push((raw.header.clone(), k.clone()));
+                    k
+                }
+            };
+            let Some(key) = key else {
+                continue;
+            };
+            // Phần thân giải mã được ⇒ header của bản này (kể cả `key_changed_at`) được xác thực.
+            let Ok(data) = raw.decrypt_body(&key) else {
+                continue;
+            };
+            let Ok((main_data, used)) = decrypt_with_keys(&main, &key, &data) else {
                 continue;
             };
             let main_fp = fingerprint(main_bytes);
             let mut v = Vault::assemble(
                 path.to_path_buf(),
-                u.header,
-                u.key,
-                u.data,
+                raw.header.clone(),
+                key,
+                data,
                 Some(main_fp),
                 true,
                 opts.allow_weak_kdf,
@@ -538,7 +586,7 @@ impl Vault {
                 KeyUsed::Current => {
                     v.data.merge_from(&main_data);
                 }
-                KeyUsed::Retired => v.queue_old_key_archive(main_fp, main_data),
+                KeyUsed::Retired => v.queue_old_key_archive(main_fp, main_bytes),
             }
             return Some(v);
         }
@@ -576,55 +624,87 @@ impl Vault {
         opts: OpenOptions,
         allow_older: bool,
     ) -> Result<(Vault, usize, i64)> {
-        const MAX_PASSWORD_ATTEMPTS: usize = 5; // mỗi nhóm tốn một lượt Argon2
+        const MAX_PASSWORD_ATTEMPTS: usize = 5; // mỗi gói khoá tốn một lượt Argon2
         const MAX_FILES_MERGED: usize = 40;
         const MAX_FILES_EXAMINED: usize = 500;
         let path = path.as_ref().to_path_buf();
+        // (xếp mới nhất trước)
         let candidates: Vec<(BackupFile, Header)> = fsutil::list_backups(&path)
             .into_iter()
             .filter(|b| !matches!(b.kind, BackupKind::Damaged | BackupKind::OldKey))
             .filter_map(|b| header_of(&b.path).map(|h| (b, h)))
             .collect();
-        // `candidates` xếp mới nhất trước ⇒ trong mỗi nhóm cũng vậy.
-        let mut groups: Vec<&Header> = Vec::new();
+        // Nhóm theo "gói khoá" (vault_id + tham số KDF + muối + khoá đã gói). `key_changed_at` KHÔNG
+        // thuộc gói khoá và chưa được xác thực ở bước này: ai có quyền ghi cũng chép được một header
+        // thật rồi sửa con số đó. Mỗi gói khoá chỉ tốn một lượt Argon2.
+        let mut wraps: Vec<&Header> = Vec::new();
         for (_, h) in &candidates {
-            if !groups.contains(&h) {
-                groups.push(h);
+            if !wraps.iter().any(|w| w.same_wrap(h)) {
+                wraps.push(h);
             }
         }
-        // Thứ tự thử: kho mà file chính (nếu còn đọc được header) thuộc về trước, rồi lần đổi mật
-        // khẩu chính mới nhất trước.
+        // Thứ tự thử: kho mà file chính (nếu còn đọc được header) thuộc về trước, rồi gói khoá có
+        // lần đổi mật khẩu chính (tự khai) mới nhất trước.
         let main_id = header_of(&path).map(|h| h.vault_id);
-        groups.sort_by_key(|h| {
+        let claimed = |w: &Header| {
+            candidates
+                .iter()
+                .filter(|(_, h)| h.same_wrap(w))
+                .map(|(_, h)| h.key_changed_at)
+                .max()
+                .unwrap_or(w.key_changed_at)
+        };
+        wraps.sort_by_key(|w| {
             (
-                main_id.as_deref() != Some(h.vault_id.as_str()),
-                std::cmp::Reverse(h.key_changed_at),
+                main_id.as_deref() != Some(w.vault_id.as_str()),
+                std::cmp::Reverse(claimed(w)),
             )
         });
         let mut last_err = Error::NoUsableBackup;
-        let mut base: Option<(Header, Key)> = None;
-        for h in groups.into_iter().take(MAX_PASSWORD_ATTEMPTS) {
-            match h.unwrap_key(password, opts.allow_weak_kdf) {
-                Ok(k) => {
-                    base = Some((h.clone(), k));
-                    break;
+        // Gốc = bản MỚI NHẤT mà phần thân giải mã được bằng khoá mở ra từ chính header của nó. Phần
+        // thân nhận header làm dữ liệu xác thực (AAD), nên header của gốc — kể cả `key_changed_at`
+        // — là header thật, không phải một bản chép bị sửa.
+        let mut base: Option<(Header, Key, VaultData)> = None;
+        for w in wraps.into_iter().take(MAX_PASSWORD_ATTEMPTS) {
+            let key = match w.unwrap_key(password, opts.allow_weak_kdf) {
+                Ok(k) => k,
+                Err(e) => {
+                    last_err = e;
+                    continue;
                 }
-                Err(e) => last_err = e,
+            };
+            let found = candidates
+                .iter()
+                .filter(|(_, h)| h.same_wrap(w))
+                .take(MAX_FILES_EXAMINED)
+                .find_map(|(b, _)| {
+                    let bytes = fsutil::read_retry(&b.path).ok()?;
+                    let raw = format::parse(&bytes).ok()?;
+                    let data = raw.decrypt_body(&key).ok()?;
+                    Some((raw.header.clone(), data))
+                });
+            if let Some((header, data)) = found {
+                base = Some((header, key, data));
+                break;
             }
+            // Mở được gói khoá mà không bản nào giải mã được: nhóm này chỉ còn file hỏng.
+            last_err = Error::NoUsableBackup;
         }
-        let Some((header, key)) = base else {
+        let Some((header, key, mut data)) = base else {
             return Err(last_err);
         };
+        // Có bản sao lưu của cùng kho, dùng gói khoá KHÁC, tự khai là mới hơn gốc: rất có thể mật
+        // khẩu vừa nhập là mật khẩu CŨ. Con số đó chưa được xác thực (ta không có khoá của bản ấy),
+        // nên đây chỉ là lý do để DỪNG và hỏi lại chủ kho, không phải kết luận.
         let newest_claimed = candidates
             .iter()
-            .filter(|(_, h)| h.vault_id == header.vault_id)
+            .filter(|(_, h)| h.vault_id == header.vault_id && !h.same_wrap(&header))
             .map(|(_, h)| h.key_changed_at)
             .max()
             .unwrap_or(header.key_changed_at);
         if header.key_changed_at < newest_claimed && !allow_older {
             return Err(Error::OlderPasswordBackups);
         }
-        let mut data: Option<VaultData> = None;
         let (mut used, mut newest) = (0usize, 0i64);
         // Giới hạn tính trên số file GỘP ĐƯỢC (không phải số file đã xét): vài chục file rác mang
         // tên bản sao lưu "mới nhất" không được phép đẩy các bản thật ra ngoài.
@@ -644,18 +724,10 @@ impl Vault {
             let Ok(d) = format::parse(&bytes).and_then(|raw| raw.decrypt_body(&key)) else {
                 continue;
             };
-            match data.as_mut() {
-                None => data = Some(d),
-                Some(x) => {
-                    x.merge_from(&d);
-                }
-            }
+            data.merge_from(&d);
             used += 1;
             newest = newest.max(b.timestamp);
         }
-        let Some(data) = data else {
-            return Err(Error::NoUsableBackup);
-        };
         let v = Vault::assemble(path, header, key, data, None, true, opts.allow_weak_kdf);
         Ok((v, used, newest))
     }
@@ -970,13 +1042,13 @@ impl Vault {
         }
     }
 
-    /// Ghi nhớ một bản chỉ mở được bằng khoá cũ để cất nó (đã mã hoá lại) trước lần ghi kế tiếp.
-    fn queue_old_key_archive(&mut self, fp: [u8; 32], data: VaultData) {
+    /// Ghi nhớ một bản chỉ mở được bằng khoá cũ để cất nó (nguyên văn) trước lần ghi kế tiếp.
+    fn queue_old_key_archive(&mut self, fp: [u8; 32], bytes: &[u8]) {
         if self.pending_old_keys.iter().all(|p| p.fp != fp) {
             self.pending_old_keys.push(PendingOldKey {
                 fp,
                 origin: self.path.clone(),
-                data,
+                bytes: bytes.to_vec(),
             });
         }
         self.dirty = true;
@@ -1015,8 +1087,8 @@ impl Vault {
         };
         let (remote, adopt) = match self.decrypt_same_vault(&bytes)? {
             Decrypted::Current { data, adopt_header } => (data, adopt_header),
-            Decrypted::Retired { data } => {
-                self.queue_old_key_archive(fp, data);
+            Decrypted::Retired { .. } => {
+                self.queue_old_key_archive(fp, &bytes);
                 self.disk_fingerprint = Some(fp);
                 return Ok(Refreshed::default());
             }
@@ -1078,7 +1150,7 @@ impl Vault {
         self.pending_old_keys = s.pending_old_keys;
     }
 
-    /// Cất (đã mã hoá lại bằng header + khoá HIỆN TẠI) các bản chỉ mở được bằng khoá cũ đang chờ.
+    /// Cất NGUYÊN VĂN (xem [`PendingOldKey`]) các bản chỉ mở được bằng khoá cũ đang chờ.
     /// Lỗi ⇒ trả lỗi: không được ghi đè file kho khi bản có thể là duy nhất chứa thay đổi chưa gộp
     /// của một máy khác còn chưa được cất an toàn.
     fn archive_pending_old_keys(&mut self) -> Result<usize> {
@@ -1088,8 +1160,13 @@ impl Vault {
             if self.archived_old_keys.contains(&p.fp) {
                 continue;
             }
-            let out = format::serialize(&self.header, &p.data, &self.vault_key)?;
-            fsutil::write_archive(&self.path, BackupKind::OldKey, now_ms(), &p.origin, &out)?;
+            fsutil::write_archive(
+                &self.path,
+                BackupKind::OldKey,
+                now_ms(),
+                &p.origin,
+                &p.bytes,
+            )?;
             let fp = p.fp;
             self.archived_old_keys.push(fp);
             n += 1;
@@ -1099,11 +1176,11 @@ impl Vault {
 
     /// Ghi bản trong RAM ra đĩa (nguyên tử, có đọc lại kiểm tra) và giữ sao lưu:
     ///
-    /// - TRƯỚC khi ghi: bản ghi bằng khoá cũ đang chờ (xem `refresh`) được cất, đã mã hoá lại.
+    /// - TRƯỚC khi ghi: bản ghi bằng khoá cũ đang chờ (xem `refresh`) được cất nguyên văn (`oldkey-…`).
     /// - TRƯỚC khi ghi (`keep_previous`): nếu nội dung đang nằm trên đĩa chưa chắc đã có trong thư
     ///   mục sao lưu (do máy khác / bản app cũ ghi, hoặc là lần ghi đầu của phiên) thì chép nó lại —
-    ///   trừ khi đó là bản ghi bằng khoá cũ (đã được cất ở bước trên dưới dạng mã hoá lại; chép
-    ///   nguyên văn thì mật khẩu cũ lại mở được nó).
+    ///   trừ khi đó là bản ghi bằng khoá cũ (đã được cất ở bước trên; chép thêm một bản mang tên
+    ///   "tự động" chỉ làm nó trông như một bản sao lưu bình thường).
     /// - SAU khi ghi: chép luôn bản vừa ghi. Nhờ vậy sau mỗi lần ghi bình thường, bản sao lưu mới
     ///   nhất giống hệt file kho, và nếu file kho hỏng thì khôi phục không mất lần sửa cuối cùng.
     ///
@@ -1168,14 +1245,23 @@ impl Vault {
     /// nữa rồi kiểm tra. Không ghi lại nếu thứ đọc được là một file hợp lệ của kho này mà máy khác vừa
     /// ghi (đè lên là làm mất nó khỏi file kho) — lần đọc sau sẽ gộp nó như bình thường.
     fn verify_written(&self, bytes: &[u8]) -> bool {
-        if self.read_back().is_ok_and(|b| b == bytes) {
+        let first = self.read_back();
+        if first.as_ref().is_ok_and(|b| b == bytes) {
             return true;
         }
+        // Ở BẤT KỲ lần đọc lại nào mà thấy file của máy khác thì không ghi lại nữa (lần đọc thứ
+        // hai có thể lỗi vì dịch vụ đồng bộ đang giữ chính file đó).
+        let mut foreign = first
+            .as_ref()
+            .is_ok_and(|b| self.written_by_someone_else(b));
         std::thread::sleep(Duration::from_millis(200));
         match self.read_back() {
             Ok(b) if b == bytes => return true,
-            Ok(b) if self.written_by_someone_else(&b) => return false,
+            Ok(b) if self.written_by_someone_else(&b) => foreign = true,
             _ => {}
+        }
+        if foreign {
+            return false;
         }
         fsutil::atomic_write(&self.path, bytes).is_ok()
             && self.read_back().is_ok_and(|b| b == bytes)
@@ -1451,26 +1537,6 @@ impl Vault {
         unchanged && fsutil::archive_file(&self.path, kind, now_ms(), path).is_ok()
     }
 
-    /// Bản cạnh kho chỉ mở được bằng khoá cũ: cất nó (đã mã hoá lại bằng khoá hiện tại) vào thư
-    /// mục sao lưu rồi xoá file gốc — chỉ khi file gốc vẫn đúng là thứ đã đọc. Không xoá được thì
-    /// xoá bản vừa cất, để các lần đồng bộ sau không chất thêm bản trùng.
-    fn archive_retired_copy(&self, path: &Path, fp: [u8; 32], data: &VaultData) -> bool {
-        let Ok(out) = format::serialize(&self.header, data, &self.vault_key) else {
-            return false;
-        };
-        let Ok(archived) =
-            fsutil::write_archive(&self.path, BackupKind::OldKey, now_ms(), path, &out)
-        else {
-            return false;
-        };
-        let unchanged = fsutil::read_retry(path).is_ok_and(|b| fingerprint(&b) == fp);
-        if unchanged && fsutil::retry(|| fs::remove_file(path)).is_ok() {
-            return true;
-        }
-        let _ = fs::remove_file(&archived);
-        false
-    }
-
     /// Đồng bộ với thư mục: nạp thay đổi của máy khác, gộp các bản xung đột, **ghi lại file kho nếu
     /// bản trong RAM có thứ mà file trên đĩa không có**, rồi mới cất các bản xung đột đã gộp vào
     /// thư mục sao lưu (không bao giờ cất trước khi kho đã được ghi thành công, và chỉ cất nếu file
@@ -1478,8 +1544,8 @@ impl Vault {
     ///
     /// Với từng bản cạnh kho:
     /// - mở được bằng khoá hiện tại ⇒ gộp, rồi cất (`merged-…`);
-    /// - chỉ mở được bằng khoá cũ ⇒ KHÔNG gộp; cất bản đã mã hoá lại (`oldkey-…`) rồi xoá nó, báo
-    ///   [`Error::RetiredKeyCopy`];
+    /// - chỉ mở được bằng khoá cũ ⇒ KHÔNG gộp; chuyển nó NGUYÊN VĂN vào thư mục sao lưu
+    ///   (`oldkey-…`), báo [`Error::RetiredKeyCopy`];
     /// - ghi lần đổi mật khẩu mới hơn mà không mở được ⇒ để nguyên, báo
     ///   [`Error::CopyUsesOtherPassword`] và vẫn đồng bộ tiếp. [`Error::PasswordChangedElsewhere`]
     ///   chỉ được trả về khi đó là FILE KHO CHÍNH.
@@ -1495,7 +1561,7 @@ impl Vault {
         };
         // (vị trí trong report.conflicts, SHA-256 của bản đã gộp)
         let mut merged: Vec<(usize, [u8; 32])> = Vec::new();
-        let mut retired: Vec<(PathBuf, [u8; 32], VaultData)> = Vec::new();
+        let mut retired: Vec<(PathBuf, [u8; 32])> = Vec::new();
         for path in self.conflict_copies() {
             let bytes = match fsutil::read_retry(&path) {
                 Ok(b) => b,
@@ -1516,8 +1582,8 @@ impl Vault {
                     merged.push((report.conflicts.len(), fp));
                     Ok(stats)
                 }
-                Ok(Decrypted::Retired { data }) => {
-                    retired.push((path, fp, data));
+                Ok(Decrypted::Retired { .. }) => {
+                    retired.push((path, fp));
                     continue;
                 }
                 // Header chưa xác thực của một bản cạnh kho thì ai cũng ghi được ⇒ không bao giờ
@@ -1543,8 +1609,8 @@ impl Vault {
             let c = &mut report.conflicts[i];
             c.archived = self.archive_if_unchanged(&c.path, fp, BackupKind::Merged);
         }
-        for (path, fp, data) in retired {
-            let archived = self.archive_retired_copy(&path, fp, &data);
+        for (path, fp) in retired {
+            let archived = self.archive_if_unchanged(&path, fp, BackupKind::OldKey);
             report.old_key_archived += usize::from(archived);
             report.conflicts.push(ConflictOutcome {
                 path,

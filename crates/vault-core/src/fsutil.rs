@@ -352,7 +352,7 @@ pub fn archive_file(
 }
 
 /// Ghi `bytes` thành một file mới trong thư mục sao lưu dưới tên `<loại>-<ms>-<tên gốc>` (nguyên
-/// tử). Dùng khi thứ được cất không phải chính file gốc (ví dụ bản đã được mã hoá lại).
+/// tử). Dùng khi file gốc sắp bị ghi đè nên không thể chuyển (rename) chính nó vào đây.
 pub fn write_archive(
     vault_path: &Path,
     kind: BackupKind,

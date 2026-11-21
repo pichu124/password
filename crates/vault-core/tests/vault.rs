@@ -410,10 +410,9 @@ fn password_change_racing_with_an_edit_on_another_device() {
     assert_eq!(titles(&a), ["Chung", "Từ A"]);
     assert!(!conflict.exists());
     let archived = only_backup_of_kind(&p, BackupKind::OldKey);
-    assert!(
-        open(&archived, PW).is_err(),
-        "mật khẩu cũ không mở được bản đã cất"
-    );
+    // Bản được cất NGUYÊN VĂN (không mã hoá lại — xem `quarantined_old_key_copy_cannot_be_laundered…`).
+    assert_eq!(fs::read(&archived).unwrap(), b_version);
+    assert!(a.read_backup_checked(&archived).unwrap().1);
     assert!(a
         .read_backup(&archived)
         .unwrap()
@@ -448,7 +447,7 @@ fn password_change_racing_with_an_edit_on_another_device() {
     assert_eq!(open(&main, b"new").unwrap().entries().len(), 2);
     assert!(b.conflict_copies().is_empty());
     let archived = only_backup_of_kind(&main, BackupKind::OldKey);
-    assert!(open(&archived, PW).is_err());
+    assert_eq!(fs::read(&archived).unwrap(), b_version);
     assert!(b
         .read_backup(&archived)
         .unwrap()
@@ -591,16 +590,16 @@ fn forged_retired_key_copy_is_never_merged_but_kept_for_review() {
     assert!(main.old_keys.iter().all(|k| k.key != [7u8; 32]));
     assert!(main.modified_at < far);
 
-    // Bản cài cắm được giữ lại để xem, đã mã hoá lại: mật khẩu cũ không mở được nó nữa.
+    // Bản cài cắm được giữ lại để xem — NGUYÊN VĂN, và được đánh dấu "ghi bằng khoá cũ".
     let archived = only_backup_of_kind(&p, BackupKind::OldKey);
     let name = archived.file_name().unwrap().to_string_lossy().to_string();
     assert!(
         name.starts_with("oldkey-") && name.ends_with("-vault (1).pwv"),
         "{name}"
     );
-    assert!(open(&archived, OLD).is_err());
-    assert!(open(&archived, NEW).is_ok());
-    let seen = v.read_backup(&archived).unwrap();
+    assert_eq!(fs::read(&archived).unwrap(), evil);
+    let (seen, retired) = v.read_backup_checked(&archived).unwrap();
+    assert!(retired);
     assert_eq!(
         seen.get(&bank).unwrap().urls,
         ["https://phish.example/login"]
@@ -608,6 +607,159 @@ fn forged_retired_key_copy_is_never_merged_but_kept_for_review() {
     // Đồng bộ lại: không còn gì để làm.
     let r = v.sync().unwrap();
     assert!(r.conflicts.is_empty() && !r.wrote && r.old_key_archived == 0);
+}
+
+/// Soát lại bản sửa (W3d #1): bản cách ly từng được MÃ HOÁ LẠI bằng khoá hiện tại, nên thứ duy nhất
+/// phân biệt nó với một bản đáng tin là tên file `oldkey-…` — mà tên file thì ai có quyền ghi vào thư
+/// mục đồng bộ cũng đổi được. Chuyển nó ra cạnh file kho ⇒ lần đồng bộ sau gộp nó; đổi tên thành bản
+/// sao lưu tự động ⇒ lần khôi phục sau gộp nó. Giờ bản cách ly được giữ nguyên văn (khoá cũ), nên ở
+/// đâu, mang tên gì nó cũng không bao giờ được gộp.
+#[test]
+fn quarantined_old_key_copy_cannot_be_laundered_by_renaming_or_moving_it() {
+    use pwv_vault_core::model::Tombstone;
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    let bank = v.add(bank_login());
+    let mail = v.add(login("Mail", "me", "mail-secret"));
+    v.save().unwrap();
+    let stolen = fs::read(&p).unwrap();
+    v.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    v.transact(|v| Ok(v.add(login("Sau khi đổi", "x", "post"))))
+        .unwrap();
+    let far = i64::MAX / 4;
+    let evil = forge_with_old_key(&stolen, OLD, |data| {
+        for e in data.entries.iter_mut().filter(|e| e.id == bank) {
+            e.urls = vec!["https://phish.example".into()];
+            e.field_times.urls = far;
+        }
+        data.tombstones.push(Tombstone {
+            id: mail.clone(),
+            deleted_at: far,
+        });
+    });
+    fs::write(d.path().join("vault (1).pwv"), &evil).unwrap();
+    assert_eq!(v.sync().unwrap().old_key_archived, 1);
+    let untouched = |v: &Vault| {
+        assert_eq!(v.get(&bank).unwrap().urls, ["https://bank.example.vn"]);
+        assert!(v.get(&mail).is_some());
+        assert_eq!(v.entries().len(), 3);
+    };
+
+    // (1) Kẻ tấn công chuyển bản đã cất ra cạnh file kho dưới tên khác (không cần khoá nào).
+    let archived = only_backup_of_kind(&p, BackupKind::OldKey);
+    let back = d.path().join("vault (2).pwv");
+    fs::rename(&archived, &back).unwrap();
+    let r = v.sync().unwrap();
+    assert!(matches!(r.conflicts[0].result, Err(Error::RetiredKeyCopy)));
+    assert!(!r.wrote, "không có gì được gộp ⇒ không ghi");
+    untouched(&v);
+    untouched(&open(&p, NEW).unwrap());
+
+    // (2) …rồi đổi tên nó thành một "bản sao lưu tự động" mới nhất và phá file kho chính.
+    let archived = only_backup_of_kind(&p, BackupKind::OldKey);
+    let as_auto = backup_dir(&p).join("vault-9999999999999.pwv");
+    fs::rename(&archived, &as_auto).unwrap();
+    assert!(
+        v.read_backup_checked(&as_auto).unwrap().1,
+        "vẫn bị đánh dấu là bản ghi bằng khoá cũ"
+    );
+    drop(v);
+    fs::write(&p, b"rac").unwrap();
+    let (mut r, _, _) = Vault::recover_from_backups(&p, NEW, kdf_opts()).unwrap();
+    untouched(&r);
+    r.force_write().unwrap();
+    untouched(&open(&p, NEW).unwrap());
+}
+
+/// Soát lại bản sửa (W3d #4): máy B (chưa biết mật khẩu mới) ghi đè file kho bằng bản khoá cũ và
+/// dịch vụ đồng bộ KHÔNG giữ lại bản của máy A. Trước đây trên máy A mật khẩu HIỆN TẠI bị báo "sai
+/// mật khẩu" (chỉ bản cạnh kho mới được thử). Giờ app mở kho từ bản sao lưu mới nhất của chính nó;
+/// file của máy B không được gộp mà được cất để xem lại.
+#[test]
+fn current_password_still_opens_after_a_lagging_device_overwrote_the_vault_file() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut a) = new_vault(&d);
+    a.add(login("Chung", "c", "c"));
+    a.save().unwrap();
+    let pb = d.path().join("may-b").join("vault.pwv");
+    fs::create_dir_all(pb.parent().unwrap()).unwrap();
+    fs::copy(&p, &pb).unwrap();
+    let mut b = open(&pb, OLD).unwrap();
+    b.transact(|v| Ok(v.add(login("Từ B", "b", "b")))).unwrap();
+    let b_version = fs::read(&pb).unwrap();
+
+    a.change_password(NEW, KdfParams::INSECURE_TEST).unwrap();
+    a.transact(|v| Ok(v.add(login("Từ A", "a", "a")))).unwrap();
+    drop(a); // máy A đóng app
+    fs::write(&p, &b_version).unwrap(); // bản của B thắng, không có bản xung đột nào
+
+    let mut a = open(&p, NEW).expect("mật khẩu hiện tại phải mở được kho");
+    assert_eq!(titles(&a), ["Chung", "Từ A"]);
+    assert!(a.has_unsaved_changes());
+    assert_eq!(fs::read(&p).unwrap(), b_version, "mở khoá chưa ghi gì");
+    let r = a.sync().unwrap();
+    assert!(r.wrote);
+    assert_eq!(r.old_key_archived, 1);
+    assert_eq!(titles(&open(&p, NEW).unwrap()), ["Chung", "Từ A"]);
+    assert!(open(&p, OLD).is_err());
+    let archived = only_backup_of_kind(&p, BackupKind::OldKey);
+    assert_eq!(fs::read(&archived).unwrap(), b_version);
+    assert!(a
+        .read_backup(&archived)
+        .unwrap()
+        .entries
+        .iter()
+        .any(|e| e.title == "Từ B"));
+
+    // Kẻ biết mật khẩu CŨ không lợi dụng được đường này: "bản sao lưu mới hơn" do họ tự làm (khoá
+    // do họ chọn, gói bằng mật khẩu cũ) không mở được file kho thật ⇒ bị từ chối.
+    let raw = format::parse(&b_version).unwrap();
+    let k_old = raw.header.unwrap_key(OLD, true).unwrap();
+    let mut data = raw.decrypt_body(&k_old).unwrap();
+    data.entries.push(login("GIẢ MẠO", "x", "x"));
+    let k_x = pwv_vault_core::crypto::random_key();
+    let h = format::Header::new_wrapped(
+        raw.header.vault_id.clone(),
+        OLD,
+        KdfParams::INSECURE_TEST,
+        &k_x,
+        i64::MAX / 2,
+    )
+    .unwrap();
+    fs::write(
+        backup_dir(&p).join("vault-9999999999999.pwv"),
+        format::serialize(&h, &data, &k_x).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(open(&p, OLD), Err(Error::Decrypt)));
+    assert_eq!(titles(&open(&p, NEW).unwrap()), ["Chung", "Từ A"]);
+}
+
+/// Soát lại bản sửa (W3d #2): header của bản sao lưu chưa được xác thực. Một file trong thư mục sao
+/// lưu mang header THẬT bị sửa `key_changed_at` (gói khoá vẫn mở được bằng mật khẩu hiện tại) + thân
+/// rác từng (a) làm kho dựng lại mang con số đó, hoặc (b) làm mật khẩu hiện tại bị báo là "mật khẩu cũ".
+#[test]
+fn recovery_takes_its_header_only_from_a_backup_whose_body_decrypts() {
+    let d = tempfile::tempdir().unwrap();
+    let (p, mut v) = new_vault(&d);
+    v.transact(|v| Ok(v.add(bank_login()))).unwrap();
+    let good = fs::read(&p).unwrap();
+    let real_epoch = v.key_changed_at();
+    drop(v);
+    // Cùng gói khoá, `key_changed_at` bị sửa thành con số khổng lồ, thân rác, tên "mới nhất".
+    let planted = header_with_garbage_body(&good, |h| h.key_changed_at = i64::MAX / 2);
+    fs::write(backup_dir(&p).join("vault-9999999999999.pwv"), planted).unwrap();
+    fs::write(&p, b"rac").unwrap();
+    let (mut r, used, _) = Vault::recover_from_backups(&p, PW, kdf_opts()).unwrap();
+    assert!(used >= 1);
+    assert_eq!(
+        r.key_changed_at(),
+        real_epoch,
+        "header của kho dựng lại là header thật"
+    );
+    assert_eq!(titles(&r), ["Bank"]);
+    r.force_write().unwrap();
+    assert_eq!(open(&p, PW).unwrap().key_changed_at(), real_epoch);
 }
 
 /// Rà soát H4: máy B (chưa biết lần đổi mật khẩu) ghi đè file kho chính bằng khoá cũ. Trước đây
@@ -648,8 +800,14 @@ fn retired_key_main_file_is_archived_and_rewritten_not_merged() {
         .entries
         .iter()
         .any(|e| e.title == "Từ B"));
-    // Không bản nào trong thư mục sao lưu còn mở được bằng mật khẩu cũ.
-    for b in list_backups(&p) {
+    // Bản của B được cất nguyên văn và được đánh dấu "ghi bằng khoá cũ"; các bản sao lưu khác đều
+    // đã dùng khoá mới.
+    assert_eq!(fs::read(&archived).unwrap(), fs::read(&pb).unwrap());
+    assert!(a.read_backup_checked(&archived).unwrap().1);
+    for b in list_backups(&p)
+        .into_iter()
+        .filter(|b| b.kind != BackupKind::OldKey)
+    {
         assert!(open(&b.path, OLD).is_err(), "{:?}", b.path);
     }
     // Lần đồng bộ sau: không cất lặp lại, không ghi lại.
@@ -1165,10 +1323,12 @@ fn opening_a_vault_that_does_not_descend_from_the_last_used_key_is_flagged() {
         d.modified_at = i64::MAX / 4;
     });
     fs::write(&p, &forged).unwrap();
-    assert!(
-        open(&p, NEW).is_err(),
-        "mật khẩu hiện tại không mở được file giả"
-    );
+    // Mật khẩu HIỆN TẠI vẫn mở ra kho THẬT (từ bản sao lưu mới nhất của chính nó); file giả không
+    // được gộp, và không có cảnh báo nào vì đây đúng là kho máy này vẫn dùng.
+    let real = open(&p, NEW).unwrap();
+    assert_eq!(titles(&real), ["Bank"]);
+    assert!(real.rollback_against(&config).is_none());
+    drop(real);
     let fake = open(&p, OLD).unwrap(); // chủ kho lỡ gõ mật khẩu cũ
     let r = fake.rollback_against(&config).expect("phải cảnh báo");
     assert!(r.unknown_key);
