@@ -156,11 +156,27 @@ fn accept_rollback(state: State<AppState>) -> AppResult<()> {
 /// Khoá bằng tay: KHÔNG chờ khoá phiên (một thao tác đĩa chậm có thể đang giữ nó). Ghi yêu cầu khoá
 /// rồi trả về ngay — trang nạp lại và vứt bí mật; khoá giải mã bị xoá ngay khi khoá phiên rảnh, và
 /// mọi lệnh đến sau (kể cả `status` của trang mới) đều thấy kho đã khoá.
+///
+/// `has_draft` + `draft` (JS: `{ hasDraft, draft, draftSeq }`, khi đang có form): bản nháp form đang
+/// giữ NGAY LÚC NÀY (`draft: null` = form sạch). Nó vào hộp thư TRƯỚC khi yêu cầu khoá được ghi, nên
+/// được ghi vào stash trước khi kho khoá.
 #[tauri::command(async)]
-fn lock(app: tauri::AppHandle) -> AppResult<()> {
+fn lock(
+    app: tauri::AppHandle,
+    has_draft: Option<bool>,
+    draft: Option<String>,
+    draft_seq: Option<u64>,
+) -> AppResult<()> {
     // Không xoá clipboard ở đây: "chép mật khẩu → khoá app → dán" là thao tác bình thường; bộ hẹn
     // giờ vẫn xoá sau N giây vì tiến trình còn chạy.
-    app.state::<AppState>().request_lock(LOCK_MANUAL);
+    let state = app.state::<AppState>();
+    if has_draft == Some(true) {
+        state.queue_stash(StashOp::Draft {
+            draft: draft.map(Zeroizing::new),
+            seq: draft_seq,
+        });
+    }
+    state.request_lock(LOCK_MANUAL);
     std::thread::spawn(move || drop(lock_state(&app.state::<AppState>())));
     Ok(())
 }
@@ -373,10 +389,18 @@ fn move_vault(
 // ----------------------------------------------------------------------------- bản nháp & mật khẩu vừa tạo
 
 /// Đặt (chuỗi) hoặc xoá (`null`) bản nháp của form đang sửa.
+/// Đi qua hộp thư (xem [`Shared::stash_op`]): một lần khoá được yêu cầu trong lúc lệnh này còn chờ khoá
+/// phiên không làm mất nó. `draft_seq` (JS `draftSeq`): số thứ tự tăng dần — bản đến muộn mà cũ hơn bị bỏ.
 #[tauri::command(async)]
-fn set_draft(state: State<AppState>, draft: Option<String>) -> AppResult<()> {
-    let draft = draft.map(Zeroizing::new);
-    with(&state, |s| s.set_draft(draft))
+fn set_draft(
+    state: State<AppState>,
+    draft: Option<String>,
+    draft_seq: Option<u64>,
+) -> AppResult<()> {
+    state.stash_op(StashOp::Draft {
+        draft: draft.map(Zeroizing::new),
+        seq: draft_seq,
+    })
 }
 
 #[tauri::command(async)]
@@ -386,8 +410,10 @@ fn get_draft(state: State<AppState>) -> AppResult<Option<String>> {
 
 #[tauri::command(async)]
 fn record_generated(state: State<AppState>, value: String, label: Option<String>) -> AppResult<()> {
-    let value = Zeroizing::new(value);
-    with(&state, |s| s.record_generated(value, label))
+    state.stash_op(StashOp::Generated {
+        value: Zeroizing::new(value),
+        label,
+    })
 }
 
 #[tauri::command(async)]
@@ -1048,20 +1074,20 @@ fn auto_lock_loop(handle: &tauri::AppHandle) {
         let gap = now.duration_since(last).unwrap_or(Duration::ZERO);
         last = now;
         let suspend = gap > SUSPEND_GAP;
+        // Máy vừa ngủ: luôn xoá clipboard nếu nó còn giữ bí mật của app, dù kho đang khoá hay mở.
+        if suspend {
+            clear_clipboard_if_ours(handle, None);
+        }
         let state = handle.state::<AppState>();
         if let Some(mut s) = state.try_lock() {
             known = (s.vault.is_some(), s.config.auto_lock_minutes);
             // Quyết định trước, báo trang vứt bí mật NGAY, rồi mới khoá: việc khoá có thể phải ghi ra
             // thư mục đồng bộ đang chậm. Trang vừa nạp lại hỏi `status` thì phải chờ khoá phiên — tới
-            // lúc đó kho đã khoá xong.
-            if suspend && known.0 {
-                let _ = handle.emit("vault-locked", "suspend");
-                clear_clipboard_if_ours(handle, None);
-                s.lock_because(SUSPEND_NOTE);
-            } else if s.idle_lock_due() {
-                let _ = handle.emit("vault-locked", "idle");
-                s.lock_because(IDLE_NOTE);
-            }
+            // lúc đó kho đã khoá xong. Hộp thư bản nháp được xử lý ngay trước khi khoá.
+            state.drain(&mut s);
+            s.auto_lock_step(suspend, |reason, _| {
+                let _ = handle.emit("vault-locked", reason);
+            });
             continue;
         }
         if should_lock_while_busy(known, suspend, state.activity.idle()) {
@@ -1069,9 +1095,6 @@ fn auto_lock_loop(handle: &tauri::AppHandle) {
             if state.request_lock(reason) {
                 // Màn hình sạch NGAY; khoá giải mã bị xoá ngay khi khoá phiên rảnh.
                 let _ = handle.emit("vault-locked", if suspend { "suspend" } else { "idle" });
-                if suspend {
-                    clear_clipboard_if_ours(handle, None);
-                }
                 let h = handle.clone();
                 std::thread::spawn(move || drop(lock_state(&h.state::<AppState>())));
                 known.0 = false;

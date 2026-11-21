@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
-import { api, errorCode, errorText, onBeforeLock } from "../api";
+import { api, errorCode, errorText, nextDraftSeq, onBeforeLock } from "../api";
 import type { EntryDetail, EntryInput, Strength } from "../types";
 import { Generator } from "./Generator";
 import { Icon, StrengthMeter, useDebounced, useToast } from "./ui";
@@ -45,6 +45,8 @@ export interface FormDraft {
    * cùng `updated_at` GỐC — cho tới khi lưu hoặc bỏ thay đổi, để cảnh báo không biến mất.
    */
   changedSince?: boolean;
+  /** Bản nháp đã được mở thành mục MỚI vì mục gốc không còn (giữ lời giải thích qua các lần khoá tiếp theo). */
+  openedAsNew?: boolean;
 }
 
 export function parseDraft(raw: string | null): FormDraft | null {
@@ -208,10 +210,14 @@ export function EntryForm({
         totp,
         totpAction,
         changedSince: !!restore?.changedSince,
+        openedAsNew: !!restore?.asNew,
       } satisfies FormDraft)
     : null;
   const latest = useRef<string | null>(null);
   latest.current = draftJson;
+  /** Form đã tải xong và đã áp bản nháp khôi phục (trước đó không bao giờ đẩy / xoá bản nháp). */
+  const loaded = useRef(false);
+  loaded.current = base !== null;
   /** Bản đã gửi gần nhất (undefined = chưa gửi gì: không có bản nháp nào của form này trong backend). */
   const sent = useRef<string | null | undefined>(restore ? "restored" : undefined);
   const inflight = useRef<Promise<void>>(Promise.resolve());
@@ -223,10 +229,13 @@ export function EntryForm({
     timer.current = null;
     if (closed.current) return;
     const d = latest.current;
+    if (!loaded.current) return inflight.current;
     if (d === sent.current || (d === null && sent.current === undefined)) return inflight.current;
     sent.current = d;
+    // Số thứ tự lấy NGAY lúc chụp: lần đẩy này có chờ lần trước thì vẫn không thể đè một bản mới hơn.
+    const seq = nextDraftSeq();
     const p = inflight.current.then(() =>
-      api.setDraft(d).then(
+      api.setDraft(d, seq).then(
         () => setDraftError(null),
         (e) => {
           if (errorCode(e) === "draft_too_large") setDraftError("Bản nháp quá lớn, chưa được giữ — hãy bấm Lưu sớm.");
@@ -249,14 +258,21 @@ export function EntryForm({
     };
     document.addEventListener("visibilitychange", onHidden);
     window.addEventListener("blur", flush);
-    onBeforeLock(flush);
+    onBeforeLock(() => {
+      if (closed.current || !loaded.current) return undefined;
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      sent.current = latest.current;
+      return { draft: latest.current };
+    });
     return () => {
       document.removeEventListener("visibilitychange", onHidden);
       window.removeEventListener("blur", flush);
       onBeforeLock(null);
       if (timer.current) clearTimeout(timer.current);
-      // Rời form (Huỷ, bấm mục khác…) trong lúc đang chờ đẩy: đẩy nốt — form đã sạch lại thì bản nháp cũ bị xoá.
-      if (!closed.current) flush();
+      // Rời form (Huỷ, bấm mục khác…) trong lúc đang chờ đẩy: đẩy nốt — form đã sạch lại thì bản nháp cũ bị xoá. Chỉ khi
+      // form đã tải xong (rời đi lúc đang tải / lỗi tải thì bản nháp khôi phục được giữ nguyên).
+      if (!closed.current && loaded.current) flush();
     };
   }, [flush]);
 
@@ -412,8 +428,8 @@ export function EntryForm({
           {restore?.changedSince && <p className="warn-text">Mục này đã thay đổi sau khi bạn bắt đầu sửa — kiểm tra lại trước khi lưu.</p>}
           {restore?.asNew && (
             <p className="warn-text">
-              Mục bạn đang sửa dở không còn trong kho (có thể đã bị xoá ở máy khác) — toàn bộ nội dung lần cuối được mở thành một mục MỚI. Mật khẩu chỉ có
-              nếu bạn đã nhập nó trong lúc sửa; nếu mục còn trong Thùng rác, bạn cũng có thể khôi phục nó từ đó. Kiểm tra lại rồi bấm Lưu.
+              Mục bạn đang sửa dở không còn trong kho (có thể đã bị xoá ở máy khác) — toàn bộ nội dung lần cuối được mở thành một mục MỚI. Mật khẩu và mã 2FA
+              chỉ có nếu bạn đã nhập chúng trong lúc sửa; nếu mục còn trong Thùng rác, bạn cũng có thể khôi phục nó từ đó. Kiểm tra lại rồi bấm Lưu.
             </p>
           )}
           {draftError && <p className="error">{draftError}</p>}

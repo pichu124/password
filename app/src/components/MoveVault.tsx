@@ -3,7 +3,7 @@ import { api, errorText, pickFile } from "../api";
 import type { MoveView, Status } from "../types";
 
 const SAME_FOLDER_TEXT =
-  "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ thư mục Tài liệu / Documents): file mới đặt cạnh file kho cũ sẽ bị coi là bản xung đột của nó.";
+  "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ một thư mục con mới bên trong nó): file mới đặt ngay cạnh file kho cũ sẽ bị coi là bản xung đột của nó.";
 
 const sep = (p: string) => (p.includes("/") && !p.includes("\\") ? "/" : "\\");
 
@@ -30,13 +30,20 @@ export function MoveVault({
     setError(null);
     try {
       const fileName = status.vault_path?.split(/[\\/]/).pop() ?? "vault.pwv";
-      // Cứu dữ liệu: không gợi ý thư mục đồng bộ (thường chính là thư mục đang chứa file kho) — để hộp thoại tự mở ở
-      // thư mục mặc định (thường là Tài liệu / Documents).
-      const suggested = rescue ? "" : await api.suggestPath().catch(() => "");
-      const dir = suggested.replace(/[\\/][^\\/]*$/, "");
+      // Cứu dữ liệu: gợi ý một thư mục con MỚI bên trong thư mục đang chứa file kho — vẫn được đồng bộ, mà không phải chính
+      // thư mục của file kho (file đặt ngay cạnh sẽ bị coi là bản xung đột).
+      let dir: string;
+      if (rescue && status.vault_path) {
+        const vdir = status.vault_path.replace(/[\\/][^\\/]*$/, "");
+        const day = new Date().toISOString().slice(0, 10);
+        dir = vdir && vdir !== status.vault_path ? `${vdir}${sep(vdir)}Ban sao ${day}` : "";
+      } else {
+        const suggested = await api.suggestPath().catch(() => "");
+        dir = suggested.replace(/[\\/][^\\/]*$/, "");
+      }
       const p = await pickFile({
         save: true,
-        title: rescue ? "Chọn nơi lưu bản đang mở (một thư mục KHÁC thư mục của file kho)" : "Chọn thư mục mới cho kho",
+        title: rescue ? "Chọn nơi lưu bản đang mở (một thư mục KHÁC thư mục của file kho, nên nằm trong thư mục đồng bộ)" : "Chọn thư mục mới cho kho",
         defaultPath: dir ? `${dir}${sep(dir)}${fileName}` : fileName,
         filters: [{ name: "Kho pwv", extensions: ["pwv"] }],
       });
@@ -91,6 +98,9 @@ export function MoveVault({
           <>
             <li>App chỉ ghi một BẢN SAO của bản đang mở ra chỗ mới. Mọi thứ ở chỗ cũ (file kho, thư mục sao lưu) được giữ nguyên, không bị xoá hay ghi đè.</li>
             <li>Từ giờ máy này dùng file ở chỗ mới. Các máy khác vẫn dùng file ở chỗ cũ cho tới khi bạn chọn lại file trên từng máy (“Dùng kho khác” ở màn hình mở khoá).</li>
+            <li>
+              <strong>Nếu chỗ mới KHÔNG nằm trong thư mục đồng bộ (Google Drive / Dropbox / OneDrive), bản này KHÔNG được đồng bộ với các máy khác cho tới khi bạn chuyển nó vào đó.</strong>
+            </li>
           </>
         ) : (
           <>
@@ -115,7 +125,7 @@ export function MoveVault({
 /** Lời báo sau khi chuyển kho. */
 export function moveMessage(r: MoveView): string {
   if (r.rescued)
-    return `Đã ghi một BẢN SAO của kho sang ${r.new_path}. Từ giờ máy này dùng file ở vị trí mới. File ở vị trí cũ (${r.old_path}) được giữ nguyên, không bị xoá hay ghi đè — nó có thể còn chứa thay đổi mới hơn từ máy khác. Trên các máy khác, hãy chọn lại file ở vị trí mới (“Dùng kho khác” ở màn hình mở khoá).`;
+    return `Đã ghi một BẢN SAO của kho sang ${r.new_path}. Từ giờ máy này dùng file ở vị trí mới. File ở vị trí cũ (${r.old_path}) được giữ nguyên, không bị xoá hay ghi đè — nó có thể còn chứa thay đổi mới hơn từ máy khác. Trên các máy khác, hãy chọn lại file ở vị trí mới (“Dùng kho khác” ở màn hình mở khoá). Nếu chỗ mới KHÔNG nằm trong thư mục đồng bộ (Google Drive / Dropbox / OneDrive), bản này KHÔNG được đồng bộ với các máy khác cho tới khi bạn chuyển nó vào đó.`;
   if (!r.old_removed) return `Đã chuyển kho sang ${r.new_path}. File ở vị trí cũ chưa xoá được — bạn có thể tự xoá.`;
   return `Đã chuyển kho sang ${r.new_path}.`;
 }

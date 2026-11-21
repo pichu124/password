@@ -177,6 +177,8 @@ const live = () => entries.filter((e) => e.trashed_at === null);
 
 interface MockStash {
   draft: string | null;
+  /** Số thứ tự của bản nháp mới nhất đã ghi. */
+  seq?: number;
   generated: { id: string; value: string; at: number; label: string | null }[];
 }
 const STASH_KEY = "pwv.mock.stash";
@@ -362,7 +364,15 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
     case "page_loaded":
       if (IS_PHONE) lockMock(null);
       return null;
-    case "lock": lockMock(null); return null;
+    case "lock":
+      // Như backend: bản nháp form đang giữ được ghi vào stash TRƯỚC khi khoá.
+      if (a.hasDraft && unlocked) {
+        const st = loadStash();
+        if (typeof a.draftSeq !== "number" || a.draftSeq >= (st.seq ?? 0)) { st.draft = a.draft ?? null; st.seq = a.draftSeq; }
+        saveStash(st);
+      }
+      lockMock(null);
+      return null;
     case "unlock": {
       await sleep(700);
       if (flag("missing")) throw err("file_missing", `Không tìm thấy file kho: ${a.path}`);
@@ -459,7 +469,10 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       needUnlocked();
       const st = loadStash();
       if (a.draft != null && String(a.draft).length > 256 * 1024) { st.draft = null; saveStash(st); throw err("draft_too_large", "Bản nháp quá lớn, chưa được giữ."); }
+      // Bản đến muộn mà cũ hơn (số thứ tự nhỏ hơn) bị bỏ, như backend.
+      if (typeof a.draftSeq === "number" && a.draftSeq < (st.seq ?? 0)) return null;
       st.draft = a.draft ?? null;
+      if (typeof a.draftSeq === "number") st.seq = a.draftSeq;
       saveStash(st);
       return null;
     }
@@ -631,7 +644,7 @@ export async function mockInvoke(cmd: string, a: Record<string, any> = {}): Prom
       {
         const dir = (x: string | null) => (x ?? "").replace(/[\\/][^\\/]*$/, "").toLowerCase();
         if (a.copyOnly && dir(a.path) === dir(vaultPath))
-          throw err("move_failed", "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ thư mục Tài liệu / Documents): file mới đặt cạnh file kho cũ sẽ bị coi là bản xung đột của nó.");
+          throw err("move_failed", "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ một thư mục con mới bên trong nó): file mới đặt ngay cạnh file kho cũ sẽ bị coi là bản xung đột của nó.");
         const rescued = a.copyOnly || diskProblem !== null;
         const old = vaultPath;
         diskProblem = null; vaultPath = a.path; vaultExists = true; setUrlFlag("problem", false);

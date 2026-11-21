@@ -218,7 +218,29 @@ pub struct Shared {
     session: Mutex<Session>,
     pub activity: Arc<Activity>,
     pending: AtomicU8,
+    /// Hộp thư của các lần ghi bản nháp / mật khẩu vừa tạo, nằm NGOÀI khoá phiên: lệnh bỏ việc vào
+    /// đây ngay, rồi mới chờ khoá phiên. Mọi lần lấy khoá phiên đều xử lý hộp thư (ghi vào stash của kho
+    /// còn mở) TRƯỚC khi thực hiện yêu cầu khoá đang chờ — nên một lần khoá được yêu cầu trong lúc khoá
+    /// phiên đang bận (đồng bộ chậm) không làm mất bản nháp mới nhất.
+    outbox: Mutex<Vec<(StashOp, OpSlot)>>,
+    /// Số thứ tự của bản nháp mới nhất đã ghi (giao diện đánh số tăng dần): bản đến muộn mà cũ hơn bị bỏ.
+    draft_seq: std::sync::atomic::AtomicU64,
 }
+
+/// Một lần ghi vào stash, chờ trong hộp thư.
+pub enum StashOp {
+    Draft {
+        draft: Option<Zeroizing<String>>,
+        seq: Option<u64>,
+    },
+    Generated {
+        value: Zeroizing<String>,
+        label: Option<String>,
+    },
+}
+
+/// Kết quả của một lần ghi trong hộp thư (`None` = chưa được xử lý).
+type OpSlot = Arc<Mutex<Option<AppResult<()>>>>;
 
 impl Shared {
     pub fn new(s: Session) -> Self {
@@ -226,6 +248,46 @@ impl Shared {
             activity: s.activity.clone(),
             session: Mutex::new(s),
             pending: AtomicU8::new(0),
+            outbox: Mutex::new(Vec::new()),
+            draft_seq: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Bỏ một lần ghi stash vào hộp thư (không cần khoá phiên). Trả về chỗ nhận kết quả.
+    pub fn queue_stash(&self, op: StashOp) -> OpSlot {
+        let slot: OpSlot = Arc::new(Mutex::new(None));
+        self.outbox
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((op, slot.clone()));
+        slot
+    }
+
+    /// Ghi stash qua hộp thư rồi chờ kết quả (lấy khoá phiên = xử lý hộp thư). Kho đã khoá trước khi
+    /// tới lượt ⇒ `locked` (bỏ qua vô hại, không ghi gì).
+    pub fn stash_op(&self, op: StashOp) -> AppResult<()> {
+        let slot = self.queue_stash(op);
+        drop(self.lock());
+        let r = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        r.unwrap_or_else(|| Err(AppError::locked()))
+    }
+
+    /// Xử lý hộp thư vào stash của kho đang mở (gọi khi đang giữ khoá phiên, TRƯỚC mọi lần khoá).
+    pub fn drain(&self, s: &mut Session) {
+        let ops = std::mem::take(&mut *self.outbox.lock().unwrap_or_else(|p| p.into_inner()));
+        for (op, slot) in ops {
+            let r = match op {
+                StashOp::Draft { draft, seq } => match seq {
+                    Some(q) if q < self.draft_seq.load(Ordering::SeqCst) => Ok(()),
+                    Some(q) => {
+                        self.draft_seq.store(q, Ordering::SeqCst);
+                        s.set_draft(draft)
+                    }
+                    None => s.set_draft(draft),
+                },
+                StashOp::Generated { value, label } => s.record_generated(value, label),
+            };
+            *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(r);
         }
     }
 
@@ -236,6 +298,7 @@ impl Shared {
             .session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.drain(&mut g);
         self.apply_pending(&mut g);
         g
     }
@@ -247,6 +310,7 @@ impl Shared {
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
+        self.drain(&mut g);
         self.apply_pending(&mut g);
         Some(g)
     }
@@ -322,6 +386,19 @@ struct SealedStash {
 /// Dấu "trạng thái kho" của lần ghi bản lưu riêng gần nhất: (mã kho, dấu vân tay file kho, dấu khoá,
 /// `modified_at`, số mục, số mục trong thùng rác).
 type LocalSig = (String, Option<[u8; 32]>, u64, i64, usize, usize);
+
+/// Kết quả xử lý các bản cứu hộ lúc mở khoá / khôi phục.
+#[derive(Default)]
+struct RescueOutcome {
+    /// Đã gộp (khoá hiện tại) — xoá sau khi kho đã được ghi.
+    merged: Vec<PathBuf>,
+    /// Số bản gộp được mà THẬT SỰ thêm / đổi được gì.
+    merged_changed: usize,
+    /// Số bản không xử lý được (vẫn giữ).
+    kept: usize,
+    /// Số bản ghi bằng khoá cũ có nội dung mới đã được cất vào thư mục sao lưu.
+    archived: usize,
+}
 
 /// Kết quả gộp bản lưu riêng lúc mở khoá / khôi phục.
 #[derive(Default)]
@@ -657,7 +734,8 @@ pub struct UnlockInfo {
     /// File kho vừa được một máy chạy bản 0.1.x ghi lại (sau khi máy này đã mở nó bằng bản mới).
     pub old_version_wrote: bool,
     /// Số bản lưu riêng / bản cứu hộ trên máy này ghi bằng mật khẩu chính CŨ có nội dung mà kho không
-    /// có: KHÔNG được gộp, đã được cất nguyên văn vào thư mục sao lưu (`oldkey-…`) để chủ kho xem lại.
+    /// có: KHÔNG được gộp, đã được cất vào thư mục sao lưu (`oldkey-…`, mã hoá lại bằng khoá hiện tại,
+    /// đánh dấu "từ trước lần đổi mật khẩu") để chủ kho xem lại.
     pub old_local_archived: usize,
 }
 
@@ -896,6 +974,27 @@ impl Session {
         false
     }
 
+    /// Một bước của luồng tự khoá khi đã giữ khoá phiên: quyết định, BÁO TRANG trước (`tell(lý do,
+    /// kho còn mở?)`), rồi mới khoá — việc khoá có thể phải ghi ra thư mục đồng bộ đang chậm. Trả về lý
+    /// do nếu đã khoá.
+    pub fn auto_lock_step(
+        &mut self,
+        suspend: bool,
+        mut tell: impl FnMut(&'static str, bool),
+    ) -> Option<&'static str> {
+        if suspend && self.vault.is_some() {
+            tell("suspend", self.vault.is_some());
+            self.lock_because(SUSPEND_NOTE);
+            Some("suspend")
+        } else if self.idle_lock_due() {
+            tell("idle", self.vault.is_some());
+            self.lock_because(IDLE_NOTE);
+            Some("idle")
+        } else {
+            None
+        }
+    }
+
     /// Đã đến lúc tự khoá vì không dùng (chỉ QUYẾT ĐỊNH, chưa khoá — để luồng tự khoá báo trang vứt bí
     /// mật TRƯỚC khi khoá, việc khoá có thể phải ghi ra thư mục đồng bộ đang chậm).
     pub fn idle_lock_due(&self) -> bool {
@@ -1084,24 +1183,24 @@ impl Session {
             updated: m.updated,
             deleted: m.deleted,
         });
-        let (merged, rescue_kept, rescue_archived) = self.merge_rescue_copies();
+        let rescue = self.merge_rescue_copies();
         // Ghi lại ngay những gì vừa gộp (bản lưu riêng, bản cứu hộ, bản xung đột). Vấn đề với file
         // trên đĩa không chặn việc mở kho (nằm trong `sync.problem`); chỉ "mật khẩu đã đổi ở máy
         // khác" mới trả lỗi.
         let sync = self.sync()?;
         if sync.problem.is_none() {
-            self.delete_rescue_copies(&merged);
+            self.delete_rescue_copies(&rescue.merged);
         }
         let draft = self.load_stash().draft.map(|d| d.to_string());
         Ok(UnlockInfo {
             rollback,
-            rescued: merged.len() - rescue_archived,
-            rescue_kept,
+            rescued: rescue.merged_changed,
+            rescue_kept: rescue.kept,
             sync,
             draft,
             local_restored,
             old_version_wrote,
-            old_local_archived: usize::from(local.archived) + rescue_archived,
+            old_local_archived: usize::from(local.archived) + rescue.archived,
         })
     }
 
@@ -1211,7 +1310,7 @@ impl Session {
         self.pending = SyncResult::default();
         self.rekey_advised = false;
         let local = self.merge_local_copy();
-        let (merged, rescue_kept, rescue_archived) = self.merge_rescue_copies();
+        let rescue = self.merge_rescue_copies();
         if !from_local && !o.allow_older && !o.allow_stale {
             let stale = self
                 .vault()?
@@ -1240,7 +1339,7 @@ impl Session {
                 return Err(e.into());
             }
         };
-        self.delete_rescue_copies(&merged);
+        self.delete_rescue_copies(&rescue.merged);
         let Some(v) = self.vault.as_ref() else {
             return Err(AppError::locked());
         };
@@ -1257,9 +1356,9 @@ impl Session {
             files_used,
             newest_backup_at,
             archived: archived.map(|p| p.display().to_string()),
-            rescue_kept,
+            rescue_kept: rescue.kept,
             from_local_copy: from_local,
-            old_local_archived: usize::from(local.archived) + rescue_archived,
+            old_local_archived: usize::from(local.archived) + rescue.archived,
         })
     }
 
@@ -1444,26 +1543,39 @@ impl Session {
     /// Gộp các bản cứu hộ của kho đang mở. Trả về (các file đã xử lý xong — gộp được, hoặc ghi bằng
     /// khoá cũ mà không có gì mới, hoặc ghi bằng khoá cũ và ĐÃ được cất `oldkey-…` —, số file KHÔNG xử
     /// lý được, số file đã được cất vì ghi bằng khoá cũ). Nội dung ghi bằng khoá cũ không bao giờ được gộp.
-    fn merge_rescue_copies(&mut self) -> (Vec<PathBuf>, usize, usize) {
+    fn merge_rescue_copies(&mut self) -> RescueOutcome {
+        let mut out = RescueOutcome::default();
         let Some(id) = self.vault.as_ref().map(|v| v.vault_id().to_string()) else {
-            return (Vec::new(), 0, 0);
+            return out;
         };
         let files = self.rescue_files(&id);
         let Some(v) = self.vault.as_mut() else {
-            return (Vec::new(), 0, 0);
+            return out;
         };
-        let (mut done, mut failed, mut archived) = (Vec::new(), 0, 0);
         for f in files {
             match v.merge_local_file(&f) {
-                Ok(LocalMerge::RetiredArchived(_)) => {
-                    archived += 1;
-                    done.push(f);
+                // Gộp được: chỉ xoá sau khi kho đã được ghi (xem `delete_rescue_copies`). Chỉ tính là
+                // "đã khôi phục" khi nó thật sự thêm / đổi được gì.
+                Ok(LocalMerge::Merged(m)) => {
+                    if m.changed() {
+                        out.merged_changed += 1;
+                    }
+                    out.merged.push(f);
                 }
-                Ok(_) => done.push(f),
-                Err(_) => failed += 1,
+                // Ghi bằng khoá cũ: KHÔNG gộp. Có nội dung mới thì lõi đã cất nó (mã hoá lại bằng khoá
+                // hiện tại, đánh dấu "từ trước lần đổi mật khẩu") vào thư mục sao lưu. Xoá file riêng
+                // NGAY — không chờ một lần ghi kho thành công — để không lần mở khoá nào cất / báo lại nó.
+                Ok(LocalMerge::RetiredArchived(_)) => {
+                    out.archived += 1;
+                    let _ = std::fs::remove_file(&f);
+                }
+                Ok(LocalMerge::RetiredNoNews) => {
+                    let _ = std::fs::remove_file(&f);
+                }
+                Err(_) => out.kept += 1,
             }
         }
-        (done, failed, archived)
+        out
     }
 
     /// Xoá ĐÚNG các bản cứu hộ đã gộp được (`merged`), và chỉ khi kho đã được GHI thành công. Bản
@@ -2158,16 +2270,8 @@ impl Session {
     pub fn move_vault(&mut self, new_path: &Path, copy_only: bool) -> AppResult<MoveView> {
         self.touch();
         let old_path = self.vault()?.path().display().to_string();
-        if copy_only {
-            let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-            let old_dir = abs(self.vault()?.path()).parent().map(Path::to_path_buf);
-            let new_dir = abs(new_path).parent().map(Path::to_path_buf);
-            if old_dir.is_some() && old_dir == new_dir {
-                return Err(AppError::new(
-                    "move_failed",
-                    "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ thư mục Tài liệu / Documents): file mới đặt cạnh file kho cũ sẽ bị coi là bản xung đột của nó.",
-                ));
-            }
+        if copy_only && same_folder(self.vault()?.path(), new_path) {
+            return Err(AppError::new("move_failed", SAME_FOLDER_REFUSAL));
         }
         let v = self.vault_mut()?;
         let r = if copy_only {
@@ -2279,15 +2383,20 @@ impl Session {
                     else {
                         continue;
                     };
-                    if data.draft.is_none() {
-                        data.draft = old.draft.clone();
+                    // Bản nháp của nó chỉ được lấy khi chưa có bản nháp nào; nếu có bản nháp KHÁC thì
+                    // file này chưa được lấy hết ⇒ giữ lại cho lần sau (vẫn lấy các mật khẩu vừa tạo).
+                    let mut whole = true;
+                    match (&data.draft, &old.draft) {
+                        (None, Some(d)) => data.draft = Some(d.clone()),
+                        (Some(cur), Some(d)) if cur != d => whole = false,
+                        _ => {}
                     }
                     for g in old.generated {
                         if !data.generated.iter().any(|x| x.value == g.value) {
                             data.generated.push(g);
                         }
                     }
-                    absorbed.push(f);
+                    absorbed.push((f, whole));
                 }
             }
         }
@@ -2299,9 +2408,12 @@ impl Session {
             self.stash = None;
         }
         data.prune(pwv_vault_core::model::now_ms());
-        if !absorbed.is_empty() && self.store_stash(data.clone()).is_ok() {
-            for f in absorbed {
-                let _ = std::fs::remove_file(f);
+        // Chỉ xoá một file đã giữ lại khi MỌI thứ trong nó đã được lấy và stash gộp đã ghi xuống đĩa.
+        if !absorbed.is_empty() && matches!(self.store_stash_on_disk(data.clone()), Ok(true)) {
+            for (f, whole) in absorbed {
+                if whole {
+                    let _ = std::fs::remove_file(f);
+                }
             }
         }
         data
@@ -2327,7 +2439,12 @@ impl Session {
     }
 
     /// Niêm phong và cất stash: trong RAM, và (cố gắng) ghi nguyên tử vào thư mục riêng của app.
-    fn store_stash(&mut self, mut data: StashData) -> AppResult<()> {
+    fn store_stash(&mut self, data: StashData) -> AppResult<()> {
+        self.store_stash_on_disk(data).map(|_| ())
+    }
+
+    /// Như [`Session::store_stash`]; trả về true nếu bản niêm phong cũng đã được ghi xuống đĩa.
+    fn store_stash_on_disk(&mut self, mut data: StashData) -> AppResult<bool> {
         data.prune(pwv_vault_core::model::now_ms());
         let v = self.writable_vault()?;
         let id = v.vault_id().to_string();
@@ -2350,24 +2467,29 @@ impl Session {
                         vault_id: id,
                         sealed,
                     });
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             self.stash_unreadable = None;
             if let Some(dir) = p.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            if empty {
-                let _ = std::fs::remove_file(&p);
+            let on_disk = if empty {
+                std::fs::remove_file(&p).is_ok() || !p.exists()
             } else {
-                let _ = fsutil::atomic_write(&p, &sealed);
-            }
+                fsutil::atomic_write(&p, &sealed).is_ok()
+            };
+            self.stash = Some(SealedStash {
+                vault_id: id,
+                sealed,
+            });
+            return Ok(on_disk);
         }
         self.stash = Some(SealedStash {
             vault_id: id,
             sealed,
         });
-        Ok(())
+        Ok(false)
     }
 
     /// Đặt (`Some`) hoặc xoá (`None`) bản nháp. Bản nháp quá lớn ⇒ không giữ (bản cũ cũng bị xoá
@@ -2563,9 +2685,9 @@ impl Session {
 
     /// Gộp bản lưu riêng của kho đang mở (chỉ khi nó dùng khoá HIỆN TẠI).
     /// - Khoá hiện tại ⇒ gộp; `merged` = số mục thay đổi nếu nó thêm được gì.
-    /// - Khoá cũ, không có gì mới ⇒ không làm gì (bản lưu riêng sẽ được ghi lại bằng trạng thái hiện tại).
-    /// - Khoá cũ, CÓ nội dung kho không có ⇒ lõi đã cất nguyên văn thành `oldkey-…` và KHÔNG gộp; chỉ
-    ///   sau đó file riêng mới bị xoá (`archived`).
+    /// - Khoá cũ, không có gì mới ⇒ xoá file riêng ngay (sẽ được ghi lại bằng trạng thái hiện tại).
+    /// - Khoá cũ, CÓ nội dung kho không có ⇒ lõi đã cất nó thành `oldkey-…` (mã hoá lại bằng khoá hiện
+    ///   tại, đánh dấu `pre_change`) và KHÔNG gộp; file riêng bị xoá ngay sau đó (`archived`).
     /// - Không xử lý được (khoá mà kho này không biết, hỏng) ⇒ đổi tên thành bản cứu hộ ngay (được giữ
     ///   và đếm); đổi tên không được thì không bao giờ ghi đè nó.
     fn merge_local_copy(&mut self) -> LocalOutcome {
@@ -2593,7 +2715,12 @@ impl Session {
                 out.merged = m.changed().then_some(m);
                 self.local_checked = Some(id);
             }
-            Ok(LocalMerge::RetiredNoNews) => self.local_checked = Some(id),
+            // Ghi bằng khoá cũ, không có gì mới: xoá ngay (sẽ được ghi lại bằng khoá hiện tại).
+            Ok(LocalMerge::RetiredNoNews) => {
+                let _ = std::fs::remove_file(&p);
+                self.local_written = None;
+                self.local_checked = Some(id);
+            }
             Ok(LocalMerge::RetiredArchived(_)) => {
                 out.archived = true;
                 let _ = std::fs::remove_file(&p);
@@ -2732,6 +2859,26 @@ impl Session {
                 .clamp(CLIPBOARD_CLEAR_SECS_MIN, CLIPBOARD_CLEAR_SECS_MAX);
             c.check_updates = s.check_updates;
         })
+    }
+}
+
+/// Lời từ chối "lưu sang chỗ khác" vào chính thư mục của file kho.
+const SAME_FOLDER_REFUSAL: &str = "Hãy chọn một thư mục KHÁC thư mục đang chứa file kho (ví dụ một thư mục con mới bên trong nó): file mới đặt ngay cạnh file kho cũ sẽ bị coi là bản xung đột của nó.";
+
+/// Hai file nằm trong CÙNG một thư mục? So thư mục đã chuẩn hoá (`canonicalize`: theo junction /
+/// symlink / chữ hoa-thường như hệ điều hành thấy), lùi về so dạng tuyệt đối khi thư mục chưa tồn tại;
+/// trên Windows không phân biệt chữ hoa-thường.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let dir = |p: &Path| {
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let parent = abs.parent()?.to_path_buf();
+        let canon = std::fs::canonicalize(&parent).unwrap_or(parent);
+        let s = canon.to_string_lossy().to_string();
+        Some(if cfg!(windows) { s.to_lowercase() } else { s })
+    };
+    match (dir(a), dir(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -4028,7 +4175,7 @@ mod tests {
 
     /// (3) Bản lưu riêng ghi bằng khoá cũ (mật khẩu được đổi ở máy khác) KHÔNG được tự gộp — nó có
     /// thể chứa những gì người biết mật khẩu cũ ghi vào thư mục đồng bộ sau lần đổi. Phần nó có mà
-    /// kho chưa có được cất nguyên văn thành bản `oldkey-…` để chủ kho tự xem lại.
+    /// kho chưa có được cất thành bản `oldkey-…` (mã hoá lại, đánh dấu cũ) để chủ kho tự xem lại.
     #[test]
     fn a_local_copy_under_a_retired_key_is_archived_not_merged() {
         let (mut s, d) = session();
@@ -4626,5 +4773,246 @@ mod tests {
                 .unwrap(),
             "https://khac.vn"
         );
+    }
+
+    // ------------------------------------------------------------------ fix4
+
+    /// Q1: một lần ghi bản nháp / mật khẩu vừa tạo đang chờ khoá phiên (đồng bộ chậm), rồi một yêu
+    /// cầu khoá được ghi: lần ghi vẫn vào stash TRƯỚC khi kho khoá — với mọi loại yêu cầu khoá.
+    #[test]
+    fn stash_writes_queued_behind_a_busy_session_survive_any_lock_request() {
+        for reason in [LOCK_MANUAL, LOCK_IDLE, LOCK_CLOSE] {
+            let (mut s, d) = session();
+            let p = open(&mut s, &d);
+            let shared = Arc::new(Shared::new(s));
+            let busy = shared.lock();
+            let (a, b) = (shared.clone(), shared.clone());
+            let t1 = std::thread::spawn(move || {
+                a.stash_op(StashOp::Draft {
+                    draft: z("ban-nhap-moi-nhat"),
+                    seq: Some(5),
+                })
+            });
+            let t2 = std::thread::spawn(move || {
+                b.stash_op(StashOp::Generated {
+                    value: Zeroizing::new("vua-tao".into()),
+                    label: None,
+                })
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(shared.request_lock(reason));
+            drop(busy);
+            t1.join().unwrap().unwrap();
+            t2.join().unwrap().unwrap();
+            let mut g = shared.lock();
+            assert!(g.vault.is_none(), "kho đã khoá");
+            // Một lần ghi cũ đến SAU lần khoá: thất bại vô hại, không ghi gì.
+            drop(g);
+            assert_eq!(
+                shared
+                    .stash_op(StashOp::Draft {
+                        draft: z("cu-den-muon"),
+                        seq: Some(6),
+                    })
+                    .unwrap_err()
+                    .code,
+                "locked"
+            );
+            g = shared.lock();
+            let info = g.unlock(&p, MP).unwrap();
+            assert_eq!(
+                info.draft.as_deref(),
+                Some("ban-nhap-moi-nhat"),
+                "lý do {reason}"
+            );
+            assert_eq!(g.list_generated().unwrap().len(), 1);
+        }
+    }
+
+    /// Q1: `lock(draft)` — bản nháp đưa vào hộp thư trước yêu cầu khoá được ghi; bản cũ hơn (số thứ tự
+    /// nhỏ hơn) đến muộn thì bị bỏ.
+    #[test]
+    fn the_draft_given_to_lock_is_stored_and_older_drafts_never_win() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        let shared = Arc::new(Shared::new(s));
+        let busy = shared.lock();
+        let a = shared.clone();
+        let old = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            a.stash_op(StashOp::Draft {
+                draft: z("cu"),
+                seq: Some(1),
+            })
+        });
+        shared.queue_stash(StashOp::Draft {
+            draft: z("luc-khoa"),
+            seq: Some(2),
+        });
+        shared.request_lock(LOCK_MANUAL);
+        std::thread::sleep(Duration::from_millis(150));
+        drop(busy);
+        let _ = old.join().unwrap();
+        let mut g = shared.lock();
+        assert!(g.vault.is_none());
+        assert_eq!(g.unlock(&p, MP).unwrap().draft.as_deref(), Some("luc-khoa"));
+    }
+
+    /// Q2 + Q4: bản cứu hộ ghi bằng khoá cũ bị xoá NGAY (không chờ ghi kho); bản không thêm được gì
+    /// không được tính là "đã khôi phục".
+    #[test]
+    fn retired_rescue_copies_are_removed_at_once_and_no_op_merges_are_not_counted() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        s.save_entry(input("A", Some("a"))).unwrap();
+        let id = vid(&s);
+        let same = std::fs::read(&p).unwrap();
+        let mut stale = other_device(&p);
+        stale.add(Entry::new("Chỉ trong bản cũ"));
+        let with_news = stale.export_bytes().unwrap();
+        drop(stale);
+        s.change_master_password(MP, MP2).unwrap();
+        let rescue = d.path().join("rescue");
+        let news = rescue.join(format!("{id}-1.pwv"));
+        let nothing = rescue.join(format!("{id}-2.pwv"));
+        std::fs::write(&news, &with_news).unwrap();
+        std::fs::write(&nothing, &same).unwrap();
+        let current = rescue.join(format!("{id}-3.pwv"));
+        std::fs::write(&current, s.export_bytes().unwrap()).unwrap();
+        let out = s.merge_rescue_copies();
+        assert_eq!((out.archived, out.kept, out.merged_changed), (1, 0, 0));
+        assert!(
+            !news.exists() && !nothing.exists(),
+            "xoá ngay, chưa cần ghi kho"
+        );
+        assert!(
+            current.exists(),
+            "bản gộp được chỉ bị xoá sau khi kho được ghi"
+        );
+        s.lock();
+        let info = s.unlock(&p, MP2).unwrap();
+        assert_eq!(
+            info.rescued, 0,
+            "không thêm được gì ⇒ không báo đã khôi phục"
+        );
+        assert!(!current.exists());
+    }
+
+    /// Q5: một file `.unreadable` chỉ bị xoá khi đã lấy hết nội dung VÀ stash gộp đã ghi xuống đĩa.
+    #[test]
+    fn kept_unreadable_stashes_are_removed_only_when_fully_absorbed_and_written() {
+        let (mut s, d) = session();
+        open(&mut s, &d);
+        let id = vid(&s);
+        s.set_draft(z("ban-nhap-cu")).unwrap();
+        let old = std::fs::read(stash_file(&d, &id)).unwrap();
+        s.set_draft(z("ban-nhap-hien-tai")).unwrap();
+        let kept = d
+            .path()
+            .join("rescue")
+            .join(format!("stash-{id}.unreadable-9.bin"));
+        std::fs::write(&kept, &old).unwrap();
+        assert_eq!(s.draft().unwrap().as_deref(), Some("ban-nhap-hien-tai"));
+        assert!(kept.exists(), "bản nháp của nó chưa được lấy ⇒ giữ lại");
+        // Bản nháp trùng thì coi như đã lấy hết — nhưng ghi xuống đĩa thất bại ⇒ vẫn giữ.
+        s.set_draft(z("ban-nhap-cu")).unwrap();
+        std::fs::remove_file(stash_file(&d, &id)).unwrap();
+        std::fs::create_dir_all(stash_file(&d, &id)).unwrap();
+        assert_eq!(s.draft().unwrap().as_deref(), Some("ban-nhap-cu"));
+        assert!(kept.exists(), "stash chưa ghi được xuống đĩa ⇒ giữ lại");
+        std::fs::remove_dir(stash_file(&d, &id)).unwrap();
+        assert_eq!(s.draft().unwrap().as_deref(), Some("ban-nhap-cu"));
+        assert!(!kept.exists());
+    }
+
+    /// Q7: không lách được lời từ chối "cùng thư mục" bằng một liên kết tới chính thư mục đó.
+    #[cfg(unix)]
+    #[test]
+    fn copy_only_refusal_follows_links_to_the_vault_folder() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        let link = d.path().join("loi-tat");
+        std::os::unix::fs::symlink(p.parent().unwrap(), &link).unwrap();
+        let e = s.move_vault(&link.join("ban-sao.pwv"), true).unwrap_err();
+        assert_eq!(e.code, "move_failed");
+        assert!(!p.with_file_name("ban-sao.pwv").exists());
+        // Một thư mục con mới (chưa có) thì được.
+        let sub = p.parent().unwrap().join("Ban sao").join("v.pwv");
+        assert!(s.move_vault(&sub, true).is_ok());
+    }
+
+    /// Q11: một thay đổi từ máy khác KHÔNG làm tăng `modified_at` (đồng hồ của máy kia chậm hơn lần sửa
+    /// mới nhất ở đây, số mục không đổi) vẫn làm bản lưu riêng được ghi lại.
+    #[test]
+    fn the_local_copy_catches_a_remote_edit_that_does_not_advance_modified_at() {
+        let (mut s, d) = session();
+        let p = open(&mut s, &d);
+        let (x, _) = s.save_entry(input("X", Some("x"))).unwrap();
+        let vid_ = vid(&s);
+        let mut pc2 = other_device(&p);
+        pc2.update(&x, |e| e.username = "sua-o-may-cham".into())
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        // Máy này sửa một mục khác SAU đó (modified_at mới hơn bản của máy kia).
+        s.save_entry(input("Y", Some("y"))).unwrap();
+        let mod_before = s.vault.as_ref().unwrap().modified_at();
+        let counts_before = (s.list("").unwrap().len(), s.status().trash_count);
+        // Máy kia ghi đè file kho bằng bản của nó (thiếu Y, có lần sửa X).
+        std::fs::write(&p, pc2.export_bytes().unwrap()).unwrap();
+        s.sync().unwrap();
+        assert_eq!(
+            s.vault.as_ref().unwrap().modified_at(),
+            mod_before,
+            "modified_at không đổi"
+        );
+        assert_eq!(
+            (s.list("").unwrap().len(), s.status().trash_count),
+            counts_before
+        );
+        let bytes = std::fs::read(local_file(&d, &vid_)).unwrap();
+        let ro = Vault::open_bytes_with(
+            "x",
+            &bytes,
+            MP.as_bytes(),
+            OpenOptions {
+                allow_weak_kdf: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(ro.get(&x).unwrap().username, "sua-o-may-cham");
+    }
+
+    /// Q11: bước tự khoá báo trang TRƯỚC (lúc kho còn mở), rồi mới khoá.
+    #[test]
+    fn the_auto_lock_step_tells_the_page_before_locking() {
+        let (mut s, d) = session();
+        open(&mut s, &d);
+        s.config.auto_lock_minutes = 1;
+        let mut seen = Vec::new();
+        assert_eq!(
+            s.auto_lock_step(false, |r, open| seen.push((r, open))),
+            None
+        );
+        assert!(seen.is_empty() && s.vault.is_some());
+        s.activity.backdate(Duration::from_secs(61));
+        assert_eq!(
+            s.auto_lock_step(false, |r, open| seen.push((r, open))),
+            Some("idle")
+        );
+        assert_eq!(seen, [("idle", true)], "báo trang khi kho CÒN mở");
+        assert!(s.vault.is_none());
+        let p = d.path().join("kho").join("v.pwv");
+        s.unlock(&p, MP).unwrap();
+        seen.clear();
+        assert_eq!(
+            s.auto_lock_step(true, |r, open| seen.push((r, open))),
+            Some("suspend")
+        );
+        assert_eq!(seen, [("suspend", true)]);
+        assert!(s.vault.is_none());
+        // Đã khoá sẵn: không báo gì.
+        seen.clear();
+        assert_eq!(s.auto_lock_step(true, |r, open| seen.push((r, open))), None);
+        assert!(seen.is_empty());
     }
 }

@@ -64,6 +64,19 @@ export function EntryView({
 
   if (!e) return <div className="detail empty" />;
 
+  /**
+   * Sao chép ĐÚNG giá trị đang hiện trên màn hình (mật khẩu cũ trong Lịch sử) qua đường clipboard được bảo vệ — không dựa
+   * vào chỉ số, vì thời điểm đổi của hai mật khẩu cũ có thể trùng nhau.
+   */
+  async function copyShown(value: string, label: string) {
+    try {
+      const secs = await api.copyText(value);
+      toast(`Đã sao chép ${label} — tự xoá sau ${secs} giây`);
+    } catch (err) {
+      toast(errorText(err), "error");
+    }
+  }
+
   /** `shown`: dòng đang hiện (địa chỉ của `url:<i>`, `replaced_at` của `history:<i>`) — backend so lại trước khi chép. */
   async function copy(field: CopyField, label: string, shown?: string) {
     try {
@@ -260,7 +273,7 @@ export function EntryView({
                     <li key={i}>
                       <span className="mono selectable grow">{h.password}</span>
                       <span className="muted small">đổi lúc {formatDate(h.replaced_at)}</span>
-                      <button className="icon-btn" onClick={() => copy(`history:${i}`, "mật khẩu cũ", String(h.replaced_at))} title="Sao chép" aria-label="Sao chép mật khẩu cũ">
+                      <button className="icon-btn" onClick={() => copyShown(h.password, "mật khẩu cũ")} title="Sao chép" aria-label="Sao chép mật khẩu cũ">
                         <Icon name="copy" />
                       </button>
                     </li>

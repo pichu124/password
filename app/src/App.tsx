@@ -379,7 +379,8 @@ function VaultScreen({
         addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá. Mục đó không còn trong kho (có thể đã bị xoá ở máy khác) nên được mở thành một mục MỚI.", "warn");
         return;
       }
-      setViewRaw({ kind: "edit", id: null, restore: { draft } });
+      // Đã từng được mở thành mục MỚI (mục gốc không còn): giữ lời giải thích.
+      setViewRaw({ kind: "edit", id: null, restore: { draft, asNew: !!draft.openedAsNew } });
       addNotice("Đã khôi phục mục đang sửa dở từ trước khi kho bị khoá.", "info");
     })();
   }, [unlockInfo, addNotice]);

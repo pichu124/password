@@ -113,7 +113,9 @@ export const api = {
   /** File vừa chọn có phải bản xung đột của một file kho khác cùng thư mục không. */
   checkVaultChoice: (path: string) => call<ConflictHint | null>("check_vault_choice", { path }),
   acceptRollback: () => call<void>("accept_rollback"),
-  lock: () => call<void>("lock"),
+  /** `form`: bản nháp form đang giữ NGAY LÚC NÀY (`draft: null` = form sạch) — được ghi vào stash trước khi kho khoá. */
+  lock: (form?: { draft: string | null }) =>
+    call<void>("lock", form ? { hasDraft: true, draft: form.draft, draftSeq: nextDraftSeq() } : {}),
   setVaultPath: (path: string) => call<void>("set_vault_path", { path }),
   list: (query: string) => call<EntrySummary[]>("list_entries", { query }),
   get: (id: string) => call<EntryDetail>("get_entry", { id }),
@@ -153,7 +155,8 @@ export const api = {
   /** `copyOnly`: chỉ ghi một BẢN SAO sang chỗ mới, không đụng gì ở chỗ cũ (cứu dữ liệu khi file kho có vấn đề). */
   moveVault: (path: string, copyOnly = false) => call<MoveView>("move_vault", { path, copyOnly }),
   // Bản nháp & mật khẩu vừa tạo (giữ trong backend, đã mã hoá bằng khoá kho; giữ qua lần khoá)
-  setDraft: (draft: string | null) => call<void>("set_draft", { draft }),
+  /** `seq`: số thứ tự lấy LÚC chụp bản nháp (xem nextDraftSeq) — bản đến muộn mà cũ hơn bị backend bỏ. */
+  setDraft: (draft: string | null, seq: number = nextDraftSeq()) => call<void>("set_draft", { draft, draftSeq: seq }),
   getDraft: () => call<string | null>("get_draft"),
   recordGenerated: (value: string, label: string | null = null) => call<void>("record_generated", { value, label }),
   listGenerated: () => call<GeneratedItem[]>("list_generated"),
@@ -281,18 +284,33 @@ export function reloadPage(note?: string) {
   window.location.reload();
 }
 
-let beforeLock: (() => Promise<void>) | null = null;
-/** Việc cần làm ngay trước khi khoá bằng tay (ví dụ đẩy bản nháp của form đang sửa). Không bao giờ chặn việc khoá quá 1 giây. */
-export function onBeforeLock(h: (() => Promise<void>) | null) {
+let lastDraftSeq = 0;
+/** Số thứ tự tăng dần cho các lần ghi bản nháp (cả qua các lần nạp lại trang: dựa trên đồng hồ). */
+export function nextDraftSeq(): number {
+  lastDraftSeq = Math.max(Date.now() * 1000, lastDraftSeq + 1);
+  return lastDraftSeq;
+}
+
+let beforeLock: (() => { draft: string | null } | undefined) | null = null;
+/**
+ * Form đang sửa cho biết bản nháp nó giữ NGAY LÚC NÀY (undefined = không có gì để giữ, ví dụ form chưa tải xong). Khoá bằng
+ * tay gửi bản đó kèm lệnh khoá — không chờ gì cả.
+ */
+export function onBeforeLock(h: (() => { draft: string | null } | undefined) | null) {
   beforeLock = h;
 }
 
 /** Khoá kho rồi nạp lại trang. */
 export async function lockAndReload(note?: string) {
   if (reloading) return;
-  if (beforeLock) await Promise.race([beforeLock().catch(() => {}), new Promise((r) => setTimeout(r, 1000))]);
+  let form: { draft: string | null } | undefined;
   try {
-    await api.lock();
+    form = beforeLock?.();
+  } catch {
+    form = undefined;
+  }
+  try {
+    await api.lock(form);
   } catch {
     /* kho có thể đã khoá sẵn — vẫn nạp lại */
   }
