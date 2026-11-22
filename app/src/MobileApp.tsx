@@ -21,6 +21,22 @@ const pageLoadedOnce = () => (pageLoaded ??= api.pageLoaded().catch(() => {}));
 const NOT_PERSISTED_TEXT =
   "Ứng dụng vừa dùng chỉ cho pwv đọc file tạm thời: sau khi app bị đóng, có thể phải chọn lại file (hoặc app sẽ dùng bản đã lưu).";
 
+/** Cách chọn file lần gần nhất dùng được (nhớ trên máy này để nút "Lấy bản mới" dùng đúng cách). */
+function lastGoodMode(): "documents" | "apps" {
+  try {
+    return localStorage.getItem("pwv.pickMode") === "apps" ? "apps" : "documents";
+  } catch {
+    return "documents";
+  }
+}
+function rememberGoodMode(mode: "documents" | "apps") {
+  try {
+    localStorage.setItem("pwv.pickMode", mode);
+  } catch {
+    // không lưu được thì thôi
+  }
+}
+
 /** Lần chọn gần nhất qua "ứng dụng khác" mà Android không cho giữ quyền đọc lâu dài. */
 let lastPickNotPersisted = false;
 
@@ -30,6 +46,7 @@ async function chooseVaultFile(mode: "documents" | "apps" = "documents"): Promis
   try {
     const r = await api.pickVaultFile(mode);
     lastPickNotPersisted = !!r.uri && !r.persisted;
+    if (r.uri && r.readable) rememberGoodMode(mode);
     if (r.uri && !r.readable) {
       // Trình chọn trả về file mà không kèm quyền đọc: báo nguyên văn để chẩn đoán, không lưu đường dẫn đó.
       throw new PickError(
@@ -435,19 +452,26 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
           <div className="banner-body">
             Không đọc được file kho. <span className="muted small">{repickReason}</span>
           </div>
-          <button className="btn primary" onClick={() => repick()}>
+          <button className="btn primary" onClick={() => repick(lastGoodMode())}>
             Chọn lại file
           </button>
-          <button className="btn link small" onClick={() => repick("apps")}>
-            Chọn bằng ứng dụng khác
+          <button className="btn link small" onClick={() => repick(lastGoodMode() === "apps" ? "documents" : "apps")}>
+            {lastGoodMode() === "apps" ? "Dùng trình chọn của hệ thống" : "Chọn bằng ứng dụng khác"}
           </button>
         </div>
       )}
       {cacheNote && !repickReason && (
         <div className="banner m-banner">
           <div className="banner-body">
-            Đang dùng bản đã lưu trên điện thoại. <span className="muted small">{cacheNote}</span> Bấm ⟳ để thử nạp lại file kho.
+            Đang dùng bản đã lưu trên điện thoại. <span className="muted small">{cacheNote}</span> Bấm ⟳ để thử nạp lại file kho, hoặc
+            lấy bản mới bằng cách chọn lại file.
           </div>
+          <button className="btn primary" onClick={() => repick(lastGoodMode())}>
+            Lấy bản mới
+          </button>
+          <button className="btn link small" onClick={() => repick(lastGoodMode() === "apps" ? "documents" : "apps")}>
+            {lastGoodMode() === "apps" ? "Dùng trình chọn của hệ thống" : "Chọn bằng ứng dụng khác"}
+          </button>
         </div>
       )}
       <ul className="m-list">

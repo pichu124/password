@@ -47,9 +47,10 @@ class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
         return
       }
       // Một số bản Android của hãng (ColorOS, MIUI…) thay trình chọn tài liệu bằng trình quản lý file
-      // riêng chỉ hiện bộ nhớ máy. Ưu tiên trình chọn chuẩn (có Google Drive / Dropbox trong menu ☰);
-      // không có thì dùng trình chọn mặc định của máy.
-      for (pkg in listOf("com.google.android.documentsui", "com.android.documentsui", null)) {
+      // riêng chỉ hiện bộ nhớ máy. Thử trình chọn chuẩn của hệ thống trước (có Google Drive / Dropbox
+      // trong menu ☰). Trên ColorOS bản của Google tuy mở được nhưng KHÔNG cấp được quyền đọc (không
+      // phải trình chọn chính thức của máy) nên để sau cùng; không có gì thì dùng trình chọn mặc định.
+      for (pkg in listOf("com.android.documentsui", "com.google.android.documentsui", null)) {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         // Không lọc theo kiểu file: dịch vụ đồng bộ báo `.pwv` là application/octet-stream hoặc lạ hơn.
