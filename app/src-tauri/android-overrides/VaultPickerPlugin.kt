@@ -7,31 +7,67 @@
 // thoại khởi động lại. Chỉ xin quyền ĐỌC.
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
+import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 
+@InvokeArg
+class PickVaultArgs {
+  /** "documents" (mặc định): trình chọn tài liệu của hệ thống; "apps": chọn qua app Drive/Dropbox. */
+  var mode: String? = null
+}
+
 @TauriPlugin
 class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun pickVault(invoke: Invoke) {
+    val mode = try {
+      invoke.parseArgs(PickVaultArgs::class.java).mode
+    } catch (_: Exception) {
+      null
+    }
     try {
-      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-      intent.addCategory(Intent.CATEGORY_OPENABLE)
-      // Không lọc theo kiểu file: dịch vụ đồng bộ báo `.pwv` là application/octet-stream hoặc lạ hơn.
-      intent.type = "*/*"
-      intent.addFlags(
-        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-      )
-      startActivityForResult(invoke, intent, "pickVaultResult")
+      if (mode == "apps") {
+        // Dự phòng: danh sách app (Drive, Dropbox…) như bộ chọn cũ. Vẫn xin quyền lâu dài; app nào
+        // không cho thì quyền chỉ còn trong lần chạy này.
+        startActivityForResult(invoke, baseIntent(Intent.ACTION_GET_CONTENT), "pickVaultResult")
+        return
+      }
+      // Một số bản Android của hãng (ColorOS, MIUI…) thay trình chọn tài liệu bằng trình quản lý file
+      // riêng chỉ hiện bộ nhớ máy. Ưu tiên trình chọn chuẩn (có Google Drive / Dropbox trong menu ☰);
+      // không có thì dùng trình chọn mặc định của máy.
+      for (pkg in listOf("com.google.android.documentsui", "com.android.documentsui", null)) {
+        val intent = baseIntent(Intent.ACTION_OPEN_DOCUMENT)
+        if (pkg != null) intent.setPackage(pkg)
+        try {
+          startActivityForResult(invoke, intent, "pickVaultResult")
+          return
+        } catch (_: ActivityNotFoundException) {
+          // thử trình chọn kế tiếp
+        }
+      }
+      invoke.reject("Không tìm thấy trình chọn file trên máy")
     } catch (ex: Exception) {
       invoke.reject(ex.message ?: "Không mở được bộ chọn file")
     }
+  }
+
+  private fun baseIntent(action: String): Intent {
+    val intent = Intent(action)
+    intent.addCategory(Intent.CATEGORY_OPENABLE)
+    // Không lọc theo kiểu file: dịch vụ đồng bộ báo `.pwv` là application/octet-stream hoặc lạ hơn.
+    intent.type = "*/*"
+    intent.addFlags(
+      Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+    )
+    return intent
   }
 
   @ActivityCallback

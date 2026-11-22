@@ -732,23 +732,27 @@ fn vault_picker_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 /// Android: chọn file kho bằng ACTION_OPEN_DOCUMENT và giữ quyền đọc lâu dài (xem
 /// `android-overrides/VaultPickerPlugin.kt`). Nơi khác: lỗi (giao diện dùng bộ chọn thường).
 #[tauri::command]
-async fn pick_vault_file(app: tauri::AppHandle) -> AppResult<PickedVault> {
+async fn pick_vault_file(app: tauri::AppHandle, mode: Option<String>) -> AppResult<PickedVault> {
     #[cfg(target_os = "android")]
     {
+        let mode = match mode.as_deref() {
+            Some("apps") => "apps",
+            _ => "documents",
+        };
         blocking(move || {
             let picker = app
                 .try_state::<VaultPicker>()
                 .ok_or_else(|| AppError::new("error", "Bộ chọn file kho chưa sẵn sàng"))?;
             picker
                 .0
-                .run_mobile_plugin::<PickedVault>("pickVault", ())
+                .run_mobile_plugin::<PickedVault>("pickVault", serde_json::json!({ "mode": mode }))
                 .map_err(|e| AppError::new("error", format!("Không mở được bộ chọn file: {e}")))
         })
         .await
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, mode);
         Err(AppError::new("error", "Chỉ dùng trên Android"))
     }
 }

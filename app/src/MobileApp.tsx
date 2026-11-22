@@ -18,11 +18,18 @@ let pageLoaded: Promise<void> | null = null;
 /** Trang mới trên điện thoại ⇒ backend khoá lại cho chắc (Android có thể vừa dựng lại WebView). */
 const pageLoadedOnce = () => (pageLoaded ??= api.pageLoaded().catch(() => {}));
 
-async function chooseVaultFile(): Promise<string | null> {
+const NOT_PERSISTED_TEXT =
+  "Ứng dụng vừa dùng chỉ cho pwv đọc file tạm thời: sau khi app bị đóng, có thể phải chọn lại file (hoặc app sẽ dùng bản đã lưu).";
+
+/** Lần chọn gần nhất qua "ứng dụng khác" mà Android không cho giữ quyền đọc lâu dài. */
+let lastPickNotPersisted = false;
+
+async function chooseVaultFile(mode: "documents" | "apps" = "documents"): Promise<string | null> {
   // Bộ chọn riêng giữ quyền đọc file LÂU DÀI (bộ chọn thường chỉ cho quyền tạm thời, mất khi Android
   // đóng app ⇒ lần sau phải dùng bản đã lưu). Không có thì lùi về bộ chọn thường.
   try {
-    const r = await api.pickVaultFile();
+    const r = await api.pickVaultFile(mode);
+    lastPickNotPersisted = !!r.uri && !r.persisted;
     return r.uri ?? null;
   } catch {
     // Không lọc theo đuôi file: trên Android bộ lọc theo đuôi .pwv thường làm ẩn mất file.
@@ -88,11 +95,12 @@ export default function MobileApp() {
 
 function MobileSetup({ onDone }: { onDone: () => void }) {
   const toast = useToast();
-  async function choose() {
-    const p = await chooseVaultFile();
+  async function choose(mode: "documents" | "apps" = "documents") {
+    const p = await chooseVaultFile(mode);
     if (!p) return;
     try {
       await api.setVaultPath(p);
+      if (lastPickNotPersisted) toast(NOT_PERSISTED_TEXT, "info");
       onDone();
     } catch (e) {
       toast(errorText(e), "error");
@@ -110,8 +118,11 @@ function MobileSetup({ onDone }: { onDone: () => void }) {
             Bấm nút bên dưới, chọn dịch vụ đó trong danh sách bên trái, rồi chọn file <code>vault.pwv</code>.
           </li>
         </ol>
-        <button className="btn primary wide" onClick={choose}>
+        <button className="btn primary wide" onClick={() => choose()}>
           Chọn file kho
+        </button>
+        <button className="btn link small" onClick={() => choose("apps")}>
+          Không thấy Drive / Dropbox? Chọn bằng ứng dụng khác
         </button>
         <p className="muted small">Điện thoại chỉ đọc file kho, không bao giờ ghi vào — kho trên máy tính luôn an toàn.</p>
       </div>
@@ -294,14 +305,14 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
     }
   }
 
-  async function repick() {
-    const p = await chooseVaultFile();
+  async function repick(mode: "documents" | "apps" = "documents") {
+    const p = await chooseVaultFile(mode);
     if (!p) return;
     try {
       await api.repickReadonly(p);
       setRepickReason(null);
       clearCacheNote();
-      toast("Đã nạp file kho");
+      toast(lastPickNotPersisted ? NOT_PERSISTED_TEXT : "Đã nạp file kho", lastPickNotPersisted ? "info" : undefined);
       load();
       onStatus();
     } catch (e) {
@@ -358,7 +369,7 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
           <strong className="grow">Cài đặt</strong>
         </header>
         <div className="m-scroll">
-          <MobileSettings status={status} onRepick={repick} onOpenGenerator={() => setScreen({ kind: "generator" })} />
+          <MobileSettings status={status} onRepick={() => repick()} onRepickApps={() => repick("apps")} onOpenGenerator={() => setScreen({ kind: "generator" })} />
         </div>
       </div>
     );
@@ -391,7 +402,7 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
           <div className="banner-body">
             Không đọc được file kho. <span className="muted small">{repickReason}</span>
           </div>
-          <button className="btn primary" onClick={repick}>
+          <button className="btn primary" onClick={() => repick()}>
             Chọn lại file
           </button>
         </div>
@@ -428,7 +439,7 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
   );
 }
 
-function MobileSettings({ status, onRepick, onOpenGenerator }: { status: Status; onRepick: () => void; onOpenGenerator: () => void }) {
+function MobileSettings({ status, onRepick, onRepickApps, onOpenGenerator }: { status: Status; onRepick: () => void; onRepickApps: () => void; onOpenGenerator: () => void }) {
   const toast = useToast();
   const [s, setS] = useState<Settings | null>(null);
   const [version, setVersion] = useState("");
@@ -495,10 +506,13 @@ function MobileSettings({ status, onRepick, onOpenGenerator }: { status: Status;
         <p className="small m-path">{prettyLocation(status.vault_path)}</p>
         <p className="small">Dữ liệu cập nhật lúc {formatDateTime(status.modified_at)}</p>
         <p className="muted small">
-          Android chỉ cho đọc file trong một thời gian. Nếu nút ⟳ báo không đọc được file, hãy chọn lại file — không cần nhập lại mật khẩu chính.
+          Nếu nút ⟳ báo không đọc được file, hãy chọn lại file — không cần nhập lại mật khẩu chính. Trong màn hình chọn file, Google Drive / Dropbox nằm trong menu ☰ ở góc trên bên trái.
         </p>
         <button className="btn" onClick={onRepick}>
           Chọn lại file kho
+        </button>
+        <button className="btn link small" onClick={onRepickApps}>
+          Không thấy Drive / Dropbox? Chọn bằng ứng dụng khác
         </button>
       </section>
       <section className="card">
