@@ -32,6 +32,11 @@ Ghi chú của bản phát hành cho biết APK được ký bằng khoá nào. 
 mới phải gỡ bản cũ trước (kho trên Drive/Dropbox không bị ảnh hưởng; chỉ mất bản xem ngoại tuyến).
 Xem mục *Phát hành* để tạo khoá ký cố định.
 
+**Chọn file kho trên điện thoại:** trong màn hình chọn file, Google Drive / Dropbox nằm trong menu ☰
+(góc trên bên trái). Đã thử trên OnePlus (ColorOS): **Google Drive** giữ được quyền đọc sau khi app bị
+đóng. Nếu máy của bạn không cho giữ quyền (mỗi lần mở lại app báo «Đang dùng bản đã lưu…»), dùng nút
+**«Chọn bằng ứng dụng khác»**, và khi cần dữ liệu mới thì bấm **«Lấy bản mới»** trên thông báo đó.
+
 ### Khi nâng cấp lên 0.2.0
 
 **Hãy cập nhật MỌI thiết bị.** File kho chuyển sang định dạng mới mà bản cũ (0.1.x) không đọc/ghi
