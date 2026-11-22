@@ -546,8 +546,11 @@ fn read_location(app: &tauri::AppHandle, location: &str) -> AppResult<Vec<u8>> {
             // Quyền đọc tạm thời của bộ chọn file cũ (trước 0.2.1) đã hết khi app bị đóng.
             AppError::new(
                 "read_failed",
-                "Android không còn cho app đọc file kho (quyền đọc đã hết hạn). Vào Cài đặt → chọn \
-                 lại file kho: từ bản này quyền đọc được giữ lâu dài, chỉ cần làm một lần.",
+                format!(
+                    "Android không cho app đọc file kho (quyền đọc đã hết hạn hoặc chưa được cấp). \
+                     Vào Cài đặt → chọn lại file kho. Chi tiết: {}",
+                    msg.chars().take(300).collect::<String>()
+                ),
             )
         } else {
             AppError::new("read_failed", format!("Không đọc được file kho: {msg}"))
@@ -707,6 +710,15 @@ struct PickedVault {
     /// Android cho giữ quyền đọc lâu dài (còn sau khi app bị đóng).
     #[serde(default)]
     persisted: bool,
+    /// Đọc thử được ngay lúc chọn.
+    #[serde(default)]
+    readable: bool,
+    /// Lỗi khi đọc thử (nguyên văn, để chẩn đoán).
+    #[serde(default, rename = "readError")]
+    read_error: Option<String>,
+    /// Trình chọn đã được mở.
+    #[serde(default)]
+    picker: Option<String>,
 }
 
 #[cfg(target_os = "android")]

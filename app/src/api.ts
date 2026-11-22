@@ -179,7 +179,8 @@ export const api = {
   reloadReadonly: () => call<boolean>("reload_readonly"),
   repickReadonly: (location: string) => call<boolean>("repick_readonly", { location }),
   /** Android: bộ chọn file kho giữ quyền đọc lâu dài. */
-  pickVaultFile: (mode?: "documents" | "apps") => call<{ uri?: string | null; persisted: boolean }>("pick_vault_file", { mode: mode ?? null }),
+  pickVaultFile: (mode?: "documents" | "apps") =>
+    call<{ uri?: string | null; persisted: boolean; readable: boolean; read_error?: string | null; picker?: string | null }>("pick_vault_file", { mode: mode ?? null }),
   checkUpdate: () => call<UpdateInfo | null>("check_update"),
   /** Mở trang tải của một phiên bản (truyền số phiên bản, ví dụ `update.latest`, không phải địa chỉ). */
   openReleasePage: (version: string) => call<void>("open_release_page", { version }),

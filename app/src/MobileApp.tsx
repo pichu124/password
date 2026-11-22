@@ -30,12 +30,23 @@ async function chooseVaultFile(mode: "documents" | "apps" = "documents"): Promis
   try {
     const r = await api.pickVaultFile(mode);
     lastPickNotPersisted = !!r.uri && !r.persisted;
+    if (r.uri && !r.readable) {
+      // Trình chọn trả về file mà không kèm quyền đọc: báo nguyên văn để chẩn đoán, không lưu đường dẫn đó.
+      throw new PickError(
+        `Trình chọn file (${r.picker ?? "?"}) trả về file nhưng Android không cho pwv đọc nó. ` +
+          (mode === "documents" ? "Hãy thử nút «Chọn bằng ứng dụng khác». " : "") +
+          `Chi tiết kỹ thuật (chụp màn hình gửi người hỗ trợ): ${r.read_error ?? "không rõ"}`,
+      );
+    }
     return r.uri ?? null;
-  } catch {
+  } catch (e) {
+    if (e instanceof PickError) throw e;
     // Không lọc theo đuôi file: trên Android bộ lọc theo đuôi .pwv thường làm ẩn mất file.
     return pickFile({ title: "Chọn file vault.pwv", filters: [] });
   }
 }
+
+class PickError extends Error {}
 
 export default function MobileApp() {
   const toast = useToast();
@@ -95,8 +106,16 @@ export default function MobileApp() {
 
 function MobileSetup({ onDone }: { onDone: () => void }) {
   const toast = useToast();
+  const [pickError, setPickError] = useState<string | null>(null);
   async function choose(mode: "documents" | "apps" = "documents") {
-    const p = await chooseVaultFile(mode);
+    let p: string | null;
+    try {
+      p = await chooseVaultFile(mode);
+    } catch (e) {
+      setPickError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setPickError(null);
     if (!p) return;
     try {
       await api.setVaultPath(p);
@@ -124,6 +143,7 @@ function MobileSetup({ onDone }: { onDone: () => void }) {
         <button className="btn link small" onClick={() => choose("apps")}>
           Không thấy Drive / Dropbox? Chọn bằng ứng dụng khác
         </button>
+        {pickError && <p className="error small">{pickError}</p>}
         <p className="muted small">Điện thoại chỉ đọc file kho, không bao giờ ghi vào — kho trên máy tính luôn an toàn.</p>
       </div>
     </div>
@@ -167,7 +187,13 @@ function MobileUnlock({
   }
 
   async function changeFile() {
-    const p = await chooseVaultFile();
+    let p: string | null;
+    try {
+      p = await chooseVaultFile();
+    } catch (e) {
+      setError({ code: "read_failed", text: e instanceof Error ? e.message : String(e) });
+      return;
+    }
     if (!p) return;
     try {
       await api.setVaultPath(p);
@@ -306,7 +332,14 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
   }
 
   async function repick(mode: "documents" | "apps" = "documents") {
-    const p = await chooseVaultFile(mode);
+    let p: string | null;
+    try {
+      p = await chooseVaultFile(mode);
+    } catch (e) {
+      // Hiện lâu (không phải thông báo thoáng qua) để chụp màn hình được.
+      setRepickReason(e instanceof Error ? e.message : String(e));
+      return;
+    }
     if (!p) return;
     try {
       await api.repickReadonly(p);
@@ -369,7 +402,7 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
           <strong className="grow">Cài đặt</strong>
         </header>
         <div className="m-scroll">
-          <MobileSettings status={status} onRepick={() => repick()} onRepickApps={() => repick("apps")} onOpenGenerator={() => setScreen({ kind: "generator" })} />
+          <MobileSettings status={status} pickProblem={repickReason} onRepick={() => repick()} onRepickApps={() => repick("apps")} onOpenGenerator={() => setScreen({ kind: "generator" })} />
         </div>
       </div>
     );
@@ -405,6 +438,9 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
           <button className="btn primary" onClick={() => repick()}>
             Chọn lại file
           </button>
+          <button className="btn link small" onClick={() => repick("apps")}>
+            Chọn bằng ứng dụng khác
+          </button>
         </div>
       )}
       {cacheNote && !repickReason && (
@@ -439,7 +475,7 @@ function MobileVault({ status, cacheNote, clearCacheNote, onStatus }: { status: 
   );
 }
 
-function MobileSettings({ status, onRepick, onRepickApps, onOpenGenerator }: { status: Status; onRepick: () => void; onRepickApps: () => void; onOpenGenerator: () => void }) {
+function MobileSettings({ status, pickProblem, onRepick, onRepickApps, onOpenGenerator }: { status: Status; pickProblem: string | null; onRepick: () => void; onRepickApps: () => void; onOpenGenerator: () => void }) {
   const toast = useToast();
   const [s, setS] = useState<Settings | null>(null);
   const [version, setVersion] = useState("");
@@ -514,6 +550,7 @@ function MobileSettings({ status, onRepick, onRepickApps, onOpenGenerator }: { s
         <button className="btn link small" onClick={onRepickApps}>
           Không thấy Drive / Dropbox? Chọn bằng ứng dụng khác
         </button>
+        {pickProblem && <p className="error small">{pickProblem}</p>}
       </section>
       <section className="card">
         <h3>Công cụ</h3>

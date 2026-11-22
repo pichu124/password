@@ -26,6 +26,9 @@ class PickVaultArgs {
 
 @TauriPlugin
 class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
+  /** Trình chọn vừa được mở (để báo lại khi có lỗi). */
+  private var lastPicker: String = ""
+
   @Command
   fun pickVault(invoke: Invoke) {
     val mode = try {
@@ -35,18 +38,28 @@ class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
     }
     try {
       if (mode == "apps") {
-        // Dự phòng: danh sách app (Drive, Dropbox…) như bộ chọn cũ. Vẫn xin quyền lâu dài; app nào
-        // không cho thì quyền chỉ còn trong lần chạy này.
-        startActivityForResult(invoke, baseIntent(Intent.ACTION_GET_CONTENT), "pickVaultResult")
+        // Dự phòng: y hệt bộ chọn của plugin dialog (danh sách app Drive, Dropbox…), không thêm cờ gì.
+        val intent = Intent(Intent.ACTION_GET_CONTENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.type = "*/*"
+        lastPicker = "GET_CONTENT"
+        startActivityForResult(invoke, intent, "pickVaultResult")
         return
       }
       // Một số bản Android của hãng (ColorOS, MIUI…) thay trình chọn tài liệu bằng trình quản lý file
       // riêng chỉ hiện bộ nhớ máy. Ưu tiên trình chọn chuẩn (có Google Drive / Dropbox trong menu ☰);
       // không có thì dùng trình chọn mặc định của máy.
       for (pkg in listOf("com.google.android.documentsui", "com.android.documentsui", null)) {
-        val intent = baseIntent(Intent.ACTION_OPEN_DOCUMENT)
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        // Không lọc theo kiểu file: dịch vụ đồng bộ báo `.pwv` là application/octet-stream hoặc lạ hơn.
+        intent.type = "*/*"
+        intent.addFlags(
+          Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+        )
         if (pkg != null) intent.setPackage(pkg)
         try {
+          lastPicker = pkg ?: "OPEN_DOCUMENT (mặc định)"
           startActivityForResult(invoke, intent, "pickVaultResult")
           return
         } catch (_: ActivityNotFoundException) {
@@ -59,24 +72,17 @@ class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
-  private fun baseIntent(action: String): Intent {
-    val intent = Intent(action)
-    intent.addCategory(Intent.CATEGORY_OPENABLE)
-    // Không lọc theo kiểu file: dịch vụ đồng bộ báo `.pwv` là application/octet-stream hoặc lạ hơn.
-    intent.type = "*/*"
-    intent.addFlags(
-      Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-    )
-    return intent
-  }
-
   @ActivityCallback
   fun pickVaultResult(invoke: Invoke, result: ActivityResult) {
-    val uri = result.data?.data
+    val data = result.data
+    // Một số app trả file trong ClipData thay vì `data`.
+    val uri = data?.data ?: data?.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
     val ret = JSObject()
+    ret.put("picker", lastPicker)
     if (result.resultCode != Activity.RESULT_OK || uri == null) {
       // Người dùng huỷ: không có `uri`.
       ret.put("persisted", false)
+      ret.put("readable", false)
       invoke.resolve(ret)
       return
     }
@@ -87,11 +93,22 @@ class VaultPickerPlugin(private val activity: Activity) : Plugin(activity) {
         Intent.FLAG_GRANT_READ_URI_PERMISSION
       )
       persisted = true
-    } catch (_: SecurityException) {
+    } catch (_: Exception) {
       // Nhà cung cấp không cho giữ quyền lâu dài: vẫn đọc được trong lần chạy này.
+    }
+    // Đọc thử ngay (lúc quyền chắc chắn còn): nếu không đọc được thì báo nguyên văn lỗi.
+    var readable = false
+    var readError: String? = null
+    try {
+      activity.contentResolver.openInputStream(uri)?.use { it.read() }
+      readable = true
+    } catch (ex: Exception) {
+      readError = ex.javaClass.simpleName + ": " + (ex.message ?: "")
     }
     ret.put("uri", uri.toString())
     ret.put("persisted", persisted)
+    ret.put("readable", readable)
+    if (readError != null) ret.put("readError", readError.take(400))
     invoke.resolve(ret)
   }
 }
