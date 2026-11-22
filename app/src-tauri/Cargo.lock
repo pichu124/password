@@ -3226,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "pwv-app"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arboard",
  "pwv-generator",
@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "pwv-generator"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rand",
  "serde",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "pwv-health"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "pwv-generator",
  "pwv-vault-core",
@@ -3273,7 +3273,7 @@ dependencies = [
 
 [[package]]
 name = "pwv-vault-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "argon2",
  "base64 0.22.1",
